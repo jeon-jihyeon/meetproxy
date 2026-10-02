@@ -1,0 +1,27 @@
+# build output
+# Only the root bin, plugin/bin holds the committed launcher
+/bin/
+/dist/
+
+/evals/results/
+/meetproxy
+/demo
+/.meetproxy
+*.test
+*.prof
+
+# local records and settings
+/.claude/meetproxy/
+.claude/settings.local.json
+CLAUDE.local.md
+/tmp
+
+# environment
+.env*
+!.env.example
+
+# editors and the OS
+.vscode
+.idea
+*.swp
+.DS_Store

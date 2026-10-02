@@ -1,0 +1,12 @@
+{
+  "name": "meetproxy",
+  "owner": {
+    "name": "jeon-jihyeon"
+  },
+  "plugins": [
+    {
+      "name": "meetproxy",
+      "source": "./plugin"
+    }
+  ]
+}

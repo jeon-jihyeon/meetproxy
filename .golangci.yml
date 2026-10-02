@@ -1,0 +1,46 @@
+version: "2"
+linters:
+  enable:
+    - depguard
+    - dupl
+    - funlen
+    - gocritic
+    - gocyclo
+    - nakedret
+    - revive
+    - unparam
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    funlen:
+      lines: 70
+      statements: 50
+    dupl:
+      threshold: 120
+    gocyclo:
+      min-complexity: 15
+    revive:
+      rules:
+        - name: comment-spacings
+          disabled: true
+        - name: exported
+          disabled: true
+    depguard:
+      rules:
+        leaf:
+          files:
+            - "**/internal/locmap/**"
+          deny:
+            - pkg: github.com/jeon-jihyeon/meetproxy/cmd
+              desc: nothing imports cmd
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - dupl
+          - funlen
+          - gocyclo
+          - unparam
