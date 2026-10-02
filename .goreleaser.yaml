@@ -1,0 +1,28 @@
+version: 2
+
+builds:
+  - main: ./cmd/meetproxy
+    binary: meetproxy
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+# The launcher downloads these from the release tagged v<plugin.json version>
+archives:
+  - formats: [tar.gz]
+    name_template: "meetproxy_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  draft: false

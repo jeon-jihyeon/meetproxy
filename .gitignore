@@ -1,0 +1,29 @@
+# build output
+# Only the root bin, plugin/bin holds the committed launcher
+/bin/
+/dist/
+
+# eval cases with real conversation text and run results
+/evals-private/
+/evals/results/
+/meetproxy
+/demo
+/.meetproxy
+*.test
+*.prof
+
+# local records, vetoes and settings
+/.claude/meetproxy/
+.claude/settings.local.json
+CLAUDE.local.md
+/tmp
+
+# environment
+.env*
+!.env.example
+
+# editors and the OS
+.vscode
+.idea
+*.swp
+.DS_Store

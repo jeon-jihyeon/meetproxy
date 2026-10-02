@@ -1,0 +1,14 @@
+{
+  "name": "meetproxy",
+  "description": "Claude Code plugin that relays requests between people and AI sessions so you stop copy pasting",
+  "owner": {
+    "name": "jeon-jihyeon"
+  },
+  "plugins": [
+    {
+      "name": "meetproxy",
+      "source": "./plugin",
+      "description": "Stop being a meat proxy. Relays requests into your open Claude Code session and posts refined answers back, remembering where each answer was found."
+    }
+  ]
+}

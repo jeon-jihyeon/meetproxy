@@ -1,0 +1,58 @@
+version: "2"
+linters:
+  enable:
+    - depguard
+    - dupl
+    - funlen
+    - gocritic
+    - gocyclo
+    - nakedret
+    - revive
+    - unparam
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    funlen:
+      lines: 70
+      statements: 50
+    dupl:
+      threshold: 120
+    gocyclo:
+      min-complexity: 15
+    revive:
+      rules:
+        - name: comment-spacings
+          disabled: true
+        - name: exported
+          disabled: true
+    # Imports point down only: cmd uses everything, relay uses locmap, locmap and dest use nothing
+    depguard:
+      rules:
+        leaf:
+          files:
+            - "**/internal/locmap/**"
+            - "**/internal/dest/**"
+          deny:
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/relay
+              desc: locmap and dest do not import relay
+            - pkg: github.com/jeon-jihyeon/meetproxy/cmd
+              desc: nothing imports cmd
+        relay:
+          files:
+            - "**/internal/relay/**"
+          deny:
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/dest
+              desc: relay does not know about posting
+            - pkg: github.com/jeon-jihyeon/meetproxy/cmd
+              desc: nothing imports cmd
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - dupl
+          - funlen
+          - gocyclo
+          - unparam
