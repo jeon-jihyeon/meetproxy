@@ -1,0 +1,128 @@
+#!/bin/sh
+# Runs the meetproxy binary matching the plugin version, found in this order
+# 1. a dev build when the plugin is loaded from its source tree
+# 2. ~/.meetproxy/bin/v<version>/meetproxy
+# 3. the GitHub release, verified against checksums.txt
+# 4. go install of the same version
+# 5. another meetproxy on PATH
+set -eu
+
+REPO="jeon-jihyeon/meetproxy"
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+MANIFEST="${ROOT}/.claude-plugin/plugin.json"
+SRC=$(dirname -- "$ROOT")
+
+# Without a binary the guard exits 2 to block the tool call and the path hook exits 0 to stay quiet
+fail() {
+  echo "meetproxy: $1" >&2
+  case "${MODE}" in
+    guard) exit 2 ;;
+    hook) exit 0 ;;
+  esac
+  exit 1
+}
+MODE=cli
+if [ "${1:-}" = hook ] && [ "${2:-}" = guard ]; then
+  MODE=guard
+elif [ "${1:-}" = hook ]; then
+  MODE=hook
+fi
+
+version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)
+[ -n "$version" ] || fail "no version in ${MANIFEST}"
+TAG="v${version}"
+
+# Rebuilds when sources are newer and renames into place so a partial file never runs
+if [ -f "${SRC}/go.mod" ] && grep -q "^module github.com/${REPO}\$" "${SRC}/go.mod" && command -v go >/dev/null 2>&1; then
+  DEV_BIN="${SRC}/bin/meetproxy"
+  if [ ! -x "$DEV_BIN" ] || [ -n "$(find "${SRC}/cmd" "${SRC}/internal" "${SRC}/go.mod" -newer "$DEV_BIN" 2>/dev/null | head -n 1)" ]; then
+    mkdir -p "${SRC}/bin"
+    tmp="${DEV_BIN}.$$"
+    if (cd "$SRC" && go build -o "$tmp" ./cmd/meetproxy) >&2; then
+      mv -f "$tmp" "$DEV_BIN"
+    else
+      rm -f "$tmp"
+      fail "could not build ${SRC}"
+    fi
+  fi
+  exec "$DEV_BIN" "$@"
+fi
+
+BIN_DIR="${HOME}/.meetproxy/bin/${TAG}"
+BIN="${BIN_DIR}/meetproxy"
+if [ -x "$BIN" ]; then
+  exec "$BIN" "$@"
+fi
+
+os=$(uname -s | tr '[:upper:]' '[:lower:]')
+arch=$(uname -m)
+case "$arch" in
+  x86_64) arch=amd64 ;;
+  aarch64 | arm64) arch=arm64 ;;
+esac
+ARCHIVE="meetproxy_${os}_${arch}.tar.gz"
+BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d ' ' -f 1
+    return
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | cut -d ' ' -f 1
+    return
+  fi
+  return 1
+}
+
+# Returns 1 to try the next source and exits on a checksum mismatch
+fetch() {
+  command -v curl >/dev/null 2>&1 || return 1
+  mkdir -p "$BIN_DIR" || return 1
+  tmp=$(mktemp -d "${BIN_DIR}/.fetch.XXXXXX") || return 1
+  if ! curl -fsSL "${BASE_URL}/${ARCHIVE}" -o "${tmp}/${ARCHIVE}" 2>/dev/null ||
+    ! curl -fsSL "${BASE_URL}/checksums.txt" -o "${tmp}/checksums.txt" 2>/dev/null; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! got=$(sha256 "${tmp}/${ARCHIVE}") || [ -z "$got" ]; then
+    rm -rf "$tmp"
+    echo "meetproxy: cannot compute the sha256 of ${ARCHIVE}, so it is not trusted" >&2
+    return 1
+  fi
+  want=$(awk -v f="$ARCHIVE" '$2 == f { print $1 }' "${tmp}/checksums.txt")
+  if [ -z "$want" ] || [ "$want" != "$got" ]; then
+    rm -rf "$tmp"
+    fail "checksum of ${BASE_URL}/${ARCHIVE} does not match checksums.txt, refusing to run it"
+  fi
+  if ! tar -xzf "${tmp}/${ARCHIVE}" -C "$tmp" meetproxy || ! chmod +x "${tmp}/meetproxy" || ! mv -f "${tmp}/meetproxy" "$BIN"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  rm -rf "$tmp"
+  echo "meetproxy: fetched ${BASE_URL}/${ARCHIVE} into ${BIN}" >&2
+}
+
+if fetch; then
+  exec "$BIN" "$@"
+fi
+
+if command -v go >/dev/null 2>&1; then
+  echo "meetproxy: could not fetch release ${TAG} for ${os}/${arch}, building with go install" >&2
+  if GOBIN="$BIN_DIR" go install "github.com/${REPO}/cmd/meetproxy@${TAG}" >&2; then
+    exec "$BIN" "$@"
+  fi
+fi
+
+# Skips this launcher itself when the plugin bin directory is on PATH
+found=$(command -v meetproxy 2>/dev/null || true)
+if [ -n "$found" ] && [ ! "$found" -ef "$0" ]; then
+  have=$("$found" version 2>/dev/null || echo unknown)
+  case "$have" in
+    "$version" | "v$version") ;;
+    *) echo "meetproxy: running ${found} from PATH, version ${have} where the plugin expects ${version}" >&2 ;;
+  esac
+  exec "$found" "$@"
+fi
+
+fail "could not fetch ${TAG} from ${BASE_URL} or build it with Go. Install Go from https://go.dev/dl and run again"
