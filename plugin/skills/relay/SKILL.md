@@ -40,7 +40,7 @@ Relay one request link end to end without asking the user anything.
    - Post where the user said, otherwise where the request came from.
    - Post only when `meetproxy dest --data "${CLAUDE_PLUGIN_DATA}" <destination>` prints `allowed`. A link works as the destination.
    - On `denied`, print the refined answer instead and say that `/meetproxy:allow github:owner/*` or similar is needed.
-   - Every `gh` posting command must carry `repos/owner/repo` or `--repo`. Posts with an unknown repository are denied.
+   - Every `gh` posting command must name its repository with `--repo`, a `repos/owner/repo` path or a PR link. Posts with an unknown repository are denied, and so is a post that names any repository outside the allow list.
 7. Record
    - Run `meetproxy close --data "${CLAUDE_PLUGIN_DATA}" --topic "<one line topic>" --keywords "<k1,k2>" --paths "<abs path,abs path>"`.
    - Pick keywords the next similar request would use, mixing the requester's words and code terms.

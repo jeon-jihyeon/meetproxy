@@ -12,11 +12,17 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 MANIFEST="${ROOT}/.claude-plugin/plugin.json"
 SRC=$(dirname -- "$ROOT")
 
-# Without a binary the guard exits 2 to block the tool call and the path hook exits 0 to stay quiet
+# Without a binary the guard blocks the tool call with exit 2 only while a relay is open
+# The path hook exits 0 to stay quiet
 fail() {
   echo "meetproxy: $1" >&2
   case "${MODE}" in
-    guard) exit 2 ;;
+    guard)
+      if [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && [ -z "$(ls -A "${CLAUDE_PLUGIN_DATA}/relay/open" 2>/dev/null)" ]; then
+        exit 0
+      fi
+      exit 2
+      ;;
     hook) exit 0 ;;
   esac
   exit 1

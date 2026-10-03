@@ -14,7 +14,7 @@ import (
 )
 
 // Tools the launcher uses before the PATH fallback, without curl and go
-var launcherTools = []string{"awk", "cat", "chmod", "cut", "dirname", "find", "grep", "head", "mkdir", "mktemp", "mv", "rm", "sed", "tar", "tr", "uname"}
+var launcherTools = []string{"awk", "cat", "chmod", "cut", "dirname", "find", "grep", "head", "ls", "mkdir", "mktemp", "mv", "rm", "sed", "tar", "tr", "uname"}
 
 // A launcher copy outside the source tree with a version no release has
 func launcher(t *testing.T) (script, tools string) {
@@ -53,6 +53,7 @@ func TestLauncher(t *testing.T) {
 	type args struct {
 		cached bool
 		onPath bool
+		relay  string
 		cmd    []string
 	}
 	type want struct {
@@ -64,11 +65,13 @@ func TestLauncher(t *testing.T) {
 		args args
 		want want
 	}{
-		{"runs the cached binary", args{true, false, []string{"hook", "path"}}, want{0, "cached hook path"}},
-		{"falls back to PATH", args{false, true, []string{"open", "x"}}, want{0, "path open x"}},
-		{"guard blocks with exit 2 without a binary", args{false, false, []string{"hook", "guard"}}, want{2, ""}},
-		{"path hook passes quietly without a binary", args{false, false, []string{"hook", "path"}}, want{0, ""}},
-		{"other commands fail without a binary", args{false, false, []string{"version"}}, want{1, ""}},
+		{"runs the cached binary", args{true, false, "none", []string{"hook", "path"}}, want{0, "cached hook path"}},
+		{"falls back to PATH", args{false, true, "none", []string{"open", "x"}}, want{0, "path open x"}},
+		{"guard blocks without a binary while a relay is open", args{false, false, "open", []string{"hook", "guard"}}, want{2, ""}},
+		{"guard passes without a binary when no relay is open", args{false, false, "none", []string{"hook", "guard"}}, want{0, ""}},
+		{"guard blocks without a binary or a data dir", args{false, false, "", []string{"hook", "guard"}}, want{2, ""}},
+		{"path hook passes quietly without a binary", args{false, false, "none", []string{"hook", "path"}}, want{0, ""}},
+		{"other commands fail without a binary", args{false, false, "none", []string{"version"}}, want{1, ""}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -83,6 +86,15 @@ func TestLauncher(t *testing.T) {
 			}
 			cmd := exec.Command(script, tc.args.cmd...)
 			cmd.Env = []string{"HOME=" + home, "PATH=" + pathDir + string(os.PathListSeparator) + tools}
+			if tc.args.relay != "" {
+				data := t.TempDir()
+				cmd.Env = append(cmd.Env, "CLAUDE_PLUGIN_DATA="+data)
+				if tc.args.relay == "open" {
+					open := filepath.Join(data, "relay", "open")
+					require.NoError(t, os.MkdirAll(open, 0o755))
+					require.NoError(t, os.WriteFile(filepath.Join(open, "s1.json"), []byte("{}"), 0o600))
+				}
+			}
 
 			out, err := cmd.Output()
 

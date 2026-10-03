@@ -179,3 +179,42 @@ func TestStoreObserved_CorruptLine(t *testing.T) {
 
 	assert.ErrorContains(t, err, "line 1 is corrupt")
 }
+
+func TestStoreOpen_PrunesStale(t *testing.T) {
+	t.Parallel()
+	tcs := []struct {
+		name string
+		gap  time.Duration
+		want error
+	}{
+		{"closes a relay left open for over a week", 8 * 24 * time.Hour, relay.ErrNoOpen},
+		{"keeps a recent relay of another session", 24 * time.Hour, nil},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := relay.New(t.TempDir())
+			now := time.Now()
+			_, err := s.Open("old", "o1", now)
+			require.NoError(t, err)
+
+			_, err = s.Open("new", "o2", now.Add(tc.gap))
+			require.NoError(t, err)
+
+			_, err = s.Current("old")
+			assert.Equal(t, tc.want, err)
+		})
+	}
+}
+
+func TestStoreCurrent_Corrupt(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "relay", "open", "s1.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o755))
+	require.NoError(t, os.WriteFile(file, []byte("{broken"), 0o644))
+
+	_, err := relay.New(dir).Current("s1")
+
+	assert.ErrorContains(t, err, "remove it to reset")
+}

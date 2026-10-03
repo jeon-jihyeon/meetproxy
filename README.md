@@ -3,7 +3,8 @@
 </div>
 
 <div align="center">
-  <h3>Stop being a meat proxy.</h3>
+  <h3>meetproxy, not meatproxy.</h3>
+  <p>Stop being a meat proxy.</p>
 </div>
 
 <div align="center">
@@ -17,8 +18,15 @@
 
 meetproxy is a Claude Code plugin that carries requests between people and your AI session so you don't have to. A teammate asks in Slack or on a PR, meetproxy brings the request into the session you already have open, and the refined answer goes back where it was asked. Every answer leaves a note of the code it came from, so the next similar request starts in the right place.
 
-> [!TIP]
-> Not sure what a meat proxy is? Read [Don't be a meat proxy](https://gruhn.me/blog/2026-08-03/), the post that named the habit of pasting AI output back and forth without adding anything.
+## Why meetproxy?
+
+A meat proxy is a person who sits between a coworker and an AI and only carries text: the question goes in by copy paste, the answer comes out the same way, unread.
+
+- **The word** — `meat` is old hacker slang for the human attached to a machine, as in [meatware](http://catb.org/jargon/html/M/meatware.html), and a `proxy` forwards traffic without changing it
+- **The meme** — The earliest AI use we found is [Meat-based LLM proxies](https://not-an-llm.com/meat-based-llm-proxies) in March 2026. It spread with Niklas Gruhn's [Don't be a meat proxy](https://gruhn.me/blog/2026-08-03/) and its [Hacker News thread](https://news.ycombinator.com/item?id=49151933) in August 2026
+- **The cost** — Generating an answer got cheap but checking it did not, so the reader [pays for the verification](https://agentpatterns.ai/patterns/anti-patterns/meat-proxy/) the carrier skipped
+
+meetproxy was built to remove that role. The carrying is automated, the judgment a relay should add still happens in your session, and every post says it was written by Claude. The requester meets the answer directly. That is the `meet` in the name.
 
 ## Quickstart
 
@@ -48,11 +56,11 @@ A person in the middle makes three calls before pasting anything. meetproxy make
 
 - **[relay skill](plugin/skills/relay/SKILL.md)** — The flow from a request link to a posted answer
 - **[allow skill](plugin/skills/allow/SKILL.md)** — The repositories and channels meetproxy may post to
-- **Posting guard** — A PreToolUse hook that blocks posts outside the allow list while a relay is open, including chained `gh` commands and direct API calls
+- **Posting guard** — A PreToolUse hook that blocks posts outside the allow list while a relay is open. Every repository a `gh` write names must pass, including commands chained, wrapped or run through `bash -c`, and direct API calls are denied. Commands that do not post are never blocked
 - **Location map** — A PostToolUse hook that records the paths read while handling a request, and `meetproxy locate` to find them for the next one
 - **[Launcher](plugin/bin/meetproxy)** — Runs the binary for the plugin version from a cache, a checksum verified release, or `go install`
 
-## Why use meetproxy?
+## Features
 
 - **Your session, your context** — Requests land in the Claude Code session you already have open, with your files, rules and history, instead of a fresh cloud sandbox
 - **Gets better with use** — Each answer records the code it rests on, so the next similar request starts from the right files
