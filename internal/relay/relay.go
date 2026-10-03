@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/jeon-jihyeon/meetproxy/internal/locmap"
@@ -29,6 +30,9 @@ func New(dataDir string) Store { return Store{dir: filepath.Join(dataDir, "relay
 
 var ErrNoOpen = errors.New("no open relay")
 
+// Open relays left by ended sessions are closed after this
+const staleAfter = 7 * 24 * time.Hour
+
 // Continues an open relay of the same origin and closes one of another origin
 func (s Store) Open(sessionId, origin string, now time.Time) (Relay, error) {
 	cur, err := s.Current(sessionId)
@@ -42,6 +46,7 @@ func (s Store) Open(sessionId, origin string, now time.Time) (Relay, error) {
 	case !errors.Is(err, ErrNoOpen):
 		return Relay{}, err
 	}
+	s.prune(now)
 	b := make([]byte, 3)
 	if _, err := rand.Read(b); err != nil {
 		return Relay{}, err
@@ -71,7 +76,25 @@ func (s Store) Current(sessionId string) (Relay, error) {
 		return Relay{}, err
 	}
 	var r Relay
-	return r, json.Unmarshal(b, &r)
+	if err := json.Unmarshal(b, &r); err != nil {
+		return Relay{}, fmt.Errorf("%s is corrupt, remove it to reset the relay: %w", s.openFile(sessionId), err)
+	}
+	return r, nil
+}
+
+// Best effort since a stale relay only guards a session that has ended
+func (s Store) prune(now time.Time) {
+	entries, err := os.ReadDir(filepath.Join(s.dir, "open"))
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil || now.Sub(info.ModTime()) < staleAfter {
+			continue
+		}
+		_, _ = s.Close(strings.TrimSuffix(e.Name(), ".json"), now)
+	}
 }
 
 func (s Store) Observe(sessionId string, p locmap.Path) error {
