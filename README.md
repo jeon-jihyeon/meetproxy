@@ -3,7 +3,8 @@
 </div>
 
 <div align="center">
-  <h3>Stop being a meat proxy.</h3>
+  <h3>meetproxy, not meatproxy.</h3>
+  <p>Stop being a meat proxy.</p>
 </div>
 
 <div align="center">
@@ -15,8 +16,13 @@
 
 <br>
 
-> [!TIP]
-> Not sure what a meat proxy is? Read [Don't be a meat proxy](https://gruhn.me/blog/2026-08-03/), the post that named the habit of pasting AI output back and forth without adding anything.
+## Why meetproxy?
+
+A meat proxy is a person who sits between a coworker and an AI and only carries text: the question goes in by copy paste, the answer comes out the same way, unread.
+
+- **The word** — `meat` is old hacker slang for the human attached to a machine, as in [meatware](http://catb.org/jargon/html/M/meatware.html), and a `proxy` forwards traffic without changing it
+- **The meme** — The earliest AI use we found is [Meat-based LLM proxies](https://not-an-llm.com/meat-based-llm-proxies) in March 2026. It spread with Niklas Gruhn's [Don't be a meat proxy](https://gruhn.me/blog/2026-08-03/) and its [Hacker News thread](https://news.ycombinator.com/item?id=49151933) in August 2026
+- **The cost** — Generating an answer got cheap but checking it did not, so the reader [pays for the verification](https://agentpatterns.ai/patterns/anti-patterns/meat-proxy/) the carrier skipped
 
 ## Quickstart
 
@@ -35,7 +41,7 @@ A person in the middle makes three calls before pasting anything. meetproxy make
 
 - **[Launcher](plugin/bin/meetproxy)** — Runs the binary for the plugin version from a cache, a checksum verified release, or `go install`
 
-## Why use meetproxy?
+## Features
 
 - **Small and local** — One Go binary on the standard library, with data kept in the plugin data directory
 
