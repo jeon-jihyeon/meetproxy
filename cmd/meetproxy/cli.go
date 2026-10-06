@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/jeon-jihyeon/meetproxy/internal/dest"
 	"github.com/jeon-jihyeon/meetproxy/internal/guard"
+	"github.com/jeon-jihyeon/meetproxy/internal/inbox"
 	"github.com/jeon-jihyeon/meetproxy/internal/locmap"
 	"github.com/jeon-jihyeon/meetproxy/internal/relay"
 )
@@ -24,6 +26,11 @@ type cli struct {
 
 func printVersion(c cli, _ []string, _ flags) (int, error) {
 	_, err := fmt.Fprintln(c.out, version)
+	return exitCode(err)
+}
+
+func printProtocol(c cli, _ []string, _ flags) (int, error) {
+	_, err := fmt.Fprintln(c.out, protocol)
 	return exitCode(err)
 }
 
@@ -131,7 +138,12 @@ func (c cli) close(topic string, keywords, paths []string) error {
 	if err != nil {
 		return err
 	}
-	// The location map keeps the last record of a relay so a close that failed part way runs again
+	// Each step repeats without harm so a close that failed part way runs again
+	// 1. a done request may be marked done again
+	// 2. the location map keeps the last record of a relay
+	if err := inbox.New(c.data).DoneByLink(r.Origin, c.session, c.now); err != nil {
+		return err
+	}
 	e := locmap.Entry{RelayId: r.Id, Topic: topic, Keywords: keywords, Paths: ps, RecordedAt: c.now.UTC()}
 	if err := locmap.New(c.data).Add(e); err != nil {
 		return err
@@ -141,4 +153,45 @@ func (c cli) close(topic string, keywords, paths []string) error {
 	}
 	fmt.Fprintf(c.out, "%s closed · %d paths\n", r.Id, len(ps))
 	return nil
+}
+
+// What the plugin mod reads once per tick
+type tick struct {
+	Protocol int `json:"protocol"`
+	// Root and name of the place of the session directory
+	Place string `json:"place"`
+	Name  string `json:"name"`
+	// Every waiting request oldest first
+	Waiting []waitingRow `json:"waiting"`
+}
+
+type waitingRow struct {
+	Id     string       `json:"id"`
+	Status inbox.Status `json:"status"`
+	Place  string       `json:"place"`
+	Name   string       `json:"name"`
+	// Unix seconds
+	Added int64  `json:"added"`
+	Link  string `json:"link"`
+	// The request belongs to the place of the session
+	Here bool `json:"here"`
+}
+
+func (c cli) tick(cwd string) error {
+	if cwd == "" {
+		return fmt.Errorf("%w: tick needs --cwd", errUsage)
+	}
+	root, name := locmap.Place(cwd)
+	items, err := inbox.New(c.data).Waiting(c.now)
+	if err != nil {
+		return err
+	}
+	rows := make([]waitingRow, 0, len(items))
+	for _, it := range items {
+		rows = append(rows, waitingRow{
+			Id: it.Id, Status: it.Status, Place: it.Place, Name: it.Name,
+			Added: it.AddedAt.Unix(), Link: it.Link, Here: it.At(root, name),
+		})
+	}
+	return json.NewEncoder(c.out).Encode(tick{Protocol: protocol, Place: root, Name: name, Waiting: rows})
 }

@@ -1,8 +1,10 @@
 {
   "name": "meetproxy",
-  "version": "0.1.3",
-  "description": "Stop being a meat proxy. Relays requests into your open Claude Code session and posts refined answers back, remembering where each answer was found.",
-  "author": { "name": "jeon-jihyeon" },
+  "version": "0.1.4",
+  "description": "Stop being a meat proxy. Takes Slack and GitHub requests into the open Claude Code session where the work map places them and posts refined answers back, remembering where each answer was found.",
+  "author": {
+    "name": "jeon-jihyeon"
+  },
   "repository": "https://github.com/jeon-jihyeon/meetproxy",
   "license": "MIT"
 }
