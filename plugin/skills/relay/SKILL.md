@@ -3,7 +3,7 @@ name: relay
 description: Relay a request from a Slack thread or a GitHub pull request or issue to this session and post the refined answer back without the user carrying it by hand. Run with the request link as the argument.
 disable-model-invocation: true
 argument-hint: "<Slack or GitHub link>"
-allowed-tools: Bash(meetproxy *)
+allowed-tools: Read, Bash(meetproxy *)
 ---
 
 # relay
@@ -37,6 +37,12 @@ Relay one request link end to end without asking the user anything.
    - Refine for the recipient: conclusion first, one piece of evidence they can check, and a first person hedge such as `I'm not sure, but` when confidence is low.
    - Mention code paths and function names only to developers.
 6. Post
+   - First write it the way the user writes that kind
+     1. The kind is `slack-message` for a Slack link, `review-comment` for a pull request link and `issue` for an issue link
+     2. Run `meetproxy map format --data "${CLAUDE_PLUGIN_DATA}" <kind>`
+     3. Read each guide line `file:line heading` from that line of its file up to the next heading of the same level, and follow it
+     4. Match the length, structure and tone of the examples, never their content. Skills listed there may write that kind
+     5. Empty output or an error means the map knows nothing of it. Write as usual
    - Post where the request came from. Anywhere else only when the user said so and `meetproxy dest --data "${CLAUDE_PLUGIN_DATA}" <destination>` prints `allowed`. A link works as the destination.
    - On a denial, print the refined answer instead and say that `/meetproxy:allow <destination>` is needed.
    - Every `gh` posting command must name its repository with `--repo`, a `repos/owner/repo` path or a PR link. Posts with an unknown repository are denied, and so is a post that names any repository outside the allow list.
