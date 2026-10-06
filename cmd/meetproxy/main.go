@@ -9,15 +9,21 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/jeon-jihyeon/meetproxy/internal/triage"
 )
 
 // Set by ldflags in release builds
 var version = "dev"
 
+// The command set the plugin mod speaks
+// Raised whenever a command the mod calls changes so an older mod stops instead of misreading
+const protocol = 5
+
 const (
 	exitFailed = 1
 	exitUsage  = 2
-	// Results locate prints without --limit
+	// Results locate and inbox list print without --limit
 	defaultLimit = 10
 	// Width of the command column in the usage text
 	usageColumn = 32
@@ -34,7 +40,7 @@ func main() {
 	cmd, args := os.Args[1], os.Args[2:]
 	if cmd == "hook" {
 		// Exit 0 so a broken hook never blocks the session
-		if err := runHook(os.Getenv("CLAUDE_PLUGIN_DATA"), args, os.Stdin, os.Stdout); err != nil {
+		if err := runHook(os.Getenv("CLAUDE_PLUGIN_DATA"), args, time.Now(), os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "meetproxy hook:", err)
 		}
 		return
@@ -48,7 +54,7 @@ func main() {
 
 // A command line of the CLI
 type command struct {
-	// Words that name it such as map refresh
+	// Words that name it such as inbox add
 	name string
 	// Positional arguments as the usage text shows them
 	args string
@@ -74,6 +80,13 @@ type family struct {
 var families = []family{
 	{"setup", []command{
 		{name: "version", noData: true, help: "print the binary version", run: printVersion},
+		{name: "protocol", noData: true, help: "print the command set the plugin mod expects", run: printProtocol},
+		{
+			name: "tick", flags: []string{"cwd"}, help: "print the protocol, the place of --cwd and the waiting requests as JSON",
+			run: func(c cli, _ []string, f flags) (int, error) { return exitCode(c.tick(f.cwd)) },
+		},
+		{name: "pause", help: "stop taking requests", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.pause(true)) }},
+		{name: "resume", help: "take requests again", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.pause(false)) }},
 	}},
 	{"relay", []command{
 		{
@@ -109,6 +122,95 @@ var families = []family{
 		},
 		{name: "allowed", help: "list the allowed patterns", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.allowed()) }},
 	}},
+	{"inbox", []command{
+		{
+			name: "inbox add", args: "<link>", least: 1, most: 1,
+			flags: []string{"verdict", "reason", "keywords", "from", "ts", "key", "delegation", "target", "self", "name", "place", "skills", "files"},
+			help:  "queue a request, --verdict is handle or ask", run: addRequest,
+		},
+		{
+			name: "inbox claim", args: "<id>", least: 1, most: 1, flags: []string{"session"}, session: true,
+			help: "take a request for a session that works on one at a time",
+			run:  func(c cli, a []string, _ flags) (int, error) { return exitCode(c.inboxClaim(a[0])) },
+		},
+		{
+			name: "inbox take", args: "<id>", least: 1, most: 1, flags: []string{"session"}, session: true,
+			help: "take a request and print link, task, target, approve, place, skills and files",
+			run:  func(c cli, a []string, _ flags) (int, error) { return exitCode(c.inboxTake(a[0])) },
+		},
+		{
+			name: "inbox ask", args: "<id>", least: 1, most: 1, flags: []string{"reason", "session"}, session: true,
+			help: "hand a request back so the user is asked",
+			run:  func(c cli, a []string, f flags) (int, error) { return exitCode(c.ask(a[0], f.reason)) },
+		},
+		{
+			name: "inbox hold", args: "<id>", least: 1, most: 1, flags: []string{"session"}, session: true,
+			help: "put a request off until the user runs handle",
+			run:  func(c cli, a []string, _ flags) (int, error) { return exitCode(c.hold(a[0])) },
+		},
+		{
+			name: "inbox done", args: "<id>", least: 1, most: 1, flags: []string{"session"}, session: true,
+			help: "drop a request without an answer",
+			run:  func(c cli, a []string, _ flags) (int, error) { return exitCode(c.done(a[0])) },
+		},
+		{
+			name: "inbox list", flags: []string{"limit"}, help: "list queued requests, newest first",
+			run: func(c cli, _ []string, f flags) (int, error) { return exitCode(c.inboxList(f.limit)) },
+		},
+		{
+			name: "inbox waiting", help: "list unclaimed requests oldest first with name and added time",
+			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.inboxWaiting()) },
+		},
+		{
+			name: "inbox cursor", flags: []string{"key"}, help: "print the unix time to read Slack after",
+			run: func(c cli, _ []string, f flags) (int, error) { return exitCode(c.inboxCursor(f.key)) },
+		},
+		{
+			name: "inbox advance", args: "<ts>", least: 1, most: 1, flags: []string{"key"}, help: "move the cursor past checked messages",
+			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.inboxAdvance(f.key, a[0])) },
+		},
+	}},
+	{"delegations", []command{
+		{
+			name: "delegation", help: "list the delegations as JSON, the default one last",
+			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.delegations()) },
+		},
+		{
+			name: "delegation put", help: "add or replace the delegation given as JSON on stdin",
+			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.delegationPut()) },
+		},
+		{
+			name: "delegation remove", args: "<id>", least: 1, most: 1, help: "remove a delegation",
+			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.delegationRemove(a[0])) },
+		},
+		{
+			name: "delegation match", args: "<mention | review-request | id>", least: 1, most: 1,
+			help: "print what the matching delegation does with a message on stdin, nothing when none matches",
+			run:  func(c cli, a []string, _ flags) (int, error) { return exitCode(c.delegationMatch(a[0])) },
+		},
+	}},
+	{"triage", []command{
+		{
+			name: "triage", args: "[claude | codex]", most: 1, help: "show or set what sorts mentions",
+			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.triage(a)) },
+		},
+		{
+			name: "triage command", args: "<command line>", least: 1, most: -1, help: "sort mentions with a command line",
+			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.triageCommand(a)) },
+		},
+		{
+			name: "triage prompt", help: "build the prompt for the input JSON on stdin",
+			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.triagePrompt()) },
+		},
+		{
+			name: "triage parse", help: "read a verdict from the model reply on stdin",
+			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.triageParse()) },
+		},
+		{
+			name: "triage run", help: "run the engine on the input JSON on stdin",
+			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.triageRun()) },
+		},
+	}},
 	{"work map", []command{
 		{
 			name: "map refresh", help: "learn places, skills and past requests from the transcripts",
@@ -136,13 +238,14 @@ var families = []family{
 
 // Hooks run on their own path since they read the data directory from the environment and never fail
 const hookUsage = `hooks
+  hook start                      SessionStart notice of waiting requests
   hook path                       PostToolUse path collection
   hook guard                      PreToolUse posting guard`
 
 func usage() string {
 	var b strings.Builder
 	b.WriteString("usage: meetproxy <command> [args] [flags]\n")
-	b.WriteString("every command but version needs --data <dir> or --root <plugin dir>\n")
+	b.WriteString("every command but version and protocol needs --data <dir> or --root <plugin dir>\n")
 	for _, fam := range families {
 		fmt.Fprintf(&b, "\n%s\n", fam.name)
 		for _, c := range fam.commands {
@@ -166,10 +269,12 @@ func usage() string {
 // Every flag any command takes
 // A command names the ones it reads so any other fails
 type flags struct {
-	data, root, session, target string
-	topic, keywords, paths      string
-	place                       string
-	limit                       int
+	data, root, session                  string
+	target, topic, from, ts, verdict     string
+	reason, name, place, key, delegation string
+	cwd, self, keywords, paths           string
+	skills, files                        string
+	limit                                int
 }
 
 func (f *flags) set() *flag.FlagSet {
@@ -183,14 +288,25 @@ func (f *flags) set() *flag.FlagSet {
 	fs.StringVar(&f.keywords, "keywords", "", "comma separated keywords")
 	fs.StringVar(&f.paths, "paths", "", "comma separated evidence paths")
 	fs.IntVar(&f.limit, "limit", defaultLimit, "number of results, every one with 0")
+	fs.StringVar(&f.from, "from", "", "requester id")
+	fs.StringVar(&f.ts, "ts", "", "unix seconds of the request")
+	fs.StringVar(&f.verdict, "verdict", "", "handle or ask")
+	fs.StringVar(&f.reason, "reason", "", "one line reason")
+	fs.StringVar(&f.name, "name", "", "display name of the place")
 	fs.StringVar(&f.place, "place", "", "absolute root of the place")
+	fs.StringVar(&f.skills, "skills", "", "comma separated skills the work map suggests")
+	fs.StringVar(&f.files, "files", "", "comma separated files the work map suggests")
+	fs.StringVar(&f.key, "key", "mention", "cursor key, a delegation id for channel delegations")
+	fs.StringVar(&f.delegation, "delegation", "", "delegation that caught the message, the default one when empty")
+	fs.StringVar(&f.self, "self", "", "yes when the user wrote the request")
+	fs.StringVar(&f.cwd, "cwd", "", "directory of the session")
 	return fs
 }
 
 func run(cmd string, args []string, session string, now time.Time, in io.Reader, out io.Writer) (int, error) {
 	f := flags{session: session}
 	fs := f.set()
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorder(cmd, args)); err != nil {
 		return exitUsage, err
 	}
 	words := append([]string{cmd}, fs.Args()...)
@@ -271,8 +387,8 @@ func exitCode(err error) (int, error) {
 }
 
 // Moves flags ahead of positional arguments since every flag takes a value
-// Words after `--` stay positional as they are
-func reorder(args []string) []string {
+// Words after `--` or after the command word of triage command stay positional as they are
+func reorder(cmd string, args []string) []string {
 	var flags, pos []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -280,6 +396,8 @@ func reorder(args []string) []string {
 		case a == "--":
 			// Kept so flag parsing stops before words that start with a dash
 			return append(append(flags, a), append(pos, args[i+1:]...)...)
+		case cmd == "triage" && len(pos) == 0 && a == string(triage.EngineCommand):
+			return append(flags, args[i:]...)
 		case len(a) > 1 && a[0] == '-':
 			flags = append(flags, a)
 			if !strings.Contains(a, "=") && i+1 < len(args) {

@@ -8,7 +8,7 @@
     {
       "name": "meetproxy",
       "source": "./plugin",
-      "description": "Stop being a meat proxy. Relays requests into your open Claude Code session and posts refined answers back, remembering where each answer was found."
+      "description": "Stop being a meat proxy. Takes Slack and GitHub requests into the open Claude Code session where the work map places them and posts refined answers back, remembering where each answer was found."
     }
   ]
 }

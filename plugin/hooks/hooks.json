@@ -1,10 +1,20 @@
 {
+  "modules": [
+    "./meetproxy.js"
+  ],
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy version >/dev/null" },
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy map refresh daily --data \"${CLAUDE_PLUGIN_DATA}\"", "async": true }
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy hook start"
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy map refresh daily --data \"${CLAUDE_PLUGIN_DATA}\"",
+            "async": true
+          }
         ]
       }
     ],
@@ -12,7 +22,10 @@
       {
         "matcher": "Bash|mcp__.*[Ss]lack.*|mcp__.*[Gg]it[Hh]ub.*",
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy hook guard" }
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy hook guard"
+          }
         ]
       }
     ],
@@ -20,7 +33,10 @@
       {
         "matcher": "Read|Edit|Write|Grep",
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy hook path" }
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy hook path"
+          }
         ]
       }
     ]
