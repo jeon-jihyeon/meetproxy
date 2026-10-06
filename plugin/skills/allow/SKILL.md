@@ -14,4 +14,4 @@ Manage the destinations meetproxy may post to.
    - Turn a link into `github:owner/repo` or `slack:CHANNEL` first
    - `github:owner/*` allows every repository of an owner
 2. Then run `meetproxy dest --data "${CLAUDE_PLUGIN_DATA}" "$ARGUMENTS"` and report the result in one line
-3. Without an argument, read `${CLAUDE_PLUGIN_DATA}/dest.json` and list the patterns
+3. Without an argument, run `meetproxy allowed --data "${CLAUDE_PLUGIN_DATA}"` and list the patterns it prints one per line

@@ -16,12 +16,16 @@ import (
 func TestStoreOpen(t *testing.T) {
 	t.Parallel()
 	type args struct {
-		first  string
-		second string
+		first        string
+		firstTarget  string
+		second       string
+		secondTarget string
 	}
 	type want struct {
 		sameId  bool
 		origin  string
+		target  string
+		saved   string
 		observe []string
 	}
 	tcs := []struct {
@@ -29,19 +33,24 @@ func TestStoreOpen(t *testing.T) {
 		args args
 		want want
 	}{
-		{"continues the same origin and keeps observations", args{"o1", "o1"}, want{true, "o1", []string{"a.go"}}},
-		{"opens a new relay for another origin", args{"o1", "o2"}, want{false, "o2", []string{}}},
+		{"continues the same origin and keeps observations", args{"o1", "", "o1", ""}, want{true, "o1", "", "", []string{"a.go"}}},
+		{"takes a target given to the same origin", args{"o1", "", "o1", "pr"}, want{true, "o1", "pr", "pr", []string{"a.go"}}},
+		{"replaces the target of the same origin", args{"o1", "pr1", "o1", "pr2"}, want{true, "o1", "pr2", "pr2", []string{"a.go"}}},
+		{"keeps the target when none is given", args{"o1", "pr", "o1", ""}, want{true, "o1", "pr", "pr", []string{"a.go"}}},
+		{"opens a new relay for another origin", args{"o1", "pr", "o2", ""}, want{false, "o2", "", "", []string{}}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := relay.New(t.TempDir())
 			now := time.Now()
-			first, err := s.Open("s1", tc.args.first, now)
+			first, err := s.Open("s1", tc.args.first, tc.args.firstTarget, now)
 			require.NoError(t, err)
 			require.NoError(t, s.Observe("s1", locmap.Path{Root: "/r", Rel: "a.go"}))
 
-			second, err := s.Open("s1", tc.args.second, now)
+			second, err := s.Open("s1", tc.args.second, tc.args.secondTarget, now)
+			require.NoError(t, err)
+			cur, err := s.Current("s1")
 			require.NoError(t, err)
 			ps, err := s.Observed(second.Id)
 			require.NoError(t, err)
@@ -49,15 +58,15 @@ func TestStoreOpen(t *testing.T) {
 			for _, p := range ps {
 				got = append(got, p.Rel)
 			}
-			assert.Equal(t, tc.want, want{first.Id == second.Id, second.Origin, got})
+			assert.Equal(t, tc.want, want{first.Id == second.Id, second.Origin, second.Target, cur.Target, got})
 		})
 	}
 }
 
 func TestStoreObserve(t *testing.T) {
 	t.Parallel()
-	a := locmap.Path{Repo: "svc", Root: "/r", Rel: "a.go"}
-	b := locmap.Path{Repo: "svc", Root: "/r", Rel: "b.go"}
+	a := locmap.Path{Name: "svc", Root: "/r", Rel: "a.go"}
+	b := locmap.Path{Name: "svc", Root: "/r", Rel: "b.go"}
 
 	type args struct {
 		open    bool
@@ -82,7 +91,7 @@ func TestStoreObserve(t *testing.T) {
 			s := relay.New(dir)
 			var id string
 			if tc.args.open {
-				r, err := s.Open("s1", "origin", time.Now())
+				r, err := s.Open("s1", "origin", "", time.Now())
 				require.NoError(t, err)
 				id = r.Id
 			}
@@ -121,7 +130,7 @@ func TestStoreClose(t *testing.T) {
 			s := relay.New(t.TempDir())
 			now := time.Now()
 			if tc.open {
-				_, err := s.Open("s1", "origin", now)
+				_, err := s.Open("s1", "origin", "", now)
 				require.NoError(t, err)
 			}
 			_, closeErr := s.Close("s1", now)
@@ -135,7 +144,7 @@ func TestStoreEvidence(t *testing.T) {
 	t.Parallel()
 	repo := filepath.Join(t.TempDir(), "svc")
 	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0o755))
-	observed := locmap.Path{Repo: "svc", Root: repo, Rel: "observed.go"}
+	observed := locmap.Path{Name: "svc", Root: repo, Rel: "observed.go"}
 
 	type want struct {
 		rels   []string
@@ -148,17 +157,18 @@ func TestStoreEvidence(t *testing.T) {
 	}{
 		{"falls back to observed paths", nil, want{[]string{"observed.go"}, false}},
 		{"uses only given paths", []string{filepath.Join(repo, "given.go")}, want{[]string{"given.go"}, false}},
-		{"fails on a path outside a repository", []string{"/nowhere/x.go"}, want{[]string{}, true}},
+		{"skips a path outside a repository", []string{"/nowhere/x.go", filepath.Join(repo, "given.go")}, want{[]string{"given.go"}, false}},
+		{"falls back when no path resolves", []string{"/nowhere/x.go"}, want{[]string{"observed.go"}, false}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := relay.New(t.TempDir())
-			r, err := s.Open("s1", "origin", time.Now())
+			r, err := s.Open("s1", "origin", "", time.Now())
 			require.NoError(t, err)
 			require.NoError(t, s.Observe("s1", observed))
 
-			ps, err := s.Evidence(r.Id, tc.raws)
+			ps, err := s.Evidence(r.Id, tc.raws, "")
 			got := []string{}
 			for _, p := range ps {
 				got = append(got, p.Rel)
@@ -195,10 +205,10 @@ func TestStoreOpen_PrunesStale(t *testing.T) {
 			t.Parallel()
 			s := relay.New(t.TempDir())
 			now := time.Now()
-			_, err := s.Open("old", "o1", now)
+			_, err := s.Open("old", "o1", "", now)
 			require.NoError(t, err)
 
-			_, err = s.Open("new", "o2", now.Add(tc.gap))
+			_, err = s.Open("new", "o2", "", now.Add(tc.gap))
 			require.NoError(t, err)
 
 			_, err = s.Current("old")
