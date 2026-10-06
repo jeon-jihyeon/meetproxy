@@ -39,7 +39,7 @@ func main() {
 		}
 		return
 	}
-	code, err := run(cmd, args, os.Getenv("CLAUDE_CODE_SESSION_ID"), time.Now(), os.Stdout)
+	code, err := run(cmd, args, os.Getenv("CLAUDE_CODE_SESSION_ID"), time.Now(), os.Stdin, os.Stdout)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "meetproxy:", err)
 	}
@@ -48,14 +48,14 @@ func main() {
 
 // A command line of the CLI
 type command struct {
-	// Words that name it
+	// Words that name it such as map refresh
 	name string
 	// Positional arguments as the usage text shows them
 	args string
 	// Least and most positional arguments
 	// A negative most takes any number
 	least, most int
-	// Flags it reads besides --data
+	// Flags it reads besides --data and --root
 	flags []string
 	// Fails without a session id
 	session bool
@@ -109,6 +109,29 @@ var families = []family{
 		},
 		{name: "allowed", help: "list the allowed patterns", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.allowed()) }},
 	}},
+	{"work map", []command{
+		{
+			name: "map refresh", help: "learn places, skills and past requests from the transcripts",
+			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.mapRefresh(false)) },
+		},
+		{
+			name: "map refresh daily", help: "refresh only once a day",
+			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.mapRefresh(true)) },
+		},
+		{
+			name: "map plan", help: "print the place, skills and files the map suggests for a request on stdin",
+			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.mapPlan()) },
+		},
+		{
+			name: "map show", help: "print the places, skills and output formats the map knows",
+			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.mapShow()) },
+		},
+		{
+			name: "map format", args: "<kind>", least: 1, most: 1, flags: []string{"place"},
+			help: "print the guides, skills and examples for one kind of output, only those that apply in --place",
+			run:  func(c cli, a []string, f flags) (int, error) { return exitCode(c.mapFormat(a[0], f.place)) },
+		},
+	}},
 }
 
 // Hooks run on their own path since they read the data directory from the environment and never fail
@@ -119,7 +142,7 @@ const hookUsage = `hooks
 func usage() string {
 	var b strings.Builder
 	b.WriteString("usage: meetproxy <command> [args] [flags]\n")
-	b.WriteString("every command but version needs --data <dir>\n")
+	b.WriteString("every command but version needs --data <dir> or --root <plugin dir>\n")
 	for _, fam := range families {
 		fmt.Fprintf(&b, "\n%s\n", fam.name)
 		for _, c := range fam.commands {
@@ -143,25 +166,28 @@ func usage() string {
 // Every flag any command takes
 // A command names the ones it reads so any other fails
 type flags struct {
-	data, session, target, topic string
-	keywords, paths              string
-	limit                        int
+	data, root, session, target string
+	topic, keywords, paths      string
+	place                       string
+	limit                       int
 }
 
 func (f *flags) set() *flag.FlagSet {
 	fs := flag.NewFlagSet("meetproxy", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&f.data, "data", "", "plugin data directory")
+	fs.StringVar(&f.root, "root", "", "plugin directory that names the data directory when --data is empty")
 	fs.StringVar(&f.session, "session", f.session, "session id, CLAUDE_CODE_SESSION_ID by default")
 	fs.StringVar(&f.target, "target", "", "what the task works on such as a pull request link")
 	fs.StringVar(&f.topic, "topic", "", "one line request topic")
 	fs.StringVar(&f.keywords, "keywords", "", "comma separated keywords")
 	fs.StringVar(&f.paths, "paths", "", "comma separated evidence paths")
 	fs.IntVar(&f.limit, "limit", defaultLimit, "number of results, every one with 0")
+	fs.StringVar(&f.place, "place", "", "absolute root of the place")
 	return fs
 }
 
-func run(cmd string, args []string, session string, now time.Time, out io.Writer) (int, error) {
+func run(cmd string, args []string, session string, now time.Time, in io.Reader, out io.Writer) (int, error) {
 	f := flags{session: session}
 	fs := f.set()
 	if err := fs.Parse(reorder(args)); err != nil {
@@ -178,10 +204,13 @@ func run(cmd string, args []string, session string, now time.Time, out io.Writer
 	if err := c.check(rest, given, f.session); err != nil {
 		return exitUsage, err
 	}
-	if !c.noData && f.data == "" {
-		return exitUsage, errors.New("--data is required")
+	if !c.noData {
+		var err error
+		if f.data, err = f.dataDir(); err != nil {
+			return exitUsage, err
+		}
 	}
-	return c.run(cli{data: f.data, session: f.session, now: now, out: out}, rest, f)
+	return c.run(cli{data: f.data, session: f.session, now: now, in: in, out: out}, rest, f)
 }
 
 // Usage errors of the positional arguments, the flags given and the session id
@@ -190,7 +219,7 @@ func (c command) check(rest, given []string, session string) error {
 		return fmt.Errorf("%w: run it as %s", errUsage, strings.TrimSpace(c.name+" "+c.args))
 	}
 	for _, name := range given {
-		if name != "data" && !slices.Contains(c.flags, name) {
+		if name != "data" && name != "root" && !slices.Contains(c.flags, name) {
 			return fmt.Errorf("%w: %s does not take --%s", errUsage, c.name, name)
 		}
 	}
@@ -198,6 +227,21 @@ func (c command) check(rest, given []string, session string) error {
 		return fmt.Errorf("%w: %s needs a session id", errUsage, c.name)
 	}
 	return nil
+}
+
+// --data or the data directory Claude Code gives the plugin at --root
+func (f flags) dataDir() (string, error) {
+	if f.data != "" {
+		return f.data, nil
+	}
+	if f.root == "" {
+		return "", errors.New("--data or --root is required")
+	}
+	config, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return pluginData(f.root, config)
 }
 
 // The command whose name is the longest run of leading words

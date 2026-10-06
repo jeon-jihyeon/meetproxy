@@ -156,7 +156,7 @@ func TestRunHookGuard(t *testing.T) {
 			t.Parallel()
 			data := t.TempDir()
 			for _, p := range []string{"slack:C1", "github:o/*"} {
-				code, err := run("allow", []string{p, "--data", data}, "s1", time.Now(), &bytes.Buffer{})
+				code, err := run("allow", []string{p, "--data", data}, "s1", time.Now(), strings.NewReader(""), &bytes.Buffer{})
 				require.NoError(t, err)
 				require.Equal(t, 0, code)
 			}
