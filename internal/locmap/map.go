@@ -11,6 +11,10 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/jeon-jihyeon/meetproxy/internal/fileio"
 )
 
 type Entry struct {
@@ -32,19 +36,11 @@ type Map struct{ file string }
 func New(dataDir string) Map { return Map{file: filepath.Join(dataDir, "map.jsonl")} }
 
 func (m Map) Add(e Entry) error {
-	if err := os.MkdirAll(filepath.Dir(m.file), 0o755); err != nil {
-		return err
-	}
 	b, err := json.Marshal(e)
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(m.file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(append(b, '\n'))
-	return errors.Join(err, f.Close())
+	return fileio.AppendLine(m.file, b)
 }
 
 // Paths that no longer exist are dropped
@@ -89,6 +85,37 @@ func (m Map) Locate(terms []string, limit int) ([]Candidate, error) {
 	return out, nil
 }
 
+// Root of the place where most similar answers were found
+// 1. Each answer counts once per place however many files it rests on
+// 2. Ties go to the root that sorts first and no match returns an empty root
+func (m Map) Route(terms []string) (string, error) {
+	entries, err := m.entries()
+	if err != nil {
+		return "", err
+	}
+	scores := map[string]int{}
+	for _, e := range entries {
+		hits := matchCount(e, terms)
+		if hits == 0 {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, p := range e.Paths {
+			if !seen[p.Root] {
+				seen[p.Root] = true
+				scores[p.Root] += hits
+			}
+		}
+	}
+	best := ""
+	for root, score := range scores {
+		if best == "" || score > scores[best] || (score == scores[best] && root < best) {
+			best = root
+		}
+	}
+	return best, nil
+}
+
 // The last record per relay id wins so a retried close does not duplicate
 func (m Map) entries() ([]Entry, error) {
 	f, err := os.Open(m.file)
@@ -118,7 +145,8 @@ func (m Map) entries() ([]Entry, error) {
 	return out, sc.Err()
 }
 
-// Prefix match lets a Korean particle follow a keyword without matching inside other words
+// A term counts when it is a whole word of the topic or a keyword, or a keyword is a whole word of it
+// So svc never matches inside pointsvc while 할당이 still matches the keyword 할당
 func matchCount(e Entry, terms []string) int {
 	topic := strings.ToLower(e.Topic)
 	n := 0
@@ -127,7 +155,7 @@ func matchCount(e Entry, terms []string) int {
 		if t == "" {
 			continue
 		}
-		if strings.Contains(topic, t) || keywordMatches(e.Keywords, t) {
+		if wholeWord(topic, t) || keywordMatches(e.Keywords, t) {
 			n++
 		}
 	}
@@ -136,10 +164,32 @@ func matchCount(e Entry, terms []string) int {
 
 func keywordMatches(keywords []string, term string) bool {
 	for _, k := range keywords {
-		k = strings.ToLower(k)
-		if k != "" && (strings.Contains(k, term) || strings.HasPrefix(term, k)) {
+		k = strings.ToLower(strings.TrimSpace(k))
+		if k != "" && (wholeWord(k, term) || wholeWord(term, k)) {
 			return true
 		}
 	}
 	return false
 }
+
+// Whether word occurs in s with no letter or digit right around it
+// Any non ASCII rune may follow so a Korean particle can end the word
+func wholeWord(s, word string) bool {
+	for i := 0; word != ""; {
+		at := strings.Index(s[i:], word)
+		if at < 0 {
+			return false
+		}
+		at += i
+		end := at + len(word)
+		before, _ := utf8.DecodeLastRuneInString(s[:at])
+		after, _ := utf8.DecodeRuneInString(s[end:])
+		if (at == 0 || !wordRune(before)) && (end == len(s) || after > unicode.MaxASCII || !wordRune(after)) {
+			return true
+		}
+		i = at + 1
+	}
+	return false
+}
+
+func wordRune(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' }
