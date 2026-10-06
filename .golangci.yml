@@ -30,7 +30,7 @@ linters:
           disabled: true
     # Imports point down only
     # 1. cmd uses everything and nothing imports cmd
-    # 2. relay uses locmap
+    # 2. relay and workmap use locmap
     # 3. guard uses only dest and shell
     # 4. any package may use fileio and shell which use no package of the module
     depguard:
@@ -52,6 +52,20 @@ linters:
               desc: locmap and dest do not import relay
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/guard
               desc: locmap and dest do not import guard
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/workmap
+              desc: locmap and dest do not import workmap
+            - pkg: github.com/jeon-jihyeon/meetproxy/cmd
+              desc: nothing imports cmd
+        workmap:
+          files:
+            - "**/internal/workmap/**"
+          deny:
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/relay
+              desc: workmap does not import relay
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/guard
+              desc: workmap does not import guard
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/dest
+              desc: workmap does not know about posting
             - pkg: github.com/jeon-jihyeon/meetproxy/cmd
               desc: nothing imports cmd
         guard:
@@ -61,6 +75,8 @@ linters:
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/relay
               desc: guard decides from the locations it is given
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/locmap
+              desc: guard uses only dest and shell
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/workmap
               desc: guard uses only dest and shell
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/fileio
               desc: guard uses only dest and shell

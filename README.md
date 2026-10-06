@@ -54,15 +54,17 @@ A person in the middle makes three calls before pasting anything. meetproxy make
 ## What's inside
 
 - **[relay skill](plugin/skills/relay/SKILL.md)** — The flow from a request link to a posted answer
+- **[map skill](plugin/skills/map/SKILL.md)** — Refreshes the work map at once or shows what it knows
 - **[allow skill](plugin/skills/allow/SKILL.md)** — Places to post besides where a request came from
 - **Posting guard** — A PreToolUse hook on Bash and the Slack and GitHub MCP tools that blocks posts anywhere but where the request came from, the pull request or issue it works on and the allow list while a relay is open. Every repository a `gh` write names must pass, including commands chained, wrapped or run through `bash -c`, and a `gh` command it cannot judge is denied. Commands that do not post are never blocked
+- **Work map** — Built from your own Claude Code transcripts the first time a session starts, then refreshed once a day by the first session of the day in a separate process that never touches a session. It knows the places you work in, the skills and commands you have, and which place, skills and files answered each request you typed, and `meetproxy map plan` matches a request to them by the place it names and the past requests that agree. It also learns how you write each kind of output, such as commits, pull requests, review replies, Linear issues and Slack messages: the sections of your CLAUDE.md, rules and memory files whose heading names that kind, by file and line only, and your three newest outputs of each kind that went through, kept on your machine. The relay skill runs `meetproxy map format <kind>` before it posts. Only derived requests, places, skill names, file paths and those examples are kept
 - **Location map** — A PostToolUse hook that records the paths read while handling a request, in a repository or in the session directory, and `meetproxy locate` to find them for the next one
 - **[Launcher](plugin/bin/meetproxy)** — Runs the binary for the plugin version from a cache, a checksum verified release, or `go install`
 
 ## Features
 
 - **Your session, your context** — Requests land in the Claude Code session you already have open, with your files, rules and history, instead of a fresh cloud sandbox
-- **Gets better with use** — Each answer records the code it rests on, so the next similar request starts from the right files
+- **Gets better with use** — Each answer records the code it rests on, so the next similar request starts from the right files, and each post follows the way you already write that kind of output
 - **Safe by default** — Request text is treated as untrusted, posts anywhere but where the request came from and the allow list are denied by a hook, and the guard fails closed
 - **Honest posts** — Every post says it was written by Claude, because hidden AI use costs more trust than disclosed use
 - **Small and local** — One Go binary on the standard library, with data kept in the plugin data directory
@@ -72,6 +74,6 @@ A person in the middle makes three calls before pasting anything. meetproxy make
 ## Resources
 
 - [Claude Code plugins](https://code.claude.com/docs/en/plugins) — how plugins, skills and hooks are installed and loaded
-- [Claude Code hooks](https://code.claude.com/docs/en/hooks) — the PreToolUse and PostToolUse events the guard and the location map use
+- [Claude Code hooks](https://code.claude.com/docs/en/hooks) — the PreToolUse, PostToolUse and SessionStart events the guard, the location map and the work map refresh use
 - [Releases](https://github.com/jeon-jihyeon/meetproxy/releases) — binaries for darwin and linux on amd64 and arm64
 - [License](LICENSE) — MIT

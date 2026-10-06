@@ -3,7 +3,8 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy version >/dev/null" }
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy version >/dev/null" },
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy map refresh daily --data \"${CLAUDE_PLUGIN_DATA}\"", "async": true }
         ]
       }
     ],
