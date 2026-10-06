@@ -94,7 +94,7 @@ func TestRunHookPath(t *testing.T) {
 			store := relay.New(data)
 			var id string
 			if tc.args.open {
-				r, err := store.Open("s1", "o", time.Now())
+				r, err := store.Open("s1", "o", "", time.Now())
 				require.NoError(t, err)
 				id = r.Id
 			}
@@ -111,10 +111,12 @@ func TestRunHookPath(t *testing.T) {
 	}
 }
 
+// Which locations a call names and which the relay lets through is covered in the guard package
+// These cases cover the hook plumbing around it
 func TestRunHookGuard(t *testing.T) {
 	t.Parallel()
-	bash := func(cmd string) map[string]any {
-		return map[string]any{"session_id": "s1", "tool_name": "Bash", "tool_input": map[string]any{"command": cmd}}
+	bash := func(session, cmd string) map[string]any {
+		return map[string]any{"session_id": session, "tool_name": "Bash", "tool_input": map[string]any{"command": cmd}}
 	}
 	slack := func(tool, channel string) map[string]any {
 		return map[string]any{
@@ -134,53 +136,20 @@ func TestRunHookGuard(t *testing.T) {
 		want string
 	}{
 		{"allows a send to an allowed channel", args{true, "", slack("slack_send_message", "C1")}, ""},
-		{"denies a send to another channel", args{true, "", slack("slack_send_message", "C9")}, "slack:C9"},
-		{"checks scheduled sends", args{true, "", slack("slack_schedule_message", "C9")}, "slack:C9"},
-		{"denies a send without a channel", args{true, "", slack("slack_send_message", "")}, "unknown destination"},
-		{"treats drafts as not posting", args{true, "", slack("slack_send_message_draft", "C9")}, ""},
-		{"treats Slack reads as not posting", args{true, "", slack("slack_read_thread", "C9")}, ""},
-		{"denies a reply to another repository", args{true, "", bash("gh api repos/x/r/pulls/1/comments/2/replies -f body=hi")}, "github:x/r"},
-		{"allows a reply to an allowed repository", args{true, "", bash("gh api repos/o/r/pulls/1/comments/2/replies -f body=hi")}, ""},
-		{"treats -XPOST as posting", args{true, "", bash("gh api -XPOST repos/x/r/issues/1/comments")}, "github:x/r"},
-		{"allows pr comment with --repo", args{true, "", bash("gh pr comment 12 --repo o/r --body hi")}, ""},
-		{"denies pr comment with another -R", args{true, "", bash("gh pr comment 12 -R x/r --body hi")}, "github:x/r"},
-		{"denies pr comment without a repository", args{true, "", bash("gh pr comment 12 --body hi")}, "unknown destination"},
-		{
-			"checks every chained command",
-			args{true, "", bash("gh api repos/o/r/pulls/1/comments/2/replies -f body=a && gh pr comment 5 --repo x/r --body b")},
-			"github:x/r",
-		},
-		{"denies direct API calls", args{true, "", bash("curl -X POST https://slack.com/api/chat.postMessage -d text=hi")}, "unknown destination"},
-		{"treats gh reads as not posting", args{true, "", bash("gh api repos/x/r/pulls/1/comments")}, ""},
-		{"allows Bash without gh", args{true, "", bash("ls -al")}, ""},
-		{"fails closed on a corrupt config", args{true, "dest.json", slack("slack_send_message", "C1")}, "posting check failed"},
+		{"denies a send to another channel", args{true, "", slack("slack_send_message", "C9")}, "slack:C9 is not allowed"},
+		{"allows a reply where the request came from", args{true, "", slack("slack_send_message", "C7")}, ""},
+		{"allows a review on the target", args{true, "", bash("s1", "gh pr review https://github.com/t/r/pull/3 --comment -b hi")}, ""},
+		{"denies another pull request of the target repository", args{true, "", bash("s1", "gh pr comment 4 -R t/r -b hi")}, "github:t/r#4"},
+		{"allows an allowed repository", args{true, "", bash("s1", "gh pr comment 12 --repo o/r --body hi")}, ""},
+		{"denies a post whose destination is unknown", args{true, "", bash("s1", "gh pr comment 12 --body hi")}, "unknown destination"},
+		{"allows Bash without gh", args{true, "", bash("s1", "ls -al")}, ""},
+		{"fails closed on a corrupt config", args{true, "dest.json", slack("slack_send_message", "C9")}, "posting check failed"},
 		{"skips sessions without an open relay", args{false, "", slack("slack_send_message", "C9")}, ""},
-		{
-			"checks every repository named, not the first one",
-			args{true, "", bash(`gh pr comment 1 --body "see https://github.com/o/r/blob/main/a.go" --repo x/r`)},
-			"github:x/r",
-		},
-		{
-			"ignores links in a body when the target is allowed",
-			args{true, "", bash(`gh pr comment 1 --repo o/r --body "see https://github.com/x/r"`)},
-			"",
-		},
-		{"allows a pr link as the target", args{true, "", bash("gh pr comment https://github.com/o/r/pull/1 -b hi")}, ""},
-		{"denies issue create in another repository", args{true, "", bash("gh issue create -R x/r --title t --body b")}, "github:x/r"},
-		{"denies pr edit in another repository", args{true, "", bash("gh pr edit 1 --repo=x/r --body b")}, "github:x/r"},
-		{"denies release create without a repository", args{true, "", bash("gh release create v1")}, "unknown destination"},
-		{"denies gist create", args{true, "", bash("gh gist create a.md")}, "unknown destination"},
-		{"treats pr view as reading", args{true, "", bash("gh pr view 1 -R x/r --comments")}, ""},
-		{"checks GH_REPO", args{true, "", bash("GH_REPO=x/r gh pr comment 1 --repo o/r --body hi")}, "github:x/r"},
-		{"checks gh behind a wrapper", args{true, "", bash("env FOO=1 timeout 5 gh issue comment 1 -R x/r -b hi")}, "github:x/r"},
-		{"checks gh inside bash -c", args{true, "", bash(`bash -c "gh pr comment 1 -R x/r -b hi"`)}, "github:x/r"},
-		{"checks gh inside a quoted substitution", args{true, "", bash(`echo "$(gh pr comment 1 -R x/r -b hi)"`)}, "github:x/r"},
-		{"treats DELETE as writing", args{true, "", bash("gh api --method DELETE repos/x/r/issues/comments/1")}, "github:x/r"},
-		{"denies graphql writes", args{true, "", bash(`gh api graphql -f query="mutation { x }"`)}, "unknown destination"},
-		{"keeps separators inside quotes", args{true, "", bash(`gh pr comment 1 -R o/r -b "a; gh is fine"`)}, ""},
-		{"denies a canvas without a channel", args{true, "", slack("slack_create_canvas", "")}, "unknown destination"},
-		{"lets other commands run with a corrupt relay", args{true, "relay", bash("ls -al")}, ""},
-		{"fails closed on posts with a corrupt relay", args{true, "relay", bash("gh pr comment 1 -R o/r -b hi")}, "remove it to reset"},
+		{"lets other commands run with a corrupt relay", args{true, "relay", bash("s1", "ls -al")}, ""},
+		{"fails closed on posts with a corrupt relay", args{true, "relay", bash("s1", "gh pr comment 1 -R o/r -b hi")}, "remove it to reset"},
+		{"fails closed on a post without a session", args{true, "", bash("", "gh pr comment 1 -R x/r -b hi")}, "names no session"},
+		{"lets other commands run without a session", args{true, "", bash("", "ls -al")}, ""},
+		{"fails closed on tool input that is no object", args{true, "", map[string]any{"session_id": "s1", "tool_name": "Bash", "tool_input": "gh"}}, "posting check failed"},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -192,7 +161,7 @@ func TestRunHookGuard(t *testing.T) {
 				require.Equal(t, 0, code)
 			}
 			if tc.args.open {
-				_, err := relay.New(data).Open("s1", "o", time.Now())
+				_, err := relay.New(data).Open("s1", "https://w.slack.com/archives/C7/p1", "https://github.com/t/r/pull/3", time.Now())
 				require.NoError(t, err)
 			}
 			broken := map[string]string{"dest.json": "dest.json", "relay": filepath.Join("relay", "open", "s1.json")}
