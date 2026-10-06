@@ -14,10 +14,13 @@ import (
 // Set by ldflags in release builds
 var version = "dev"
 
+// The command set the plugin mod speaks
+// Raised whenever a command the mod calls changes so an older mod stops instead of misreading
+const protocol = 5
+
 const (
-	exitFailed = 1
-	exitUsage  = 2
-	// Results locate prints without --limit
+	exitFailed   = 1
+	exitUsage    = 2
 	defaultLimit = 10
 	// Width of the command column in the usage text
 	usageColumn = 32
@@ -41,7 +44,6 @@ func main() {
 
 // A command line of the CLI
 type command struct {
-	// Words that name it such as map refresh
 	name string
 	// Positional arguments as the usage text shows them
 	args string
@@ -67,13 +69,14 @@ type family struct {
 var families = []family{
 	{"setup", []command{
 		{name: "version", noData: true, help: "print the binary version", run: printVersion},
+		{name: "protocol", noData: true, help: "print the command set the plugin mod expects", run: printProtocol},
 	}},
 }
 
 func usage() string {
 	var b strings.Builder
 	b.WriteString("usage: meetproxy <command> [args] [flags]\n")
-	b.WriteString("every command but version needs --data <dir> or --root <plugin dir>\n")
+	b.WriteString("every command but version and protocol needs --data <dir> or --root <plugin dir>\n")
 	for _, fam := range families {
 		fmt.Fprintf(&b, "\n%s\n", fam.name)
 		for _, c := range fam.commands {
@@ -96,10 +99,12 @@ func usage() string {
 // Every flag any command takes
 // A command names the ones it reads so any other fails
 type flags struct {
-	data, root, session    string
-	topic, keywords, paths string
-
-	limit int
+	data, root, session  string
+	topic                string
+	name                 string
+	cwd, keywords, paths string
+	skills, files        string
+	limit                int
 }
 
 func (f *flags) set() *flag.FlagSet {
@@ -114,13 +119,19 @@ func (f *flags) set() *flag.FlagSet {
 	fs.StringVar(&f.paths, "paths", "", "comma separated evidence paths")
 	fs.IntVar(&f.limit, "limit", defaultLimit, "number of results, every one with 0")
 
+	fs.StringVar(&f.name, "name", "", "display name of the place")
+
+	fs.StringVar(&f.skills, "skills", "", "comma separated skills the work map suggests")
+	fs.StringVar(&f.files, "files", "", "comma separated files the work map suggests")
+
+	fs.StringVar(&f.cwd, "cwd", "", "directory of the session")
 	return fs
 }
 
 func run(cmd string, args []string, session string, now time.Time, in io.Reader, out io.Writer) (int, error) {
 	f := flags{session: session}
 	fs := f.set()
-	if err := fs.Parse(reorder(args)); err != nil {
+	if err := fs.Parse(reorder(cmd, args)); err != nil {
 		return exitUsage, err
 	}
 	words := append([]string{cmd}, fs.Args()...)
@@ -200,9 +211,7 @@ func exitCode(err error) (int, error) {
 	}
 }
 
-// Moves flags ahead of positional arguments since every flag takes a value
-// Words after `--` stay positional as they are
-func reorder(args []string) []string {
+func reorder(_ string, args []string) []string {
 	var flags, pos []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]

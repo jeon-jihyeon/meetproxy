@@ -19,3 +19,8 @@ func printVersion(c cli, _ []string, _ flags) (int, error) {
 	_, err := fmt.Fprintln(c.out, version)
 	return exitCode(err)
 }
+
+func printProtocol(c cli, _ []string, _ flags) (int, error) {
+	_, err := fmt.Fprintln(c.out, protocol)
+	return exitCode(err)
+}

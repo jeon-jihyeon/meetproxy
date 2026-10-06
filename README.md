@@ -31,7 +31,13 @@ A meat proxy is a person who sits between a coworker and an AI and only carries 
 /plugin install meetproxy@meetproxy
 ```
 
-The plugin fetches its binary from the matching GitHub release on first run. No API key is needed because the work happens in your own Claude Code session.
+That is all. The binary is fetched from the matching GitHub release on first run, and no API key is needed because the work happens in your own Claude Code sessions.
+
+From then on, while any session is open, meetproxy checks every connected source each minute for messages that mention you.
+
+| Source | Receives | Sends | Connected by |
+|---|---|---|---|
+| GitHub | mentions in comments, and review requests | a comment, or a reply in the review thread | a logged in `gh` |
 
 ## How it works
 
