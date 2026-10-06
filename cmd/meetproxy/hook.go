@@ -7,8 +7,10 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/jeon-jihyeon/meetproxy/internal/guard"
+	"github.com/jeon-jihyeon/meetproxy/internal/inbox"
 	"github.com/jeon-jihyeon/meetproxy/internal/locmap"
 	"github.com/jeon-jihyeon/meetproxy/internal/relay"
 )
@@ -20,10 +22,12 @@ type hookInput struct {
 	ToolInput json.RawMessage `json:"tool_input"`
 }
 
-func runHook(data string, args []string, in io.Reader, out io.Writer) error {
+func runHook(data string, args []string, now time.Time, in io.Reader, out io.Writer) error {
 	switch strings.Join(args, " ") {
 	case "path":
 		return observePath(data, in)
+	case "start":
+		return noticeWaiting(data, now, in, out)
 	case "guard":
 		// Fail closed since this is the safety check
 		if err := guardPost(data, in, out); err != nil {
@@ -73,6 +77,50 @@ func observePath(data string, in io.Reader) error {
 		return nil
 	}
 	return relay.New(data).Observe(h.SessionId, p)
+}
+
+// Names the requests waiting for the place this session starts in
+// Only ids and links are shown since request text is untrusted
+func noticeWaiting(data string, now time.Time, in io.Reader, out io.Writer) error {
+	if data == "" {
+		return errNoData
+	}
+	var h hookInput
+	if err := json.NewDecoder(in).Decode(&h); err != nil {
+		return err
+	}
+	if h.Cwd == "" {
+		return nil
+	}
+	root, name := locmap.Place(h.Cwd)
+	waiting, err := inbox.New(data).Waiting(now)
+	if err != nil {
+		return err
+	}
+	var items []inbox.Item
+	for _, it := range waiting {
+		if it.At(root, name) {
+			items = append(items, it)
+		}
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	noun := "requests wait"
+	if len(items) == 1 {
+		noun = "request waits"
+	}
+	fmt.Fprintf(&b, "meetproxy: %d %s for %s. Tell the user, and run /meetproxy:handle <id> for the ones they ask for.", len(items), noun, name)
+	for _, it := range items {
+		fmt.Fprintf(&b, "\n%s %s", it.Id, it.Link)
+	}
+	return json.NewEncoder(out).Encode(map[string]any{
+		"hookSpecificOutput": map[string]string{
+			"hookEventName":     "SessionStart",
+			"additionalContext": b.String(),
+		},
+	})
 }
 
 // Enforced by a hook because request text is untrusted and no person reviews the post

@@ -47,13 +47,16 @@ linters:
           files:
             - "**/internal/locmap/**"
             - "**/internal/dest/**"
+            - "**/internal/inbox/**"
+            - "**/internal/triage/**"
+            - "**/internal/delegation/**"
           deny:
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/relay
-              desc: locmap and dest do not import relay
+              desc: leaf packages do not import relay
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/guard
-              desc: locmap and dest do not import guard
+              desc: leaf packages do not import guard
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/workmap
-              desc: locmap and dest do not import workmap
+              desc: leaf packages do not import workmap
             - pkg: github.com/jeon-jihyeon/meetproxy/cmd
               desc: nothing imports cmd
         workmap:
@@ -75,6 +78,12 @@ linters:
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/relay
               desc: guard decides from the locations it is given
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/locmap
+              desc: guard uses only dest and shell
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/inbox
+              desc: guard uses only dest and shell
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/triage
+              desc: guard uses only dest and shell
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/delegation
               desc: guard uses only dest and shell
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/workmap
               desc: guard uses only dest and shell

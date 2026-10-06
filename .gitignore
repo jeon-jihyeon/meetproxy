@@ -27,3 +27,7 @@ CLAUDE.local.md
 .idea
 *.swp
 .DS_Store
+
+# written by Claude Code when it loads the mod from --plugin-dir
+/plugin/tsconfig.json
+/plugin/.claude-plugin/types/
