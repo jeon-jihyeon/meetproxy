@@ -9,7 +9,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|mcp__.*[Ss]lack.*",
+        "matcher": "Bash|mcp__.*[Ss]lack.*|mcp__.*[Gg]it[Hh]ub.*",
         "hooks": [
           { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy hook guard" }
         ]

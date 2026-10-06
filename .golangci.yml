@@ -28,9 +28,21 @@ linters:
           disabled: true
         - name: exported
           disabled: true
-    # Imports point down only: cmd uses everything, relay uses locmap, locmap and dest use nothing
+    # Imports point down only
+    # 1. cmd uses everything and nothing imports cmd
+    # 2. relay uses locmap
+    # 3. guard uses only dest and shell
+    # 4. any package may use fileio and shell which use no package of the module
     depguard:
       rules:
+        base:
+          files:
+            - "**/internal/fileio/**"
+            - "**/internal/shell/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/jeon-jihyeon/meetproxy
+              desc: fileio and shell use no package of the module
         leaf:
           files:
             - "**/internal/locmap/**"
@@ -38,6 +50,20 @@ linters:
           deny:
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/relay
               desc: locmap and dest do not import relay
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/guard
+              desc: locmap and dest do not import guard
+            - pkg: github.com/jeon-jihyeon/meetproxy/cmd
+              desc: nothing imports cmd
+        guard:
+          files:
+            - "**/internal/guard/**"
+          deny:
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/relay
+              desc: guard decides from the locations it is given
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/locmap
+              desc: guard uses only dest and shell
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/fileio
+              desc: guard uses only dest and shell
             - pkg: github.com/jeon-jihyeon/meetproxy/cmd
               desc: nothing imports cmd
         relay:
@@ -45,6 +71,8 @@ linters:
             - "**/internal/relay/**"
           deny:
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/dest
+              desc: relay does not know about posting
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/guard
               desc: relay does not know about posting
             - pkg: github.com/jeon-jihyeon/meetproxy/cmd
               desc: nothing imports cmd

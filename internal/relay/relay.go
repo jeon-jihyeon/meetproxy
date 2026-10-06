@@ -13,15 +13,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jeon-jihyeon/meetproxy/internal/fileio"
 	"github.com/jeon-jihyeon/meetproxy/internal/locmap"
 )
 
 // At most one per session
 type Relay struct {
-	Id        string    `json:"id"`
-	SessionId string    `json:"session_id"`
-	Origin    string    `json:"origin"`
-	OpenedAt  time.Time `json:"opened_at"`
+	Id        string `json:"id"`
+	SessionId string `json:"session_id"`
+	Origin    string `json:"origin"`
+	// What the request works on such as a pull request
+	// Posts may go here as well as to the origin
+	Target   string    `json:"target,omitempty"`
+	OpenedAt time.Time `json:"opened_at"`
 }
 
 type Store struct{ dir string }
@@ -33,12 +37,17 @@ var ErrNoOpen = errors.New("no open relay")
 // Open relays left by ended sessions are closed after this
 const staleAfter = 7 * 24 * time.Hour
 
-// Continues an open relay of the same origin and closes one of another origin
-func (s Store) Open(sessionId, origin string, now time.Time) (Relay, error) {
+// 1. An open relay of the same origin continues and takes a newly given target
+// 2. An open relay of another origin is closed first
+func (s Store) Open(sessionId, origin, target string, now time.Time) (Relay, error) {
 	cur, err := s.Current(sessionId)
 	switch {
 	case err == nil && cur.Origin == origin:
-		return cur, nil
+		if target == "" || target == cur.Target {
+			return cur, nil
+		}
+		cur.Target = target
+		return cur, s.save(cur)
 	case err == nil:
 		if _, err := s.Close(sessionId, now); err != nil {
 			return Relay{}, err
@@ -55,29 +64,25 @@ func (s Store) Open(sessionId, origin string, now time.Time) (Relay, error) {
 		Id:        now.UTC().Format("20060102T150405") + "-" + hex.EncodeToString(b),
 		SessionId: sessionId,
 		Origin:    origin,
+		Target:    target,
 		OpenedAt:  now.UTC(),
 	}
-	if err := os.MkdirAll(filepath.Join(s.dir, "open"), 0o755); err != nil {
-		return Relay{}, err
-	}
-	data, err := json.Marshal(r)
-	if err != nil {
-		return Relay{}, err
-	}
-	return r, os.WriteFile(s.openFile(sessionId), data, 0o644)
+	return r, s.save(r)
+}
+
+// Atomic so the posting guard never reads half a relay
+func (s Store) save(r Relay) error {
+	return fileio.WriteJSON(s.openFile(r.SessionId), r)
 }
 
 func (s Store) Current(sessionId string) (Relay, error) {
-	b, err := os.ReadFile(s.openFile(sessionId))
-	if errors.Is(err, os.ErrNotExist) {
-		return Relay{}, ErrNoOpen
-	}
-	if err != nil {
-		return Relay{}, err
-	}
 	var r Relay
-	if err := json.Unmarshal(b, &r); err != nil {
-		return Relay{}, fmt.Errorf("%s is corrupt, remove it to reset the relay: %w", s.openFile(sessionId), err)
+	found, err := fileio.ReadJSON(s.openFile(sessionId), &r)
+	if err != nil {
+		return Relay{}, fmt.Errorf("%s is unreadable, remove it to reset the relay: %w", s.openFile(sessionId), err)
+	}
+	if !found {
+		return Relay{}, ErrNoOpen
 	}
 	return r, nil
 }
@@ -135,18 +140,18 @@ func (s Store) Observed(relayId string) ([]locmap.Path, error) {
 	return out, sc.Err()
 }
 
-// Falls back to observed paths when none are given
-func (s Store) Evidence(relayId string, raws []string) ([]locmap.Path, error) {
-	if len(raws) == 0 {
-		return s.Observed(relayId)
-	}
+// Falls back to observed paths when no given path resolves
+// 1. Paths outside any repository belong to the session directory dir as their place
+// 2. A path in neither is skipped since closing must never fail on evidence
+func (s Store) Evidence(relayId string, raws []string, dir string) ([]locmap.Path, error) {
 	ps := make([]locmap.Path, 0, len(raws))
 	for _, raw := range raws {
-		p, ok := locmap.Resolve(raw)
-		if !ok {
-			return nil, fmt.Errorf("path outside a git repository %s", raw)
+		if p, ok := locmap.ResolveIn(raw, dir); ok {
+			ps = append(ps, p)
 		}
-		ps = append(ps, p)
+	}
+	if len(ps) == 0 {
+		return s.Observed(relayId)
 	}
 	return ps, nil
 }
@@ -175,17 +180,9 @@ func (s Store) observedFile(relayId string) string {
 }
 
 func appendLine(file string, v any) error {
-	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-		return err
-	}
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(append(b, '\n'))
-	return errors.Join(err, f.Close())
+	return fileio.AppendLine(file, b)
 }

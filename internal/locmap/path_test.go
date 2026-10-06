@@ -36,7 +36,7 @@ func TestResolve(t *testing.T) {
 
 	type want struct {
 		ok   bool
-		repo string
+		name string
 		root string
 		rel  string
 	}
@@ -55,7 +55,66 @@ func TestResolve(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			p, ok := locmap.Resolve(tc.raw)
-			assert.Equal(t, tc.want, want{ok, p.Repo, p.Root, p.Rel})
+			assert.Equal(t, tc.want, want{ok, p.Name, p.Root, p.Rel})
+		})
+	}
+}
+
+func TestResolveIn(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	svc := filepath.Join(base, "svc")
+	require.NoError(t, os.MkdirAll(filepath.Join(svc, ".git"), 0o755))
+	notes := filepath.Join(base, "notes")
+	type want struct {
+		ok   bool
+		name string
+		rel  string
+	}
+	tcs := []struct {
+		name string
+		raw  string
+		dir  string
+		want want
+	}{
+		{"a repository wins over the session directory", filepath.Join(svc, "a.go"), notes, want{true, "svc", "a.go"}},
+		{"a file of the session directory belongs to it", filepath.Join(notes, "oncall", "runbook.md"), notes, want{true, "notes", filepath.Join("oncall", "runbook.md")}},
+		{"a file elsewhere belongs to nothing", filepath.Join(base, "other", "x.md"), notes, want{false, "", ""}},
+		{"no session directory means repositories only", filepath.Join(notes, "x.md"), "", want{false, "", ""}},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p, ok := locmap.ResolveIn(tc.raw, tc.dir)
+			assert.Equal(t, tc.want, want{ok, p.Name, p.Rel})
+		})
+	}
+}
+
+func TestPlace(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	svc := filepath.Join(base, "svc")
+	require.NoError(t, os.MkdirAll(filepath.Join(svc, ".git"), 0o755))
+	notes := filepath.Join(base, "notes")
+	type want struct {
+		root string
+		name string
+	}
+	tcs := []struct {
+		name string
+		dir  string
+		want want
+	}{
+		{"a directory in a repository is the repository", filepath.Join(svc, "pkg"), want{svc, "svc"}},
+		{"a directory outside any repository is itself", notes, want{notes, "notes"}},
+		{"a trailing separator is ignored", notes + string(filepath.Separator), want{notes, "notes"}},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root, name := locmap.Place(tc.dir)
+			assert.Equal(t, tc.want, want{root, name})
 		})
 	}
 }

@@ -35,10 +35,9 @@ meetproxy was built to remove that role. The carrying is automated, the judgment
 /plugin install meetproxy@meetproxy
 ```
 
-Allow where meetproxy may post, then hand it a request link.
+Hand it a request link. It replies where the request came from, and `/meetproxy:allow` adds other places it may post to.
 
 ```
-/meetproxy:allow github:your-org/*
 /meetproxy:relay https://github.com/your-org/your-repo/pull/42#discussion_r123
 ```
 
@@ -55,16 +54,16 @@ A person in the middle makes three calls before pasting anything. meetproxy make
 ## What's inside
 
 - **[relay skill](plugin/skills/relay/SKILL.md)** — The flow from a request link to a posted answer
-- **[allow skill](plugin/skills/allow/SKILL.md)** — The repositories and channels meetproxy may post to
-- **Posting guard** — A PreToolUse hook that blocks posts outside the allow list while a relay is open. Every repository a `gh` write names must pass, including commands chained, wrapped or run through `bash -c`, and direct API calls are denied. Commands that do not post are never blocked
-- **Location map** — A PostToolUse hook that records the paths read while handling a request, and `meetproxy locate` to find them for the next one
+- **[allow skill](plugin/skills/allow/SKILL.md)** — Places to post besides where a request came from
+- **Posting guard** — A PreToolUse hook on Bash and the Slack and GitHub MCP tools that blocks posts anywhere but where the request came from, the pull request or issue it works on and the allow list while a relay is open. Every repository a `gh` write names must pass, including commands chained, wrapped or run through `bash -c`, and a `gh` command it cannot judge is denied. Commands that do not post are never blocked
+- **Location map** — A PostToolUse hook that records the paths read while handling a request, in a repository or in the session directory, and `meetproxy locate` to find them for the next one
 - **[Launcher](plugin/bin/meetproxy)** — Runs the binary for the plugin version from a cache, a checksum verified release, or `go install`
 
 ## Features
 
 - **Your session, your context** — Requests land in the Claude Code session you already have open, with your files, rules and history, instead of a fresh cloud sandbox
 - **Gets better with use** — Each answer records the code it rests on, so the next similar request starts from the right files
-- **Safe by default** — Request text is treated as untrusted, posts outside the allow list are denied by a hook, and the guard fails closed
+- **Safe by default** — Request text is treated as untrusted, posts anywhere but where the request came from and the allow list are denied by a hook, and the guard fails closed
 - **Honest posts** — Every post says it was written by Claude, because hidden AI use costs more trust than disclosed use
 - **Small and local** — One Go binary on the standard library, with data kept in the plugin data directory
 

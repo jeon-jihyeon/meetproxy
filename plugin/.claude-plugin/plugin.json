@@ -1,6 +1,6 @@
 {
   "name": "meetproxy",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Stop being a meat proxy. Relays requests into your open Claude Code session and posts refined answers back, remembering where each answer was found.",
   "author": { "name": "jeon-jihyeon" },
   "repository": "https://github.com/jeon-jihyeon/meetproxy",
