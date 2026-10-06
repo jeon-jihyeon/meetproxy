@@ -28,8 +28,19 @@ linters:
           disabled: true
         - name: exported
           disabled: true
+    # Imports point down only
+    # 1. cmd uses everything and nothing imports cmd
+    # 4. any package may use fileio and shell which use no package of the module
     depguard:
       rules:
+        base:
+          files:
+            - "**/internal/fileio/**"
+            - "**/internal/shell/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/jeon-jihyeon/meetproxy
+              desc: fileio and shell use no package of the module
         leaf:
           files:
             - "**/internal/locmap/**"
