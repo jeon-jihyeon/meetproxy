@@ -11,6 +11,7 @@ type cli struct {
 	data    string
 	session string
 	now     time.Time
+	in      io.Reader
 	out     io.Writer
 }
 
