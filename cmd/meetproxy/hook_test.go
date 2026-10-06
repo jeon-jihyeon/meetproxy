@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jeon-jihyeon/meetproxy/internal/inbox"
 	"github.com/jeon-jihyeon/meetproxy/internal/relay"
 )
 
@@ -98,7 +99,7 @@ func TestRunHookPath(t *testing.T) {
 				require.NoError(t, err)
 				id = r.Id
 			}
-			err := runHook(data, []string{"path"}, strings.NewReader(hookJSON(t, tc.args.input)), &bytes.Buffer{})
+			err := runHook(data, []string{"path"}, time.Now(), strings.NewReader(hookJSON(t, tc.args.input)), &bytes.Buffer{})
 			require.NoError(t, err)
 			ps, err := store.Observed(id)
 			require.NoError(t, err)
@@ -169,11 +170,80 @@ func TestRunHookGuard(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(data, f), []byte("{"), 0o644))
 			}
 			var out bytes.Buffer
-			err := runHook(data, []string{"guard"}, strings.NewReader(hookJSON(t, tc.args.input)), &out)
+			err := runHook(data, []string{"guard"}, time.Now(), strings.NewReader(hookJSON(t, tc.args.input)), &out)
 			require.NoError(t, err)
 			reason := denyReason(t, out.Bytes())
 			assert.Contains(t, reason, tc.want)
 			assert.Equal(t, tc.want == "", reason == "")
+		})
+	}
+}
+
+// Returns the lines of the SessionStart notice or nil when nothing was printed
+func startNotice(t *testing.T, out []byte) []string {
+	t.Helper()
+	if len(out) == 0 {
+		return nil
+	}
+	var o struct {
+		HookSpecificOutput struct {
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	require.NoError(t, json.Unmarshal(out, &o))
+	return strings.Split(o.HookSpecificOutput.AdditionalContext, "\n")
+}
+
+func TestRunHookStart(t *testing.T) {
+	t.Parallel()
+	svc := gitRepo(t, "svc", "main.go")
+	other := t.TempDir()
+	now := time.Now()
+	type spec struct {
+		link     string
+		name     string
+		place    string
+		status   inbox.Status
+		addedAgo time.Duration
+	}
+	specs := []spec{
+		{"https://w.slack.com/archives/C1/p1", "svc", "", inbox.StatusNew, 3 * time.Minute},
+		{"https://w.slack.com/archives/C1/p2", "svc", svc, inbox.StatusAsk, time.Minute},
+		{"https://w.slack.com/archives/C1/p3", "svc", "", inbox.StatusTaken, time.Minute},
+		{"https://w.slack.com/archives/C1/p4", "web", "", inbox.StatusNew, time.Minute},
+		{"https://w.slack.com/archives/C1/p5", "svc", "", inbox.StatusTaken, 2 * time.Hour},
+		{"https://w.slack.com/archives/C1/p6", "svc", "/elsewhere/svc", inbox.StatusNew, time.Minute},
+		{"https://w.slack.com/archives/C1/p7", "core", svc, inbox.StatusNew, time.Minute},
+	}
+	line := func(sp spec) string { return inbox.IdOf(sp.link) + " " + sp.link }
+	tcs := []struct {
+		name string
+		cwd  string
+		want []string
+	}{
+		{
+			"names the requests of the place oldest first by root or by name when stored without one", svc,
+			[]string{
+				"meetproxy: 4 requests wait for svc. Tell the user, and run /meetproxy:handle <id> for the ones they ask for.",
+				line(specs[4]), line(specs[0]), line(specs[1]), line(specs[6]),
+			},
+		},
+		{"stays quiet in a place no request waits for", other, nil},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			data := t.TempDir()
+			store := inbox.New(data)
+			for i, sp := range specs {
+				// Apart by a nanosecond so the order of requests added at once is fixed
+				at := now.Add(-sp.addedAgo).Add(time.Duration(i))
+				_, _, err := store.Add(inbox.Item{Link: sp.link, Name: sp.name, Place: sp.place, Status: sp.status}, at)
+				require.NoError(t, err)
+			}
+			var out bytes.Buffer
+			require.NoError(t, runHook(data, []string{"start"}, now, strings.NewReader(hookJSON(t, map[string]any{"cwd": tc.cwd})), &out))
+			assert.Equal(t, tc.want, startNotice(t, out.Bytes()))
 		})
 	}
 }
@@ -196,6 +266,8 @@ func TestRunHook_BadInput(t *testing.T) {
 	}{
 		{"rejects an unknown hook", args{true, "nope", "{}"}, want{true, ""}},
 		{"path hook errors without a data dir", args{false, "path", "{}"}, want{true, ""}},
+		{"start hook errors without a data dir", args{false, "start", "{}"}, want{true, ""}},
+		{"start hook errors on broken input", args{true, "start", "{"}, want{true, ""}},
 		{"guard passes non posting calls without a data dir", args{false, "guard", "{}"}, want{false, ""}},
 		{
 			"guard denies posts without a data dir",
@@ -212,7 +284,7 @@ func TestRunHook_BadInput(t *testing.T) {
 				data = t.TempDir()
 			}
 			var out bytes.Buffer
-			err := runHook(data, []string{tc.args.hook}, strings.NewReader(tc.args.input), &out)
+			err := runHook(data, []string{tc.args.hook}, time.Now(), strings.NewReader(tc.args.input), &out)
 			reason := denyReason(t, out.Bytes())
 			assert.Equal(t, tc.want.err, err != nil)
 			assert.Contains(t, reason, tc.want.reason)
