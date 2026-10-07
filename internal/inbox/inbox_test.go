@@ -150,6 +150,50 @@ func TestStoreAdd_OlderScanAfterDone(t *testing.T) {
 	assert.Equal(t, []any{false, inbox.StatusDone}, []any{added, it.Status})
 }
 
+// A message that comes while the request is taken opens it again once the take settles
+func TestStoreAdd_WhileTaken(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	type want struct {
+		status   inbox.Status
+		reason   string
+		followup bool
+	}
+	tcs := []struct {
+		name   string
+		settle func(s inbox.Store, id string) error
+		want   want
+	}{
+		{"done opens it again as a follow-up", func(s inbox.Store, id string) error { _, err := s.Done(id, "s1", now); return err }, want{inbox.StatusNew, inbox.Replied, true}},
+		{"a question opens it again since the reply may answer it", func(s inbox.Store, id string) error { _, err := s.Question(id, "s1", now); return err }, want{inbox.StatusNew, inbox.Replied, true}},
+		{"asking the user leaves it to the user", func(s inbox.Store, id string) error { _, err := s.Ask(id, "s1", "unsure", now); return err }, want{inbox.StatusAsk, "unsure", true}},
+		{"holding it leaves it to the user", func(s inbox.Store, id string) error { _, err := s.Hold(id, "s1", time.Time{}, now); return err }, want{inbox.StatusHeld, "", true}},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := inbox.New(t.TempDir())
+			id := inbox.IdOf(link)
+			_, _, err := s.Add(inbox.Item{Link: link, Status: inbox.StatusNew, Ts: "1"}, now)
+			require.NoError(t, err)
+			_, err = s.Take(id, "s1", now)
+			require.NoError(t, err)
+			_, _, err = s.Add(inbox.Item{Link: link, Status: inbox.StatusNew, Ts: "2", Followup: true}, now)
+			require.NoError(t, err)
+			taken, err := s.Get(id)
+			require.NoError(t, err)
+			require.Equal(t, inbox.StatusTaken, taken.Status)
+
+			require.NoError(t, tc.settle(s, id))
+
+			it, err := s.Get(id)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, want{it.Status, it.Reason, it.Followup})
+			assert.Empty(t, it.Again)
+		})
+	}
+}
+
 func TestItemAt(t *testing.T) {
 	t.Parallel()
 	tcs := []struct {
@@ -449,6 +493,7 @@ func TestStoreHold(t *testing.T) {
 	}{
 		{"a taken request is put off", inbox.StatusTaken, "s1", settled{inbox.StatusHeld, "", false}},
 		{"a request for the user is put off", inbox.StatusAsk, "s2", settled{inbox.StatusHeld, "", false}},
+		{"a question that came back to the user is put off", inbox.StatusQuestion, "s2", settled{inbox.StatusHeld, "", false}},
 		{"a request another session took is refused", inbox.StatusTaken, "s2", settled{inbox.StatusTaken, "", true}},
 		{"a new request is refused", inbox.StatusNew, "s1", settled{inbox.StatusNew, "", true}},
 	}

@@ -58,7 +58,8 @@ func TestStoreTouch(t *testing.T) {
 		{"touches within five minutes write once", "s1", -10 * time.Minute, []time.Duration{-4 * time.Minute, -2 * time.Minute}, 0, want{now.Add(-4 * time.Minute).UTC(), false}},
 		{"a fresh take needs no heartbeat", "s1", -time.Minute, []time.Duration{0}, 0, want{time.Time{}, false}},
 		{"another session's touch leaves the take alone", "s2", -25 * time.Minute, []time.Duration{-10 * time.Minute}, 0, want{time.Time{}, true}},
-		{"the heartbeat ages too", "s1", -50 * time.Minute, []time.Duration{-25 * time.Minute}, 0, want{now.Add(-25 * time.Minute).UTC(), true}},
+		{"the heartbeat ages too", "s1", -50 * time.Minute, []time.Duration{-35 * time.Minute}, 0, want{now.Add(-35 * time.Minute).UTC(), true}},
+		{"a take past twenty minutes is never revived", "s1", -25 * time.Minute, []time.Duration{0}, 0, want{time.Time{}, true}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {

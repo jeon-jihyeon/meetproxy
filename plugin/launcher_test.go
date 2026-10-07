@@ -70,7 +70,9 @@ func TestLauncher(t *testing.T) {
 		{"runs the cached binary", args{true, false, "none", []string{"hook", "path"}, "none"}, want{0, "cached hook path"}},
 		{"falls back to PATH", args{false, true, "none", []string{"open", "x"}, "none"}, want{0, "path open x"}},
 		{"guard blocks without a binary while a relay is open", args{false, false, "open", []string{"hook", "guard"}, "none"}, want{2, ""}},
-		{"guard passes without a binary when no relay is open", args{false, false, "none", []string{"hook", "guard"}, "none"}, want{0, ""}},
+		{"guard passes without a binary when no session has a scope", args{false, false, "none", []string{"hook", "guard"}, "empty"}, want{0, ""}},
+		{"guard blocks without a binary or a marker directory", args{false, false, "inbox", []string{"hook", "guard"}, "none"}, want{2, ""}},
+		{"guard passes without a binary on a fresh install", args{false, false, "none", []string{"hook", "guard"}, "none"}, want{0, ""}},
 		{"guard blocks without a binary or a data dir", args{false, false, "", []string{"hook", "guard"}, "none"}, want{2, ""}},
 		{"path hook passes quietly without a binary", args{false, false, "none", []string{"hook", "path"}, "none"}, want{0, ""}},
 		{"other commands fail without a binary", args{false, false, "none", []string{"version"}, "none"}, want{1, ""}},
@@ -100,6 +102,9 @@ func TestLauncher(t *testing.T) {
 					open := filepath.Join(data, "relay", "open")
 					require.NoError(t, os.MkdirAll(open, 0o755))
 					require.NoError(t, os.WriteFile(filepath.Join(open, "s1.json"), []byte("{}"), 0o600))
+				}
+				if tc.args.relay == "inbox" {
+					require.NoError(t, os.MkdirAll(filepath.Join(data, "inbox"), 0o700))
 				}
 				if tc.args.scope != "none" {
 					require.NoError(t, os.MkdirAll(filepath.Join(data, "scope"), 0o700))

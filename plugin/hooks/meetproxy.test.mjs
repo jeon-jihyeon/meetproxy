@@ -1112,3 +1112,45 @@ test('retract refuses a reply outside the ledger and edits one in it', integrati
   assert.ok(JSON.parse(env.bin(['posts', 'list']).stdout)[0].retracted_at)
   assert.match(await testing.retract(env.$, reply), /already retracted/)
 })
+
+test('with a token the timer path triages with a known place and never calls an MCP server', integration, async () => {
+  const { env } = tokenSession({ shared: () => ({ out: { shared: false } }) })
+  const real = env.$.process.run
+  env.$.process.run = async (argv, init) => {
+    if (argv.includes('map') && argv.includes('plan')) {
+      const plan = { name: 'svc', root: '/w/svc', candidates: [{ name: 'svc', root: '/w/svc', examples: ['alloc'] }, { name: 'ops', root: '/w/ops', examples: ['runbook'] }] }
+      return { exitCode: 0, stdout: JSON.stringify(plan), stderr: '' }
+    }
+    return real(argv, init)
+  }
+  await testing.check(env.$)
+  assert.ok(env.triaged > 0)
+  assert.deepEqual(env.mcp, [])
+})
+
+test('handing a request to the handle skill never waits for the turn to end', integration, async () => {
+  const env = session({ repo: '/tmp/notes' })
+  env.$.command.run = c => {
+    env.ran.push(c)
+    return new Promise(() => {})
+  }
+  env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p1', '--verdict', 'handle', '--trusted', 'yes', '--name', 'notes', '--place', '/tmp/notes'])
+  const done = await Promise.race([testing.pickUp(env.$, tick(env)).then(() => true), new Promise(r => setTimeout(() => r(false), 2000))])
+  assert.equal(done, true)
+  assert.deepEqual(env.ran.map(c => c.args.split(' ')[1]), ['--auto'])
+})
+
+test('unanswered questions the user passes over are put off and not asked again next tick', integration, async () => {
+  const env = session({ repo: '/tmp/notes' })
+  for (const n of [1, 2]) env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p' + n, '--verdict', 'ask', '--name', 'notes', '--place', '/tmp/notes'])
+  for (const [id] of rows(env)) {
+    const file = join(env.data, 'inbox', id + '.json')
+    const item = JSON.parse(readFileSync(file, 'utf8'))
+    writeFileSync(file, JSON.stringify({ ...item, status: 'question', updated_at: new Date(Date.now() - 4 * 24 * 3600_000).toISOString() }))
+  }
+  assert.deepEqual(tick(env).waiting.map(r => r.status), ['ask', 'ask'])
+  await testing.pickUp(env.$, tick(env))
+  await until(() => tick(env).waiting.every(r => r.status === 'held'))
+  assert.deepEqual(tick(env).waiting.map(r => r.status), ['held', 'held'])
+  assert.ok(!env.logs.some(l => l.includes('could not put off')))
+})

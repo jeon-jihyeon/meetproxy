@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -227,4 +229,73 @@ func TestRun_SlackRefusesAnotherHost(t *testing.T) {
 	code, err := run("slack", []string{"--data", t.TempDir(), "token"}, "s1", time.Now(), strings.NewReader("xoxp-good"), &bytes.Buffer{})
 	assert.Equal(t, exitFailed, code)
 	assert.ErrorContains(t, err, "loopback")
+}
+
+// A fake Slack with n direct conversations each holding one message
+// A conversation named in failing answers an error
+func fakeDMs(t *testing.T, n int, failing *sync.Map) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		body := map[string]any{"ok": true}
+		switch strings.TrimPrefix(r.URL.Path, "/") {
+		case "auth.test":
+			body["url"], body["user_id"], body["team_id"] = "https://w.slack.com/", "U1", "T1"
+		case "users.info":
+			body["user"] = map[string]any{"id": "U2", "team_id": "T1", "real_name": "Kai"}
+		case "conversations.list":
+			ids := []map[string]any{}
+			for i := range n {
+				ids = append(ids, map[string]any{"id": fmt.Sprintf("D%02d", i)})
+			}
+			body["channels"] = ids
+		case "conversations.history":
+			if _, fail := failing.Load(r.Form.Get("channel")); fail {
+				body = map[string]any{"ok": false, "error": "internal_error"}
+				break
+			}
+			body["messages"] = []map[string]any{{"ts": "1893456100.000001", "user": "U2", "text": "hi"}}
+		}
+		w.Header().Set("X-OAuth-Scopes", strings.Join(slackScopes, ","))
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// Not parallel since the fake Slack is named through the environment
+// Messages never come past a conversation not read yet so the dm cursor never skips one
+func TestRun_SlackDMs(t *testing.T) {
+	tcs := []struct {
+		name string
+		n    int
+		// Conversations failing on each read
+		failing [][]string
+		want    []int
+	}{
+		{"few conversations are read at once", 3, [][]string{nil}, []int{3}},
+		{"many conversations wait for every one to be read", 41, [][]string{nil, nil}, []int{0, 40}},
+		{"a conversation that fails holds the others back until it is read", 2, [][]string{{"D01"}, nil}, []int{0, 2}},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			failing := &sync.Map{}
+			t.Setenv(slackAPIEnv, fakeDMs(t, tc.n, failing).URL)
+			data := t.TempDir()
+			now := time.Unix(1893456400, 0)
+			mustRun(t, data, "s1", now, step{"slack", []string{"token"}, "xoxp-good"})
+			got := []int{}
+			for i, fail := range tc.failing {
+				failing.Clear()
+				for _, id := range fail {
+					failing.Store(id, true)
+				}
+				out := mustRun(t, data, "s1", now.Add(time.Duration(i)*time.Minute), step{"slack", []string{"dms", "--after", "1893456000"}, ""})
+				var msgs []slackMessage
+				require.NoError(t, json.Unmarshal([]byte(out), &msgs))
+				got = append(got, len(msgs))
+			}
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
