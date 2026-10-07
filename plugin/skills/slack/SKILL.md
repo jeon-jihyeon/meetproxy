@@ -1,6 +1,6 @@
 ---
 name: slack
-description: Set up a personal Slack token so meetproxy reads Slack through its binary instead of the Slack connector, whose calls mark the session busy every minute. meetproxy runs it with setup once when a session reads Slack through the connector. Run it with no argument to check the token.
+description: Set up a personal Slack token so meetproxy reads Slack in the background through its binary. Without one Slack is read through the connector only when /meetproxy:inbox runs. Run it with no argument to check the token.
 argument-hint: "[setup]"
 disable-model-invocation: true
 allowed-tools: Bash(meetproxy slack manifest), Bash(meetproxy slack manifest *), Bash(meetproxy slack setup *), Bash(meetproxy slack whoami), Bash(meetproxy slack whoami *), mcp__meetproxy__slack_token
@@ -19,12 +19,12 @@ Run `meetproxy slack whoami --data "${CLAUDE_PLUGIN_DATA}"`.
 
 ## setup
 
-1. Ask once with AskUserQuestion: "Slack reads through the connector mark the session busy every minute. Set up a personal Slack token?"
+1. Ask once with AskUserQuestion: "Without a token meetproxy reads Slack only when you open the inbox. Set up a personal Slack token so new Slack requests are kept in the background?"
    1. Set up now
    2. Later
    3. Keep the connector
 2. Record the answer with `meetproxy slack setup --data "${CLAUDE_PLUGIN_DATA}" --answer <now | later | keep>`
-   - Later asks again in a week and Keep the connector never asks again
+   - Keep the connector stops the reminder in the inbox list, and Later keeps it
    - For either, say in one line that `/meetproxy:slack setup` sets it up any time, and stop
    - When the question cannot be asked, as in a non-interactive session, record nothing and stop
 3. For Set up now, run `meetproxy slack manifest --data "${CLAUDE_PLUGIN_DATA}"` and show its `url` as a link
@@ -40,4 +40,4 @@ Run `meetproxy slack whoami --data "${CLAUDE_PLUGIN_DATA}"`.
 7. Report the team, the user and the missing scopes in one line
    - Each missing scope turns off what needs it, such as `search:read` for mentions or `chat:write` for replies
    - The fix is to add it under User Token Scopes of the app, reinstall it and run `/meetproxy:slack setup` again
-   - From the next minute on Slack is read with the token and the connector is no longer called by meetproxy
+   - From the next minute on Slack is read in the background with the token and the connector is no longer called by meetproxy

@@ -1,4 +1,4 @@
-// Package workmap learns where on this machine and with which skills the user answers each kind of request and how they write each kind of output
+// Package workmap learns the places the user works in and how they write each kind of output
 package workmap
 
 import (
@@ -10,25 +10,19 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/jeon-jihyeon/meetproxy/internal/fileio"
-	"github.com/jeon-jihyeon/meetproxy/internal/locmap"
 )
 
 // One request the user typed and what answering it touched
 // The JSON key of Root stays place so cases written before keep reading
 type Case struct {
 	Prompt string `json:"prompt"`
-	// Words of the prompt a plan matches requests against
-	Tokens []string `json:"tokens,omitempty"`
 	// Root of the repository or the directory the session worked in
-	Root   string    `json:"place"`
-	Skills []string  `json:"skills,omitempty"`
-	Files  []string  `json:"files,omitempty"`
-	At     time.Time `json:"at"`
+	Root string    `json:"place"`
+	At   time.Time `json:"at"`
 	// Transcript the prompt was typed in
 	Source string `json:"source,omitempty"`
 	// Byte offset of the prompt line in the transcript
@@ -59,15 +53,9 @@ type state struct {
 	RefreshedAt time.Time         `json:"refreshed_at"`
 }
 
-type Store struct {
-	dir string
-	// Places past answers rested on by request topic
-	locations locmap.Map
-}
+type Store struct{ dir string }
 
-func New(dataDir string) Store {
-	return Store{dir: filepath.Join(dataDir, "workmap"), locations: locmap.New(dataDir)}
-}
+func New(dataDir string) Store { return Store{dir: filepath.Join(dataDir, "workmap")} }
 
 var ErrBusy = errors.New("another refresh is running")
 
@@ -150,7 +138,6 @@ func (s Store) save(config string, cases []Case, formats []Format, reads []read)
 	return fileio.WriteJSON(filepath.Join(s.dir, "formats.json"), formatsOf(config, places, methods, formats, reads))
 }
 
-// Cases written before they kept their words get them from their prompt
 func (s Store) Cases() ([]Case, error) {
 	f, err := os.Open(filepath.Join(s.dir, "cases.jsonl"))
 	if errors.Is(err, os.ErrNotExist) {
@@ -167,9 +154,6 @@ func (s Store) Cases() ([]Case, error) {
 		var c Case
 		if json.Unmarshal(sc.Bytes(), &c) != nil {
 			continue
-		}
-		if c.Tokens == nil {
-			c.Tokens = tokens(c.Prompt)
 		}
 		out = append(out, c)
 	}
@@ -310,24 +294,6 @@ func writeCases(file string, cases []Case) error {
 		b = append(append(b, line...), '\n')
 	}
 	return fileio.WriteAtomic(file, b, 0o600)
-}
-
-// At most n values with the most frequent first
-func top(counts map[string]int, n int) []string {
-	var keys []string
-	for k := range counts {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if counts[keys[i]] != counts[keys[j]] {
-			return counts[keys[i]] > counts[keys[j]]
-		}
-		return keys[i] < keys[j]
-	})
-	if len(keys) > n {
-		keys = keys[:n]
-	}
-	return keys
 }
 
 // At most n runes of s on one line

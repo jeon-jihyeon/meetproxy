@@ -45,13 +45,10 @@ func (c cli) postsAdd() error {
 		Request: inbox.IdOf(sc.origin), Relay: c.relayId(), Origin: sc.origin, Reply: in.Reply, Body: in.Body,
 		Mode: posts.ModeManual, Kind: in.Kind, Session: c.session,
 	}
-	it, err := inbox.New(c.data).Get(p.Request)
+	it, err := inbox.New(c.data).ByOrigin(sc.origin)
 	switch {
 	case err == nil:
-		p.Delegation, p.Mode = it.Delegation, it.Mode
-		if p.Mode == "" {
-			p.Mode = posts.ModeAsked
-		}
+		p.Request, p.Delegation, p.Mode = it.Id, it.Delegation, posts.ModeInbox
 	case !errors.Is(err, inbox.ErrNotFound):
 		return err
 	}

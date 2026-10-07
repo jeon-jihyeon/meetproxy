@@ -18,7 +18,7 @@ var version = "dev"
 
 // The command set the plugin mod speaks
 // Raised whenever a command the mod calls changes so an older mod stops instead of misreading
-const protocol = 8
+const protocol = 9
 
 const (
 	exitFailed = 1
@@ -81,12 +81,8 @@ var families = []family{
 	{"setup", []command{
 		{name: "version", noData: true, help: "print the binary version", run: printVersion},
 		{name: "protocol", noData: true, help: "print the command set the plugin mod expects", run: printProtocol},
-		{
-			name: "tick", flags: []string{"cwd", "session", "busy"},
-			help: "print the protocol, the place of --cwd, the waiting requests and Slack as JSON, --busy renews the takes of --session",
-			run:  func(c cli, _ []string, f flags) (int, error) { return exitCode(c.tick(f.cwd, f.busy)) },
-		},
-		{name: "pause", help: "stop taking requests", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.pause(true)) }},
+		{name: "tick", help: "print the protocol, the waiting requests and Slack as JSON", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.tick()) }},
+		{name: "pause", help: "stop queueing and taking requests", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.pause(true)) }},
 		{name: "resume", help: "take requests again", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.pause(false)) }},
 		{name: "status", help: "print the state of every source, the inbox, Slack and the hooks as JSON", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.status()) }},
 		{name: "tidy", help: "expire old requests and prune relays, the map and markers", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.tidy(false)) }},
@@ -137,10 +133,6 @@ var families = []family{
 			run: func(c cli, _ []string, f flags) (int, error) { return exitCode(c.slackDMs(f.after)) },
 		},
 		{
-			name: "slack shared", args: "<channel>", least: 1, most: 1, help: "print whether people outside the workspace read the channel",
-			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.slackShared(a[0])) },
-		},
-		{
 			name: "slack react", args: "<link>", least: 1, most: 1, flags: []string{"react"}, help: "add the reaction --react to the message of a link",
 			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackReact(a[0], f.react)) },
 		},
@@ -155,10 +147,6 @@ var families = []family{
 		{
 			name: "slack read", args: "<link>", least: 1, most: 1, flags: []string{"limit"}, help: "print the text of the thread a link points at",
 			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackRead(a[0], f.limit)) },
-		},
-		{
-			name: "slack trusted", args: "<user id>", least: 1, most: 1, help: "print whether a user is a full member of the user's workspace",
-			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.slackTrusted(a[0])) },
 		},
 		{
 			name: "slack post", args: "<link>", least: 1, most: 1, flags: []string{"session"},
@@ -209,29 +197,19 @@ var families = []family{
 		{
 			name: "inbox add", args: "<link>", least: 1, most: 1,
 			flags: []string{
-				"verdict", "reason", "keywords", "from", "ts", "key", "delegation", "target", "self", "trusted", "name", "place", "skills", "files",
+				"thread", "source", "from", "author", "channel", "summary", "reason", "ts", "key", "delegation", "target", "self",
 				"depth", "digest", "followup", "correction",
 			},
-			help: "queue a request, --verdict is handle or ask, a handle from outside the trust set is asked about", run: addRequest,
-		},
-		{
-			name: "inbox claim", args: "<id>", least: 1, most: 1, flags: []string{"session"}, session: true,
-			help: "take a request for a session that works on one at a time",
-			run:  func(c cli, a []string, _ flags) (int, error) { return exitCode(c.inboxClaim(a[0])) },
+			help: "queue a request, one per --thread", run: addRequest,
 		},
 		{
 			name: "inbox take", args: "<id>", least: 1, most: 1, flags: []string{"session"}, session: true,
-			help: "take a request and print link, task, target, approve, place, skills and files",
+			help: "take a request and print link, task, target, approve, depth and flags",
 			run:  func(c cli, a []string, _ flags) (int, error) { return exitCode(c.inboxTake(a[0])) },
 		},
 		{
-			name: "inbox ask", args: "<id>", least: 1, most: 1, flags: []string{"reason", "session"}, session: true,
-			help: "hand a request back so the user is asked",
-			run:  func(c cli, a []string, f flags) (int, error) { return exitCode(c.ask(a[0], f.reason)) },
-		},
-		{
 			name: "inbox hold", args: "<id>", least: 1, most: 1, flags: []string{"session", "until"}, session: true,
-			help: "put a request off until the user runs handle or until --until, a time, a duration or tomorrow",
+			help: "put a request off until the user takes it or until --until, a time, a duration or tomorrow",
 			run:  func(c cli, a []string, f flags) (int, error) { return exitCode(c.hold(a[0], f.until)) },
 		},
 		{
@@ -246,7 +224,7 @@ var families = []family{
 		},
 		{
 			name: "inbox acked", args: "<id>", least: 1, most: 1, flags: []string{"react"},
-			help: "record that --react eyes, done or handoff was added to the request link",
+			help: "record that --react eyes or done was added to the request link",
 			run:  func(c cli, a []string, f flags) (int, error) { return exitCode(c.inboxAcked(a[0], f.react)) },
 		},
 		{
@@ -255,12 +233,8 @@ var families = []family{
 			run:  func(c cli, a []string, _ flags) (int, error) { return exitCode(c.done(a[0])) },
 		},
 		{
-			name: "inbox list", flags: []string{"limit"}, help: "list queued requests, newest first",
+			name: "inbox list", flags: []string{"limit"}, help: "list the requests not done, newest first",
 			run: func(c cli, _ []string, f flags) (int, error) { return exitCode(c.inboxList(f.limit)) },
-		},
-		{
-			name: "inbox waiting", help: "list unclaimed requests oldest first with name and added time",
-			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.inboxWaiting()) },
 		},
 		{
 			name: "inbox cursor", flags: []string{"key"}, help: "print the unix time to read Slack after",
@@ -351,10 +325,6 @@ var families = []family{
 			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.mapRefresh(true)) },
 		},
 		{
-			name: "map plan", help: "print the place, skills and files the map suggests for a request on stdin",
-			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.mapPlan()) },
-		},
-		{
 			name: "map show", help: "print the places, skills and output formats the map knows",
 			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.mapShow()) },
 		},
@@ -368,10 +338,10 @@ var families = []family{
 
 // Hooks run on their own path since they read the data directory from the environment and never fail
 const hookUsage = `hooks
-  hook start                      SessionStart notice of waiting requests
   hook path                       PostToolUse path collection
   hook guard                      PreToolUse posting guard
-  hook stop                       Stop end of the scope a close kept for the turn`
+  hook stop                       Stop end of the scope a close kept for the turn
+  hook end                        SessionEnd return of the session's takes`
 
 func usage() string {
 	var b strings.Builder
@@ -400,16 +370,16 @@ func usage() string {
 // Every flag any command takes
 // A command names the ones it reads so any other fails
 type flags struct {
-	data, root, session                  string
-	target, topic, from, ts, verdict     string
-	reason, name, place, key, delegation string
-	cwd, self, trusted, keywords, paths  string
-	skills, files, after, oldest, answer string
-	until, react, depth, digest          string
-	followup, correction                 string
-	limit                                int
-	ttl                                  time.Duration
-	busy                                 bool
+	data, root, session                 string
+	target, topic, from, ts, reason     string
+	place, key, delegation, self        string
+	keywords, paths, after, oldest      string
+	answer, until, react, depth, digest string
+	followup, correction                string
+	thread, source, author, channel     string
+	summary                             string
+	limit                               int
+	ttl                                 time.Duration
 }
 
 func (f *flags) set() *flag.FlagSet {
@@ -425,17 +395,11 @@ func (f *flags) set() *flag.FlagSet {
 	fs.IntVar(&f.limit, "limit", defaultLimit, "number of results, every one with 0")
 	fs.StringVar(&f.from, "from", "", "requester id")
 	fs.StringVar(&f.ts, "ts", "", "unix seconds of the request")
-	fs.StringVar(&f.verdict, "verdict", "", "handle or ask")
 	fs.StringVar(&f.reason, "reason", "", "one line reason")
-	fs.StringVar(&f.name, "name", "", "display name of the place")
 	fs.StringVar(&f.place, "place", "", "absolute root of the place")
-	fs.StringVar(&f.skills, "skills", "", "comma separated skills the work map suggests")
-	fs.StringVar(&f.files, "files", "", "comma separated files the work map suggests")
 	fs.StringVar(&f.key, "key", "mention", "cursor key, a delegation id for channel delegations")
 	fs.StringVar(&f.delegation, "delegation", "", "delegation that caught the message, the default one when empty")
 	fs.StringVar(&f.self, "self", "", "yes when the user wrote the request")
-	fs.StringVar(&f.trusted, "trusted", "", "yes when the source vouches for the sender as a member of the user's team")
-	fs.StringVar(&f.cwd, "cwd", "", "directory of the session")
 	fs.StringVar(&f.after, "after", "", "unix seconds to read Slack mentions after")
 	fs.StringVar(&f.oldest, "oldest", "", "Slack ts to read a channel after")
 	fs.StringVar(&f.answer, "answer", "", "now, later or keep")
@@ -446,7 +410,11 @@ func (f *flags) set() *flag.FlagSet {
 	fs.StringVar(&f.followup, "followup", "", "yes for a reply in a thread meetproxy answered")
 	fs.StringVar(&f.correction, "correction", "", "yes when the reply says the earlier answer was wrong")
 	fs.DurationVar(&f.ttl, "ttl", defaultLeaseTTL, "how long a lease lasts")
-	fs.BoolVar(&f.busy, "busy", false, "a turn is running in the session")
+	fs.StringVar(&f.thread, "thread", "", "key of the thread the request sits in")
+	fs.StringVar(&f.source, "source", "", "slack or github")
+	fs.StringVar(&f.author, "author", "", "requester display name")
+	fs.StringVar(&f.channel, "channel", "", "Slack channel or GitHub repository")
+	fs.StringVar(&f.summary, "summary", "", "text of the request, of which the first line is kept")
 	return fs
 }
 
@@ -533,7 +501,7 @@ func exitCode(err error) (int, error) {
 	}
 }
 
-// Moves flags ahead of positional arguments since every flag but the boolean ones takes a value
+// Moves flags ahead of positional arguments since every flag takes a value
 // Words after `--` or after the command word of triage command stay positional as they are
 func reorder(cmd string, args []string) []string {
 	var flags, pos []string
@@ -547,7 +515,7 @@ func reorder(cmd string, args []string) []string {
 			return append(flags, args[i:]...)
 		case len(a) > 1 && a[0] == '-':
 			flags = append(flags, a)
-			if !strings.Contains(a, "=") && !boolFlags[strings.TrimLeft(a, "-")] && i+1 < len(args) {
+			if !strings.Contains(a, "=") && i+1 < len(args) {
 				flags = append(flags, args[i+1])
 				i++
 			}
@@ -557,9 +525,6 @@ func reorder(cmd string, args []string) []string {
 	}
 	return append(flags, pos...)
 }
-
-// Flags that take no value
-var boolFlags = map[string]bool{"busy": true}
 
 func split(s string) []string {
 	var out []string

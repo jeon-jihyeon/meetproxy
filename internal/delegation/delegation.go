@@ -1,4 +1,4 @@
-// Package delegation says which messages of any source become requests and what a session does with them
+// Package delegation says which messages of any source become requests and what a session does with them once the user takes one
 package delegation
 
 import (
@@ -25,9 +25,6 @@ const (
 	DoReview      = "review"      // review skill on the pull request the message links
 	DoInvestigate = "investigate" // investigate skill on an alert
 
-	PostAuto = "auto" // the session posts on its own
-	PostAsk  = "ask"  // the session asks the user first
-
 	ApproveNever = "never" // review comments only
 	ApproveSelf  = "self"  // approve only when the user wrote the request
 	ApproveAny   = "any"   // approve whoever asked
@@ -47,24 +44,15 @@ type Delegation struct {
 	Words   []string `json:"words,omitempty"`
 	Link    string   `json:"link,omitempty"`
 	Do      string   `json:"do"`
-	Post    string   `json:"post"`
 	Approve string   `json:"approve,omitempty"`
-	// Workspace to run in
-	// A repository or a session directory
-	// Empty picks one from the link or the location map
-	Workspace string `json:"workspace,omitempty"`
 	// The sentence the user said
 	Note string `json:"note,omitempty"`
-	// Order among requests asked together, higher first
-	Priority int `json:"priority,omitempty"`
 	// Requests queued per hour at most
 	// Zero is the default of the kind
 	MaxPerHour int `json:"max_per_hour,omitempty"`
 	// Minutes within which the same text is a duplicate
 	// Zero is the default of the kind
 	DedupeMinutes int `json:"dedupe_minutes,omitempty"`
-	// Post a one line note where it was asked when the automatic attempt gives up
-	Handoff bool `json:"handoff,omitempty"`
 }
 
 // Defaults of channel delegations whose every message is a candidate
@@ -90,17 +78,15 @@ func (d Delegation) Limits() (perHour, dedupeMinutes int) {
 }
 
 var (
-	// A mention with a pull request link is reviewed with no setup
+	// A mention with a pull request link is a review with no setup
 	// Approval stays with the user's own requests
-	DefaultReview = Delegation{Id: "default-review", When: WhenMention, Link: LinkPR, Do: DoReview, Post: PostAuto, Approve: ApproveSelf}
-	// A review someone requested asks the user before anything is posted
-	DefaultReviewRequest = Delegation{Id: "default-review-request", When: WhenReviewRequest, Do: DoReview, Post: PostAsk, Approve: ApproveSelf}
-	// Direct messages are answered after triage
-	DefaultDM = Delegation{Id: "default-dm", When: WhenDM, Do: DoAnswer, Post: PostAuto}
-	// Comments on the user's own pull requests often ask for a change so the user is asked first
-	DefaultOwnPR = Delegation{Id: "default-own-pr", When: WhenOwnPR, Do: DoAnswer, Post: PostAsk}
-	// Mentions that no delegation catches are answered after triage
-	Default = Delegation{Id: "default", When: WhenMention, Do: DoAnswer, Post: PostAuto}
+	DefaultReview        = Delegation{Id: "default-review", When: WhenMention, Link: LinkPR, Do: DoReview, Approve: ApproveSelf}
+	DefaultReviewRequest = Delegation{Id: "default-review-request", When: WhenReviewRequest, Do: DoReview, Approve: ApproveSelf}
+	// Direct messages are kept after triage
+	DefaultDM    = Delegation{Id: "default-dm", When: WhenDM, Do: DoAnswer}
+	DefaultOwnPR = Delegation{Id: "default-own-pr", When: WhenOwnPR, Do: DoAnswer}
+	// Mentions that no delegation catches are kept after triage
+	Default = Delegation{Id: "default", When: WhenMention, Do: DoAnswer}
 )
 
 // Built in after the user's delegations so one of the user goes first
@@ -109,7 +95,7 @@ var builtIn = []Delegation{DefaultReview, DefaultReviewRequest, DefaultDM, Defau
 // Kinds whose messages name the user and match delegations of that kind
 var kinds = []string{WhenMention, WhenReviewRequest, WhenDM, WhenOwnPR}
 
-// Triage only decides for answers to messages addressed to the user since every other delegation already names its task
+// Triage only sorts out answers to messages addressed to the user since every other delegation already names its task
 func (d Delegation) Triaged() bool {
 	return slices.Contains([]string{WhenMention, WhenDM, WhenOwnPR}, d.When) && d.Do == DoAnswer
 }
@@ -162,8 +148,6 @@ func (d Delegation) Validate() error {
 		return errors.New("a channel delegation needs a channel id such as C0123 and a host such as acme.slack.com")
 	case !validSkill.MatchString(d.Do):
 		return fmt.Errorf("do must be answer, review, investigate or a skill name %q", d.Do)
-	case !slices.Contains([]string{PostAuto, PostAsk}, d.Post):
-		return fmt.Errorf("post must be auto or ask %q", d.Post)
 	case d.Approve != "" && !slices.Contains([]string{ApproveNever, ApproveSelf, ApproveAny}, d.Approve):
 		return fmt.Errorf("approve must be never, self or any %q", d.Approve)
 	case d.Link != "" && d.Link != LinkPR:
@@ -197,45 +181,21 @@ type Message struct {
 	From string `json:"from"`
 	// Author display name
 	Author string `json:"author"`
-	// The source vouches for the author as a member of the user's own team or organization
-	Trusted bool `json:"trusted"`
 }
 
-// How the delegation posts for the message
-// A sender outside the trust set is asked about first unless the delegation names their id
-func (d Delegation) PostFor(m Message) string {
-	if !d.Trusts(m.From, m.Trusted) {
-		return PostAsk
-	}
-	return d.Post
-}
+var prLink = regexp.MustCompile(`https://github\.com/[\w.-]+/[\w.-]+/pull/\d+`)
 
-// Whether a sender the source may vouch for counts as trusted
-// Only an id named in From counts since a display name is anyone's to take
-func (d Delegation) Trusts(from string, trusted bool) bool {
-	return trusted || (from != "" && slices.ContainsFunc(d.From, func(f string) bool { return strings.EqualFold(f, from) }))
-}
+// The first pull request link of the text, empty when there is none
+func PullRequest(text string) string { return prLink.FindString(text) }
 
-var prLink = regexp.MustCompile(`https://github\.com/([\w.-]+)/([\w.-]+)/pull/\d+`)
-
-// The first pull request link of the text and its repository name
-// Both are empty when there is none
-func PullRequest(text string) (link, repo string) {
-	m := prLink.FindStringSubmatch(text)
-	if m == nil {
-		return "", ""
-	}
-	return m[0], m[2]
-}
-
-// The pull request a review works on and its repository name
+// The pull request a review works on
 // 1. A review request is the pull request itself
 // 2. A mention names it in its text
-// 3. Both are empty for any task other than a review
-func (d Delegation) Target(m Message) (link, repo string) {
+// 3. Empty for any task other than a review
+func (d Delegation) Target(m Message) string {
 	switch {
 	case d.Do != DoReview:
-		return "", ""
+		return ""
 	case d.When == WhenReviewRequest:
 		return PullRequest(m.Link)
 	default:
@@ -249,7 +209,7 @@ func (d Delegation) Target(m Message) (link, repo string) {
 func (d Delegation) Matches(m Message) bool {
 	// A comment on a pull request links to it without asking for a review so only the text counts
 	if d.Link == LinkPR {
-		if link, _ := PullRequest(m.Text); link == "" {
+		if PullRequest(m.Text) == "" {
 			return false
 		}
 	}

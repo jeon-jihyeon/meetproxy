@@ -2,6 +2,7 @@
 package slackapi
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -239,19 +240,6 @@ func (c Client) React(channel, ts, name string) error {
 	return err
 }
 
-// Whether people outside the user's workspace can read the channel
-// A channel shared within an organization counts too since its members may sit in another workspace
-func (c Client) Shared(channel string) (bool, error) {
-	var r struct {
-		Channel struct {
-			IsShared    bool `json:"is_shared"`
-			IsExtShared bool `json:"is_ext_shared"`
-		} `json:"channel"`
-	}
-	_, err := c.call("conversations.info", url.Values{"channel": {channel}}, &r)
-	return r.Channel.IsShared || r.Channel.IsExtShared, err
-}
-
 // Ids of the user's direct and group direct conversations
 // Every page is read within MaxPages since a conversation left out would lose its messages
 func (c Client) DirectConversations() ([]string, error) {
@@ -283,38 +271,25 @@ func (c Client) DirectConversations() ([]string, error) {
 	return nil, fmt.Errorf("slack conversations.list: more than %d pages of direct conversations", MaxPages)
 }
 
-// A member of a workspace as the trust check needs it
+// A member of a workspace by the name messages show
 type User struct {
 	Id   string `json:"id"`
-	Team string `json:"team"`
 	Name string `json:"name"`
-	// Deactivated
-	Deleted bool `json:"deleted"`
-	// A guest, single or multi channel
-	Restricted bool `json:"restricted"`
 }
 
 func (c Client) UserInfo(id string) (User, error) {
 	var r struct {
 		User struct {
-			Id                string `json:"id"`
-			TeamId            string `json:"team_id"`
-			Name              string `json:"name"`
-			RealName          string `json:"real_name"`
-			Deleted           bool   `json:"deleted"`
-			IsRestricted      bool   `json:"is_restricted"`
-			IsUltraRestricted bool   `json:"is_ultra_restricted"`
+			Id       string `json:"id"`
+			Name     string `json:"name"`
+			RealName string `json:"real_name"`
 		} `json:"user"`
 	}
 	if _, err := c.call("users.info", url.Values{"user": {id}}, &r); err != nil {
 		return User{}, err
 	}
 	u := r.User
-	name := u.RealName
-	if name == "" {
-		name = u.Name
-	}
-	return User{Id: u.Id, Team: u.TeamId, Name: name, Deleted: u.Deleted, Restricted: u.IsRestricted || u.IsUltraRestricted}, nil
+	return User{Id: u.Id, Name: cmp.Or(u.RealName, u.Name)}, nil
 }
 
 // Posts the form to method and decodes the answer into v

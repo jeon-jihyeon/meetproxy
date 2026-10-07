@@ -90,31 +90,3 @@ func TestResolveIn(t *testing.T) {
 		})
 	}
 }
-
-func TestPlace(t *testing.T) {
-	t.Parallel()
-	base := t.TempDir()
-	svc := filepath.Join(base, "svc")
-	require.NoError(t, os.MkdirAll(filepath.Join(svc, ".git"), 0o755))
-	notes := filepath.Join(base, "notes")
-	type want struct {
-		root string
-		name string
-	}
-	tcs := []struct {
-		name string
-		dir  string
-		want want
-	}{
-		{"a directory in a repository is the repository", filepath.Join(svc, "pkg"), want{svc, "svc"}},
-		{"a directory outside any repository is itself", notes, want{notes, "notes"}},
-		{"a trailing separator is ignored", notes + string(filepath.Separator), want{notes, "notes"}},
-	}
-	for _, tc := range tcs {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			root, name := locmap.Place(tc.dir)
-			assert.Equal(t, tc.want, want{root, name})
-		})
-	}
-}

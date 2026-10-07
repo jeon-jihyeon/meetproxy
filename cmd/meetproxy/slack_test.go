@@ -22,9 +22,7 @@ func fakeSlack(t *testing.T) *httptest.Server {
 	t.Helper()
 	users := map[string]map[string]any{
 		"U2": {"id": "U2", "team_id": "T1", "real_name": "Kai"},
-		"U3": {"id": "U3", "team_id": "T1", "real_name": "Guest", "is_restricted": true},
 		"U4": {"id": "U4", "team_id": "T9", "real_name": "Other"},
-		"U5": {"id": "U5", "team_id": "T1", "real_name": "Gone", "deleted": true},
 	}
 	answers := map[string]func(r *http.Request) any{
 		"auth.test": func(*http.Request) any {
@@ -56,12 +54,9 @@ func fakeSlack(t *testing.T) *httptest.Server {
 		},
 		"users.info":         func(r *http.Request) any { return map[string]any{"user": users[r.Form.Get("user")]} },
 		"conversations.list": func(*http.Request) any { return map[string]any{"channels": []map[string]any{{"id": "D1"}}} },
-		"conversations.info": func(r *http.Request) any {
-			return map[string]any{"channel": map[string]any{"is_ext_shared": r.Form.Get("channel") == "C7"}}
-		},
-		"reactions.add": func(*http.Request) any { return map[string]any{} },
-		"chat.update":   func(*http.Request) any { return map[string]any{} },
-		"chat.delete":   func(*http.Request) any { return map[string]any{} },
+		"reactions.add":      func(*http.Request) any { return map[string]any{} },
+		"chat.update":        func(*http.Request) any { return map[string]any{} },
+		"chat.delete":        func(*http.Request) any { return map[string]any{} },
 		"chat.postMessage": func(r *http.Request) any {
 			return map[string]any{"channel": r.Form.Get("channel"), "ts": "1.2", "thread": r.Form.Get("thread_ts")}
 		},
@@ -108,13 +103,13 @@ func TestRun_Slack(t *testing.T) {
 		{"a command before a token says how to set one up", step{"slack", []string{"mentions", "--after", "1"}, ""}, slackWant{1, "", true}},
 		{"a token Slack refuses is not stored", step{"slack", []string{"token"}, "xoxp-bad\n"}, slackWant{1, "", true}},
 		{"a bot token is refused before Slack is asked", step{"slack", []string{"token"}, "xoxb-good"}, slackWant{exitUsage, "", true}},
-		{"tick before a token", step{"tick", []string{"--cwd", "/tmp/notes"}, ""}, slackWant{0, `"slack":{"token":false}`, false}},
+		{"tick before a token", step{"tick", nil, ""}, slackWant{0, `"slack":{"token":false}`, false}},
 		{
 			"a token Slack accepts is stored with what it lacks", step{"slack", []string{"token"}, "  xoxp-good\n"},
 			slackWant{0, `{"host":"w.slack.com","missing":` + missing + `,"team":"T1","user":"U1"}`, false},
 		},
 		{"whoami asks Slack", step{"slack", []string{"whoami"}, ""}, slackWant{0, `{"host":"w.slack.com","team":"T1","user":"U1"}`, false}},
-		{"tick names the token's user and host", step{"tick", []string{"--cwd", "/tmp/notes"}, ""}, slackWant{0, `"slack":{"token":true,"user":"U1","team":"T1","host":"w.slack.com"}`, false}},
+		{"tick names the token's user and host", step{"tick", nil, ""}, slackWant{0, `"slack":{"token":true,"user":"U1","team":"T1","host":"w.slack.com"}`, false}},
 		{
 			"mentions come oldest first in the mod's shape", step{"slack", []string{"mentions", "--after", "1893456000"}, ""},
 			slackWant{0, `[{"author":"Kai","channel":"C1","from":"U2","ts":"1893456100.000001","link":"` + link + `","text":"<@U1> a"},` +
@@ -138,22 +133,17 @@ func TestRun_Slack(t *testing.T) {
 			"dms leave out bots and messages the mention reader finds", step{"slack", []string{"dms", "--after", "1893456000"}, ""},
 			slackWant{0, `[{"author":"Kai","channel":"D1","from":"U2","ts":"1893456060.000001","link":"https://w.slack.com/archives/D1/p1893456060000001","text":"hello"}]`, false},
 		},
-		{"a channel shared with another organization", step{"slack", []string{"shared", "C7"}, ""}, slackWant{0, `{"shared":true}`, false}},
-		{"an internal channel", step{"slack", []string{"shared", "C1"}, ""}, slackWant{0, `{"shared":false}`, false}},
 		{"react adds a reaction", step{"slack", []string{"react", link, "--react", "eyes"}, ""}, slackWant{0, "", false}},
 		{"usage error for a reaction that is no emoji name", step{"slack", []string{"react", link, "--react", "a b"}, ""}, slackWant{exitUsage, "", true}},
 		{"a reply outside the ledger is never edited", step{"slack", []string{"update", link}, "fixed"}, slackWant{1, "", true}},
 		{"a reply outside the ledger is never deleted", step{"slack", []string{"delete", link}, ""}, slackWant{1, "", true}},
 		{"read joins the thread", step{"slack", []string{"read", link, "--limit", "5"}, ""}, slackWant{0, `{"text":"Kai: <@U1> a"}`, false}},
-		{"a member of the workspace is trusted", step{"slack", []string{"trusted", "U2"}, ""}, slackWant{0, `{"trusted":true}`, false}},
-		{"a guest is not trusted", step{"slack", []string{"trusted", "U3"}, ""}, slackWant{0, `{"trusted":false}`, false}},
-		{"a member of another team is not trusted", step{"slack", []string{"trusted", "U4"}, ""}, slackWant{0, `{"trusted":false}`, false}},
-		{"a deactivated account is not trusted", step{"slack", []string{"trusted", "U5"}, ""}, slackWant{0, `{"trusted":false}`, false}},
+		{"slack trusted is gone", step{"slack", []string{"trusted", "U2"}, ""}, slackWant{exitUsage, "", true}},
 		{"a post outside the scope and the allow list is denied", step{"slack", []string{"post", link}, "hi"}, slackWant{1, "denied", false}},
 		{"usage error for a post without text", step{"slack", []string{"post", link}, " "}, slackWant{exitUsage, "", true}},
 		{"setup keeps the answer", step{"slack", []string{"setup", "--answer", "later"}, ""}, slackWant{0, "recorded later", false}},
 		{"usage error for another answer", step{"slack", []string{"setup", "--answer", "maybe"}, ""}, slackWant{exitUsage, "", true}},
-		{"tick reports the answer", step{"tick", []string{"--cwd", "/tmp/notes"}, ""}, slackWant{0, `"setup":{"answer":"later","at":1893456400}`, false}},
+		{"tick reports the answer", step{"tick", nil, ""}, slackWant{0, `"setup":{"answer":"later","at":1893456400}`, false}},
 	}
 	for _, s := range steps {
 		t.Run(s.name, func(t *testing.T) {
