@@ -1,4 +1,4 @@
-// Package inbox queues requests from any source until one session takes each
+// Package inbox keeps requests from any source until the user takes one up in a session
 package inbox
 
 import (
@@ -22,44 +22,51 @@ import (
 type Status string
 
 const (
-	StatusNew   Status = "new"   // a session may answer it on its own
-	StatusAsk   Status = "ask"   // a session asks the user before answering
-	StatusHeld  Status = "held"  // the user put it off and runs handle when ready or until it is due
-	StatusTaken Status = "taken" // claimed by a session
+	StatusOpen  Status = "open"  // nobody works on it
+	StatusHeld  Status = "held"  // the user put it off until a time or until they take it
+	StatusTaken Status = "taken" // a session works on it
 	StatusDone  Status = "done"  // answered or dropped
 	// asked the requester back and waits for the reply
-	// Never asked to the user until questionFor passes with no reply
 	StatusQuestion Status = "question"
 )
 
-// Reason a question left unanswered for questionFor comes back with
+// Statuses from before the inbox waited for the user
+// Both mean nobody works on the request
+var legacyOpen = []Status{"new", "ask"}
+
+// Reason a question left unanswered for questionFor opens again with
 const Unanswered = "requester did not answer"
 
 // Reason a request opens again with when a newer message came while it was taken
 const Replied = "the requester wrote again while the request was handled"
 
+// Reason a take opens again with when its session ended or kept it past takeFor
+const Released = "the session that took it ended"
+
 // Reactions a request may be acknowledged with
 const (
-	AckSeen    = "eyes"    // the request was queued
-	AckDone    = "done"    // the request was answered
-	AckHandoff = "handoff" // the automatic attempt gave up and said so
+	AckSeen = "eyes" // the request was queued
+	AckDone = "done" // the request was answered
 )
 
 type Item struct {
-	Id       string   `json:"id"`
-	Link     string   `json:"link"`
-	From     string   `json:"from,omitempty"`
-	Keywords []string `json:"keywords,omitempty"`
-	// Display name of the place
-	Name string `json:"name,omitempty"`
-	// Absolute root of the place the request belongs to
-	Place string `json:"place,omitempty"`
-	// Skills the work map suggests starting from
-	Skills []string `json:"skills,omitempty"`
-	// Files the work map suggests starting from
-	Files  []string `json:"files,omitempty"`
-	Status Status   `json:"status"`
-	Reason string   `json:"reason,omitempty"`
+	Id string `json:"id"`
+	// Key of the thread the request sits in
+	// Every message of one thread is one request
+	Thread string `json:"thread,omitempty"`
+	// Link of the first message that asked, where the reply goes
+	Link   string `json:"link"`
+	Source string `json:"source,omitempty"`
+	// Author id
+	From string `json:"from,omitempty"`
+	// Author display name
+	Author  string `json:"author,omitempty"`
+	Channel string `json:"channel,omitempty"`
+	// First line of the newest message as the list shows it
+	// Untrusted text
+	Summary string `json:"summary,omitempty"`
+	Status  Status `json:"status"`
+	Reason  string `json:"reason,omitempty"`
 	// Delegation that caught the message
 	Delegation string `json:"delegation,omitempty"`
 	// Task the delegation names
@@ -68,19 +75,14 @@ type Item struct {
 	Target     string `json:"target,omitempty"`
 	MayApprove bool   `json:"may_approve,omitempty"`
 	// Unix seconds of the newest message that asked
-	// A newer one on a done request asks again
+	// A newer one on a settled request opens it again
 	Ts        string    `json:"ts,omitempty"`
 	SessionId string    `json:"session_id,omitempty"`
 	AddedAt   time.Time `json:"added_at"`
 	UpdatedAt time.Time `json:"updated_at"`
-	// Last sign that the session working on a take is still at it
-	// Kept apart from UpdatedAt so a heartbeat never reads as a change of status
-	HeartbeatAt time.Time `json:"heartbeat_at,omitzero"`
-	// When a held request is asked about again
-	// Zero waits until the user runs handle
+	// When a held request opens again
+	// Zero waits until the user takes it
 	HeldUntil time.Time `json:"held_until,omitzero"`
-	// How the session that took it answers: auto when nobody watches and asked after the user was asked
-	Mode string `json:"mode,omitempty"`
 	// quick or deep as the request asked
 	Depth string `json:"depth,omitempty"`
 	// A reply in a thread meetproxy already answered
@@ -89,18 +91,14 @@ type Item struct {
 	Correction bool `json:"correction,omitempty"`
 	// Digest of the request text that duplicates are told by
 	Digest string `json:"digest,omitempty"`
-	// Order among requests asked together, higher first
-	Priority int `json:"priority,omitempty"`
-	// The delegation posts a note when the automatic attempt gives up
-	Handoff bool `json:"handoff,omitempty"`
 	// Reactions already added
 	Acked []string `json:"acked,omitempty"`
-	// Status a newer message asked for while a session worked on the request
-	// The request opens again with it once the take settles so the message is never absorbed
-	Again Status `json:"again,omitempty"`
+	// A newer message came while a session worked on the request
+	// The request opens again once the take settles so the message is never absorbed
+	Again bool `json:"again,omitempty"`
 }
 
-// How long a question to the requester waits before the user is asked
+// How long a question to the requester waits before it opens again
 const questionFor = 3 * 24 * time.Hour
 
 // A held request whose time came
@@ -114,33 +112,33 @@ func (it Item) Unanswered(now time.Time) bool {
 }
 
 // No session works on it
-// A take with no sign of work for busyFor counts as abandoned
+// A take kept past takeFor counts as abandoned
 func (it Item) Waiting(now time.Time) bool {
 	switch it.Status {
-	case StatusNew, StatusAsk, StatusHeld, StatusQuestion:
+	case StatusOpen, StatusHeld, StatusQuestion:
 		return true
 	case StatusTaken:
-		return now.Sub(it.lastSeen()) >= busyFor
+		return now.Sub(it.UpdatedAt) >= takeFor
 	default:
 		return false
 	}
 }
 
-// The later of the last change and the last heartbeat
-func (it Item) lastSeen() time.Time {
-	if it.HeartbeatAt.After(it.UpdatedAt) {
-		return it.HeartbeatAt
+// Whether the list offers it to the user now
+// A request put off or waiting for the requester comes back once its time came
+func (it Item) Open(now time.Time) bool {
+	switch it.Status {
+	case StatusOpen:
+		return true
+	case StatusHeld:
+		return it.Due(now)
+	case StatusQuestion:
+		return it.Unanswered(now)
+	case StatusTaken:
+		return it.Waiting(now)
+	default:
+		return false
 	}
-	return it.UpdatedAt
-}
-
-// Whether the request belongs to the place with this root and name
-// The root identifies a place so the name only counts for a request stored without one
-func (it Item) At(root, name string) bool {
-	if it.Place != "" {
-		return it.Place == root
-	}
-	return it.Name != "" && it.Name == name
 }
 
 type Store struct{ dir string }
@@ -151,16 +149,24 @@ var (
 	ErrNotFound = errors.New("no such request")
 	ErrCorrupt  = errors.New("request file is corrupt")
 	ErrPaused   = errors.New("meetproxy is paused, run meetproxy resume")
-	ErrTaken    = errors.New("another session works on the request")
+	ErrTaken    = errors.New("another session works on the request until it settles it or ends")
 )
 
 // Ids come from the command line so anything but IdOf output is rejected before it reaches a path
 var validId = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
-// The same link always maps to the same id so a request found twice is stored once
-func IdOf(link string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(link)))
+// The same key always maps to the same id so a request found twice is stored once
+func IdOf(key string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(key)))
 	return hex.EncodeToString(sum[:6])
+}
+
+// The id of an item by its thread or its link when it names no thread
+func (it Item) key() string {
+	if it.Thread != "" {
+		return it.Thread
+	}
+	return it.Link
 }
 
 // A done request is removed after this so the inbox only holds what is still useful
@@ -183,12 +189,12 @@ func (s Store) Add(it Item, now time.Time) (Item, bool, error) {
 	return s.AddLimited(it, Limits{}, now)
 }
 
-// Returns false with the stored item when the link was seen before
-// 1. A done request asked again with a newer timestamp is stored anew and returns true
-// 2. A held or question request asked again with a newer timestamp opens again with the new status
-// 3. A taken request asked again with a newer timestamp opens again once its take settles as done or as a question
-// 4. Any other open request keeps the newest timestamp so an older scan never reopens it once done
-// 5. A new link past the limits of its delegation fails with ErrLimited or ErrDuplicate counted under the lock
+// Returns false with the stored item when the thread was seen before
+//  1. A message newer than the stored one moves the author and the summary to it
+//     The link stays the first one so a relay opened with it still finds the request
+//  2. A done, held or question request asked again opens again and returns true
+//  3. A taken request asked again opens again once its take settles
+//  4. A new thread past the limits of its delegation fails with ErrLimited or ErrDuplicate counted under the lock
 func (s Store) AddLimited(it Item, lim Limits, now time.Time) (Item, bool, error) {
 	if s.Paused() {
 		return Item{}, false, ErrPaused
@@ -202,7 +208,7 @@ func (s Store) AddLimited(it Item, lim Limits, now time.Time) (Item, bool, error
 	}
 	defer unlock()
 	s.prune(now)
-	it.Id = IdOf(it.Link)
+	it.Id, it.Status = IdOf(it.key()), StatusOpen
 	it.AddedAt, it.UpdatedAt = now.UTC(), now.UTC()
 	seen, err := s.Get(it.Id)
 	switch {
@@ -211,20 +217,21 @@ func (s Store) AddLimited(it Item, lim Limits, now time.Time) (Item, bool, error
 		return Item{}, false, err
 	case !newer(it.Ts, seen.Ts):
 		return seen, false, nil
-	case seen.Status == StatusHeld || seen.Status == StatusQuestion:
-		seen.Ts, seen.Status, seen.Reason, seen.HeldUntil, seen.UpdatedAt = it.Ts, it.Status, it.Reason, time.Time{}, now.UTC()
-		seen.Followup, seen.Correction = it.Followup, it.Correction
-		return seen, true, s.put(seen)
-	case seen.Status == StatusTaken:
-		seen.Ts, seen.Again, seen.Followup, seen.Correction = it.Ts, it.Status, it.Followup, it.Correction
-		return seen, false, s.put(seen)
-	case seen.Status != StatusDone:
-		seen.Ts = it.Ts
-		return seen, false, s.put(seen)
 	default:
-		// A follow-up of an answered request is a new round of the same request
-		it.Acked = nil
-		return it, true, s.put(it)
+		seen.Ts, seen.From, seen.Author, seen.Summary = it.Ts, it.From, it.Author, it.Summary
+		seen.Followup, seen.Correction = it.Followup, it.Correction
+		switch seen.Status {
+		case StatusOpen:
+			return seen, false, s.put(seen)
+		case StatusTaken:
+			seen.Again = true
+			return seen, false, s.put(seen)
+		case StatusDone:
+			// A follow-up of an answered request is a new round of the same request
+			seen.Acked = nil
+		}
+		seen.Status, seen.Reason, seen.HeldUntil, seen.UpdatedAt = StatusOpen, it.Reason, time.Time{}, now.UTC()
+		return seen, true, s.put(seen)
 	}
 	if err := s.limit(it, lim, now); err != nil {
 		return Item{}, false, err
@@ -275,6 +282,9 @@ func (s Store) Get(id string) (Item, error) {
 	case !found:
 		return Item{}, fmt.Errorf("%w %s", ErrNotFound, id)
 	}
+	if slices.Contains(legacyOpen, it.Status) {
+		it.Status = StatusOpen
+	}
 	return it, nil
 }
 
@@ -312,8 +322,8 @@ func (s Store) List() ([]Item, error) {
 }
 
 // Every request no session works on, oldest first
-// 1. One a session took and left unsettled comes back as ask since its automatic attempt failed
-// 2. A question the requester left unanswered comes back as ask
+// 1. A take kept past takeFor shows as open since its session no longer works on it
+// 2. A question the requester left unanswered shows as open
 func (s Store) Waiting(now time.Time) ([]Item, error) {
 	all, err := s.List()
 	if err != nil {
@@ -327,9 +337,9 @@ func (s Store) Waiting(now time.Time) ([]Item, error) {
 		}
 		switch {
 		case it.Status == StatusTaken:
-			it.Status, it.SessionId = StatusAsk, ""
+			it.Status, it.SessionId, it.Reason = StatusOpen, "", Released
 		case it.Unanswered(now):
-			it.Status, it.Reason = StatusAsk, Unanswered
+			it.Status, it.Reason = StatusOpen, Unanswered
 		}
 		out = append(out, it)
 	}
@@ -350,57 +360,14 @@ func (s Store) prune(now time.Time) {
 	}
 }
 
-// A taken request with no sign of work for this long no longer keeps its session busy and any session may take it over
-// A running turn renews it through Touch so only a session that stopped working loses its take
-const busyFor = 20 * time.Minute
-
-// Touch writes a heartbeat at most this often so a busy session costs few writes
-const touchEvery = 5 * time.Minute
+// A take still unsettled after this opens again
+// A session that ended gives its takes back at once so this only catches one that crashed
+const takeFor = 24 * time.Hour
 
 // Requests nobody took are closed after these
 const (
 	expireOpen = 14 * 24 * time.Hour
 	expireHeld = 30 * 24 * time.Hour
-)
-
-// Takes a request for a session that works on one request at a time
-// 1. Returns false when the session still works on one it took
-// 2. A held request waits for the user so only Take reaches it until it is due
-// 3. A question waits for the requester until it goes unanswered
-// 4. Which request a session should take is decided by the caller from Waiting
-// 5. The mode says whether the session answers on its own or after asking the user
-func (s Store) Claim(id, sessionId string, now time.Time) (Item, bool, error) {
-	if s.Paused() {
-		return Item{}, false, ErrPaused
-	}
-	unlock, err := s.lock()
-	if err != nil {
-		return Item{}, false, err
-	}
-	defer unlock()
-	_, busy, err := s.TakenBy(sessionId, now)
-	if err != nil || busy {
-		return Item{}, false, err
-	}
-	cur, err := s.Get(id)
-	if err != nil {
-		return Item{}, false, err
-	}
-	from := []Status{StatusNew, StatusAsk}
-	if cur.Due(now) || cur.Unanswered(now) {
-		from = append(from, cur.Status)
-	}
-	mode := ModeAsked
-	if cur.Status == StatusNew {
-		mode = ModeAuto
-	}
-	it, err := s.take(id, sessionId, now, mode, from...)
-	return it, err == nil, err
-}
-
-const (
-	ModeAuto  = "auto"
-	ModeAsked = "asked"
 )
 
 // The request the session took and still works on
@@ -417,20 +384,15 @@ func (s Store) TakenBy(sessionId string, now time.Time) (Item, bool, error) {
 	return Item{}, false, nil
 }
 
-// Turns a request the session could not settle into one the user is asked about
-func (s Store) Ask(id, sessionId, reason string, now time.Time) (Item, error) {
-	return s.release(id, sessionId, StatusAsk, reason, now, StatusTaken, StatusNew)
-}
-
-// Puts a request off until the user runs handle on it or until it is due
+// Puts a request off until the user takes it or until it is due
 // A zero until waits for the user
 func (s Store) Hold(id, sessionId string, until, now time.Time) (Item, error) {
 	return s.update(id, sessionId, now, func(it *Item) error {
-		if !slices.Contains([]Status{StatusTaken, StatusAsk, StatusHeld, StatusQuestion}, it.Status) {
+		if it.Status == StatusDone {
 			return fmt.Errorf("request %s is %s", id, it.Status)
 		}
 		// The user looks at the thread when the request comes back so a newer message needs no round of its own
-		it.Status, it.SessionId, it.HeldUntil, it.Again = StatusHeld, "", until.UTC(), ""
+		it.Status, it.SessionId, it.HeldUntil, it.Again = StatusHeld, "", until.UTC(), false
 		if until.IsZero() {
 			it.HeldUntil = time.Time{}
 		}
@@ -440,13 +402,13 @@ func (s Store) Hold(id, sessionId string, until, now time.Time) (Item, error) {
 
 // Waits for the requester to answer a question the session asked back
 func (s Store) Question(id, sessionId string, now time.Time) (Item, error) {
-	return s.release(id, sessionId, StatusQuestion, "", now, StatusTaken)
+	return s.release(id, sessionId, StatusQuestion, now, StatusTaken)
 }
 
 // Records a reaction added to the request link so it is added once
 func (s Store) Ack(id, react string) (Item, error) {
-	if !slices.Contains([]string{AckSeen, AckDone, AckHandoff}, react) {
-		return Item{}, fmt.Errorf("react must be %s, %s or %s, not %q", AckSeen, AckDone, AckHandoff, react)
+	if !slices.Contains([]string{AckSeen, AckDone}, react) {
+		return Item{}, fmt.Errorf("react must be %s or %s, not %q", AckSeen, AckDone, react)
 	}
 	unlock, err := s.lock()
 	if err != nil {
@@ -463,26 +425,47 @@ func (s Store) Ack(id, react string) (Item, error) {
 }
 
 func (s Store) Done(id, sessionId string, now time.Time) (Item, error) {
-	return s.release(id, sessionId, StatusDone, "", now, StatusNew, StatusAsk, StatusHeld, StatusTaken, StatusDone)
+	return s.release(id, sessionId, StatusDone, now, StatusOpen, StatusHeld, StatusTaken, StatusQuestion, StatusDone)
 }
 
-// Frees the request so any session can take it again
+// Gives back every take of a session that ended so the requests open again at once
+func (s Store) Release(sessionId string, now time.Time) (int, error) {
+	unlock, err := s.lock()
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+	all, err := s.List()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, it := range all {
+		if it.Status != StatusTaken || it.SessionId != sessionId {
+			continue
+		}
+		it.Status, it.SessionId, it.Reason, it.Again, it.UpdatedAt = StatusOpen, "", Released, false, now.UTC()
+		if err := s.put(it); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+// Frees the request from the session
 // 1. A request another session still works on stays with it so a session never settles a take it lost
-// 2. An empty reason keeps the one stored
-// 3. A newer message that came during the take opens it again instead of done or a question since it may answer either
-func (s Store) release(id, sessionId string, to Status, reason string, now time.Time, from ...Status) (Item, error) {
+// 2. A newer message that came during the take opens it again instead of done or a question since it may answer either
+func (s Store) release(id, sessionId string, to Status, now time.Time, from ...Status) (Item, error) {
 	return s.update(id, sessionId, now, func(it *Item) error {
 		if !slices.Contains(from, it.Status) {
 			return fmt.Errorf("request %s is %s", id, it.Status)
 		}
 		it.Status, it.SessionId = to, ""
-		if reason != "" {
-			it.Reason = reason
+		if it.Again {
+			it.Status, it.Reason, it.Acked = StatusOpen, Replied, nil
 		}
-		if it.Again != "" && (to == StatusDone || to == StatusQuestion) {
-			it.Status, it.Reason, it.Acked = it.Again, Replied, nil
-		}
-		it.Again = ""
+		it.Again = false
 		return nil
 	})
 }
@@ -510,7 +493,7 @@ func (s Store) update(id, sessionId string, now time.Time, change func(it *Item)
 
 // Only one session takes a request since the check and the write happen under the lock
 // 1. Taking again from the same session returns the item
-// 2. A held request is taken too since the user names it
+// 2. Any request not done may be taken since the user names it
 func (s Store) Take(id, sessionId string, now time.Time) (Item, error) {
 	if s.Paused() {
 		return Item{}, ErrPaused
@@ -520,42 +503,47 @@ func (s Store) Take(id, sessionId string, now time.Time) (Item, error) {
 		return Item{}, err
 	}
 	defer unlock()
-	return s.take(id, sessionId, now, ModeAsked, StatusNew, StatusAsk, StatusHeld, StatusQuestion)
-}
-
-// Takes a request in one of the from statuses or a take no session keeps busy
-// A take again by the same session keeps the mode of its first take
-// Callers hold the lock
-func (s Store) take(id, sessionId string, now time.Time, mode string, from ...Status) (Item, error) {
 	it, err := s.Get(id)
 	if err != nil {
 		return Item{}, err
 	}
 	switch {
-	case it.Status == StatusTaken && it.takenByOther(sessionId, now):
+	case it.takenByOther(sessionId, now):
 		return Item{}, fmt.Errorf("%w %s", ErrTaken, id)
-	case it.Status != StatusTaken && !slices.Contains(from, it.Status):
+	case it.Status == StatusDone:
 		return Item{}, fmt.Errorf("request %s is %s", id, it.Status)
-	}
-	if it.Status != StatusTaken || it.SessionId != sessionId || it.Mode == "" {
-		it.Mode = mode
 	}
 	it.Status, it.SessionId, it.UpdatedAt, it.HeldUntil = StatusTaken, sessionId, now.UTC(), time.Time{}
 	return it, s.put(it)
 }
 
-// Another session holds a take that still keeps it busy
+// Another session holds a take that still keeps it
 func (it Item) takenByOther(sessionId string, now time.Time) bool {
 	return it.Status == StatusTaken && it.SessionId != sessionId && !it.Waiting(now)
 }
 
-// Does nothing for a link that never came through the inbox
-func (s Store) DoneByLink(link, sessionId string, now time.Time) error {
-	_, err := s.Done(IdOf(link), sessionId, now)
+// Does nothing for a request that never came through the inbox
+func (s Store) DoneById(id, sessionId string, now time.Time) error {
+	_, err := s.Done(id, sessionId, now)
 	if errors.Is(err, ErrNotFound) {
 		return nil
 	}
 	return err
+}
+
+// The request whose link or thread is the given origin
+// A relay names the link it was opened with so it may be any message of the thread
+func (s Store) ByOrigin(origin string) (Item, error) {
+	all, err := s.List()
+	if err != nil {
+		return Item{}, err
+	}
+	for _, it := range all {
+		if it.Link == origin {
+			return it, nil
+		}
+	}
+	return s.Get(IdOf(origin))
 }
 
 // Unix seconds of the newest message checked under a key such as a delegation id
@@ -673,37 +661,8 @@ func (s Store) Corrupt() (int, error) {
 	return len(entries), err
 }
 
-// Renews the takes of a session that is still working so they do not age into ask
-// A take already past busyFor stays lost since another session may have taken it over and its scope marker may be gone
-func (s Store) Touch(sessionId string, now time.Time) error {
-	stale := func(it Item) bool {
-		return it.Status == StatusTaken && it.SessionId == sessionId && !it.Waiting(now) && now.Sub(it.lastSeen()) >= touchEvery
-	}
-	all, err := s.List()
-	if err != nil || !slices.ContainsFunc(all, stale) {
-		return err
-	}
-	unlock, err := s.lock()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	for _, it := range all {
-		// Read again under the lock since another session may have settled it meanwhile
-		cur, err := s.Get(it.Id)
-		if err != nil || !stale(cur) {
-			continue
-		}
-		cur.HeartbeatAt = now.UTC()
-		if err := s.put(cur); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // Closes requests left waiting so long that answering them would no longer help
-// 1. new and ask past expireOpen
+// 1. open and question past expireOpen
 // 2. held past expireHeld since the user put it off on purpose
 func (s Store) Expire(now time.Time) (int, error) {
 	unlock, err := s.lock()
@@ -719,7 +678,7 @@ func (s Store) Expire(now time.Time) (int, error) {
 	for _, it := range all {
 		age := now.Sub(it.UpdatedAt)
 		switch {
-		case (it.Status == StatusNew || it.Status == StatusAsk || it.Status == StatusQuestion) && age > expireOpen:
+		case (it.Status == StatusOpen || it.Status == StatusQuestion) && age > expireOpen:
 		case it.Status == StatusHeld && age > expireHeld:
 		default:
 			continue

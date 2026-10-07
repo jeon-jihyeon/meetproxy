@@ -16,11 +16,11 @@
 
 <br>
 
-> **The first 30 seconds:** install the plugin, and the next session you open fetches a checksum verified binary and starts learning where you work from your own transcripts in the background.
-> About 15 seconds later it checks Slack and GitHub for messages that mention you, then once a minute. Nothing is posted yet.
-> When a teammate asks you something, the request gets :eyes:, a session working in the right place answers it in the thread with a line saying Claude wrote it, and you are asked first whenever it needs your decision.
+> **The first 30 seconds:** install the plugin, and the next session you open fetches a checksum verified binary.
+> About 15 seconds later it checks GitHub, and Slack when you set up a token, for requests to you, then once a minute. The status line counts the open ones. Nothing is posted.
+> When you are ready, `/meetproxy:inbox` lists them in whatever session you are in. Pick one, the session does the work, and the reply goes back to the thread once you approve it.
 
-meetproxy is a Claude Code plugin that carries requests between people and your AI session so you don't have to. A teammate asks in Slack or on GitHub, meetproxy brings the request into the session already working where the answer lives, and the refined answer goes back where it was asked, written the way you write. Every answer leaves a note of the code it came from, so the next similar request starts in the right place.
+meetproxy is a Claude Code plugin that keeps the requests people send you in Slack and on GitHub in one inbox you open from any Claude Code session. You never switch windows to find the thread or paste it in: pick a request, and the session you are already working in reads the thread, does the work, such as checking code or reviewing a pull request, and posts the reply where it was asked once you approve it, written the way you write.
 
 ## Why meetproxy?
 
@@ -30,7 +30,7 @@ A meat proxy is a person who sits between a coworker and an AI and only carries 
 - **The meme** — The earliest AI use we found is [Meat-based LLM proxies](https://not-an-llm.com/meat-based-llm-proxies) in March 2026. It spread with Niklas Gruhn's [Don't be a meat proxy](https://gruhn.me/blog/2026-08-03/) and its [Hacker News thread](https://news.ycombinator.com/item?id=49151933) in August 2026
 - **The cost** — Generating an answer got cheap but checking it did not, so the reader [pays for the verification](https://agentpatterns.ai/patterns/anti-patterns/meat-proxy/) the carrier skipped
 
-meetproxy was built to remove that role. The carrying is automated, the judgment a relay should add still happens in your session, and every post says it was written by Claude. The requester meets the answer directly. That is the `meet` in the name.
+meetproxy was built to remove that role. The carrying is automated, you decide what to take up and what goes out, and every post says it was written by Claude. The requester meets the answer directly. That is the `meet` in the name.
 
 ## Quickstart
 
@@ -39,7 +39,7 @@ meetproxy was built to remove that role. The carrying is automated, the judgment
 /plugin install meetproxy@meetproxy
 ```
 
-That is all for GitHub once `gh` is logged in. For Slack, install the Slack plugin and optionally set up a personal token, both covered under [Requirements](#requirements).
+That is all for GitHub once `gh` is logged in. For Slack, install the Slack plugin, and set up a personal token so Slack is read in the background, both covered under [Requirements](#requirements).
 
 ```
 /plugin install slack@claude-plugins-official
@@ -57,15 +57,14 @@ The binary is fetched from the matching GitHub release on first run, and no API 
 | macOS or Linux on amd64 or arm64 | the platforms releases are built for | `uname -sm` |
 | `curl`, `tar` and `sha256sum` or `shasum` | the launcher downloads the release and checks it against `checksums.txt`. With Go installed it falls back to `go install` | `command -v curl tar shasum` |
 | `gh` logged in | GitHub mentions, review requests, comments on your pull requests, and posting there. The default scopes of `gh auth login`, `repo` and `read:org`, cover it, since `repo` reads notifications and writes comments | `gh auth status` |
-| The official Slack plugin `slack@claude-plugins-official` | a session reads the Slack thread through it while it answers, and without a token the minute check reads mentions through it too | `/mcp` lists the Slack server |
+| The official Slack plugin `slack@claude-plugins-official` | a session reads the Slack thread through it while it answers, and without a token `/meetproxy:inbox` reads mentions through it | `/mcp` lists the Slack server |
 | A personal Slack token, optional | see below | `/meetproxy:slack` |
 
 A personal Slack token is a user token of a small Slack app you create from the manifest `/meetproxy:slack setup` fills in. It stays in the plugin data directory with mode 0600, readable by you alone, and goes only to `slack.com`. With it the binary reads and posts Slack itself, which unlocks:
 
-- **No busy session** — the minute check makes no connector call, so terminal multiplexers such as cmux stop showing the session as running every minute
+- **Background reads** — Slack requests are kept and counted every minute without any connector call. Without a token Slack is read only while `/meetproxy:inbox` runs, since a connector call fires hooks and terminal multiplexers such as cmux would show the session as running every minute
 - **Direct messages** — the connector cannot list them, so the `dm` delegation reads them with a token only
-- **Follow-ups in Slack threads** — replies after a meetproxy post come back as the same request
-- **Shared channel detection** — a channel shared with another organization is told apart, so its requests ask you first instead of being answered alone
+- **Follow-ups in Slack threads** — replies after a meetproxy post open the same request again
 - **Retract by edit or delete** — `/meetproxy:status retract <n>` edits or deletes the reply, where the connector can only post a correction under it
 
 The app asks for these user scopes: `search:read`, `channels:history`, `groups:history`, `im:history`, `mpim:history`, `users:read`, `chat:write`, `reactions:write`, `channels:read`, `groups:read`, `im:read` and `mpim:read`. A scope it lacks turns off only what needs it, and `/meetproxy:slack` names it.
@@ -76,17 +75,19 @@ The app asks for these user scopes: `search:read`, `channels:history`, `groups:h
 flowchart TD
   slack["Slack: mentions, direct messages, delegated channels"] --> watcher
   github["GitHub: mentions, review requests, comments on your pull requests"] --> watcher
-  watcher["Watcher in each open session, one lease per source"] --> sort["Delegations and triage: ignore, handle or ask"]
-  sort --> workmap["Work map: place, skills and starting files"]
-  workmap --> inbox["Inbox in the plugin data directory"]
-  inbox --> session["Session at that place runs /meetproxy:handle"]
-  session --> post["post tool, checked by the posting guard"]
+  watcher["Watcher in each open session, one lease per source"] --> sort["Delegations and triage: keep or ignore"]
+  sort --> inbox["Inbox, one request per thread"]
+  inbox --> status["Status line: n open"]
+  status --> list["You run /meetproxy:inbox in any session and pick one"]
+  list --> session["That session runs /meetproxy:handle"]
+  session --> approve["You approve the reply"]
+  approve --> post["post tool, checked by the posting guard"]
   post --> thread["Reply in the thread where it was asked"]
   thread --> watch["Follow-up watch for three days"]
   watch --> sort
 ```
 
-From the moment a session opens, meetproxy checks every connected source each minute for messages that mention you. One session holds the lease of each source and reads it, and another takes over within three minutes when it closes.
+From the moment a session opens, meetproxy checks every connected source each minute for requests to you. One session holds the lease of each source and reads it, and another takes over within three minutes when it closes. Every check runs without a tool call, so it never fires a hook. Slack without a token is the exception and is read only when you open the inbox.
 
 | Source | Receives | Sends | Connected by |
 |---|---|---|---|
@@ -95,68 +96,69 @@ From the moment a session opens, meetproxy checks every connected source each mi
 
 Adding a service touches one entry in the source table of [internal/dest](internal/dest/dest.go), one case in each of the dispatchers of the [watcher](plugin/hooks/meetproxy.js) (`owner`, `ready`, `receive`, `covered`, `send`, `replies`, `react` and `unsay`), the tool dispatch of the [posting guard](internal/guard/guard.go) and a reference for the [relay skill](plugin/skills/relay/references). Triage sorts each message.
 
-- **ignore** — not a request. Only its link, sender and reason are kept, for three days
-- **handle** — answered where it was asked, at the place on your machine the work map picks, with the skills and starting files you used for similar requests. A session working in that place takes it, otherwise the session reading that source works there by absolute paths. A request need not concern a repository
-- **ask** — needs you, such as a deploy approval or a decision. The session stops to ask whether to answer it now, later or not at all, and posts nothing before you choose
+- **ignore** — asks you for nothing, such as an FYI or a thanks. Only its link, sender and reason are kept, for three days
+- **keep** — a request. It waits in the inbox with its source, author and first line until you take it up
 
-A request you wrote yourself is handled without triage. Replies go only where the request came from. A request that is queued gets an :eyes: reaction and one that was answered a :white_check_mark:, or eyes and hooray on GitHub. A reply that already ends with the meetproxy mark, yours or a teammate's, means the request is covered.
+Every message of one thread is one request, so a second mention in the same Slack thread or on the same pull request updates it instead of adding another. A request you wrote yourself and one a delegation names a task for are kept without triage. A thread you or anyone's meetproxy already answered is skipped. A request that is kept gets an :eyes: reaction and one that was answered a :white_check_mark:, or eyes and hooray on GitHub.
 
-Every post is kept in a ledger for 30 days and its thread is read for three days. A reply there comes back as the same request through triage, and one that says the answer was wrong lowers how much that answer counts in the location map and asks you. A question meetproxy asked back waits for the requester and asks you after three days without an answer. `/meetproxy:status retract <n>` corrects or removes a reply it posted.
+`/meetproxy:inbox` lists the open requests first and asks which to take up. The session you run it in takes that one, so no other session works on it, reads the whole thread and asks you what to do: now, later at a time you pick, or skip. It then does the task and shows you the reply before anything is posted. A request you put off comes back as open at that time. A question meetproxy asked back waits for the requester and comes back as open after three days without an answer. A session that ends gives back what it took.
 
-When a source stops working an idle session asks you once a day with the exact fix, and you can stop reading that source. When several requests need you they come as one question, a busy session leaves a request to an idle session of the same place, and a request you put off comes back at the time you chose. `/meetproxy:relay <link>` still hands over one request by hand, and a request waiting for the place a new session starts in is named when it opens.
+Every post is kept in a ledger for 30 days and its thread is read for three days. A reply there opens the same request again, and one that says the answer was wrong lowers how much that answer counts in the location map. `/meetproxy:status retract <n>` corrects or removes a reply it posted.
+
+When a source stops working an idle session asks you once a day with the exact fix, and you can stop reading that source. `/meetproxy:relay <link>` handles one link by hand without the inbox.
 
 Triage uses the session's own Claude by default. `/meetproxy:triage codex` switches to Codex, and `/meetproxy:triage command <cmd>` plugs in any command that reads the message as JSON and prints a verdict. `/meetproxy:pause` stops all of it at once and `/meetproxy:pause resume` starts it again.
 
-A person in the middle makes three calls before pasting anything. meetproxy makes them in the session instead.
+A person in the middle makes three calls before pasting anything. meetproxy makes them in the session with you.
 
-- **Ask back** — When a request is missing what it takes to start, it asks the requester, never you
-- **Point to where to look** — It picks the place on your machine from the work map and hands over the files that answered similar requests as starting points
+- **Ask back** — When a request is missing what it takes to start, it asks the requester
+- **Point to where to look** — It hands over the files that answered similar requests as starting points
 - **Refine for the reader** — It writes the conclusion first with one piece of evidence the reader can check, follows your own rules and recent examples for that kind of output, and marks the post as written by Claude
 
 ### Delegate
 
-Pull requests that come with a mention are reviewed with no setup, and approval stays with requests you made yourself. A review someone requests on GitHub asks you first. For anything else, say what to take over.
+Mentions, requested reviews, direct messages and comments on your own pull requests are kept with no setup. For anything else, say what to keep and what to do with it once you take it up.
 
 ```
 /meetproxy:delegate when Datadog posts a Triggered alert in #devops-emergency, investigate it and reply in the thread
-/meetproxy:delegate when a message in #ops mentions me, run incident-triage on it but ask me first
+/meetproxy:delegate when a message in #ops mentions me, run incident-triage on it
 ```
 
-meetproxy turns the sentence into a delegation with when, do and post parts, then checks what that delegation needs before saving it: the sources it reads, a GitHub login for reviews, the tools an investigation can use. It gives the exact command for what only you can do, such as a login.
+meetproxy turns the sentence into a delegation with when and do parts, then checks what that delegation needs before saving it: the sources it reads, a GitHub login for reviews, the tools an investigation can use. It gives the exact command for what only you can do, such as a login.
 
 | Part | Choices |
 |---|---|
 | When | mentions of you in any source, review requests, direct messages, comments on your own pull requests, or every message of a Slack channel, narrowed by author id or exact display name, words or a pull request link |
-| Do | `answer`, `review` a pull request, `investigate` an alert, or any skill you have |
-| Post | on its own, or after asking you. Reviews comment unless the delegation lets them approve |
+| Do | `answer`, `review` a pull request, `investigate` an alert, or any skill you have. Reviews comment unless the delegation lets them approve |
 
-`/meetproxy:delegate` lists what is delegated and `/meetproxy:delegate remove <id>` takes one back. Five built in delegations come after yours: mentions with a pull request link are reviewed, requested reviews ask you first, direct messages and other mentions are answered after triage, and comments on your own pull requests ask you first.
+`/meetproxy:delegate` lists what is delegated and `/meetproxy:delegate remove <id>` takes one back. Five built in delegations come after yours: mentions with a pull request link become reviews and requested reviews too, approving only requests you made yourself, and direct messages, other mentions and comments on your own pull requests become answers.
 
 ## Commands
 
 | Command | Arguments | What it does |
 |---|---|---|
+| `/meetproxy:inbox` | | Reads the sources, lists the requests open first and takes up the one you pick. Claude also runs it when you ask what waits for you |
+| `/meetproxy:handle` | `<request id>` | Takes up one request by id: reads the thread, asks what to do, does the task and posts the reply you approve |
 | `/meetproxy:status` | `[retract <n>]` | Shows every source, the Slack token, the inbox, posted replies, ignored messages, open relays, hook failures and kept state, with the fix for each problem. `retract <n>` corrects or deletes reply n of that list |
 | `/meetproxy:delegate` | `[what to take over \| remove <id>]` | Turns a sentence into a delegation, checks what it needs and saves it after you confirm. No argument lists the delegations |
 | `/meetproxy:slack` | `[setup]` | Checks the Slack token, or with `setup` walks you through creating the app and storing the token |
-| `/meetproxy:triage` | `[claude \| codex \| command <command line>]` | Shows or chooses what sorts messages into ignore, handle and ask |
+| `/meetproxy:triage` | `[claude \| codex \| command <command line>]` | Shows or chooses what drops messages that ask you for nothing |
 | `/meetproxy:allow` | `[github:owner/* \| github:owner/repo \| slack:CHANNEL \| link]` | Allows a destination besides where a request came from. No argument lists the patterns |
 | `/meetproxy:pause` | `[resume]` | Stops queuing and taking requests in every session, or starts again |
 | `/meetproxy:map` | `[show]` | Refreshes the work map now, or shows its places, skills and output formats |
-| `/meetproxy:relay` | `<Slack or GitHub link>` | Hands over one request by hand and posts the refined answer where it was asked |
+| `/meetproxy:relay` | `<Slack or GitHub link>` | Handles one link by hand and posts the refined answer you approve where it was asked |
 | `/meetproxy:review` | `<pull request link \| Slack link> [--approve]` | Reviews a pull request, comments on GitHub and replies with a verdict where it was asked. Approves only with `--approve` |
 | `/meetproxy:investigate` | `<Slack link>` | Investigates an alert with read-only tools and replies with a verdict, the first action and the evidence |
-| `/meetproxy:handle` | `<request id> [--auto \| --ask]` | Internal. The watcher runs it to take one queued request, with `--auto` when it may finish alone and `--ask` when it needs you |
 
 ## What's inside
 
 - **[relay skill](plugin/skills/relay/SKILL.md)** — The flow from a request link to a posted answer
-- **[Watcher](plugin/hooks/meetproxy.js)** — A Claude Code mod that receives from each connected source by the delegations, runs triage, starts the handle skill in a session working at the place the work map picks, and sends replies through its `post` tool
-- **[handle skill](plugin/skills/handle/SKILL.md)** — Takes one queued request by id so only one session answers it, opens the relay, then follows the skill its delegation names. Started by the watcher, it posts nothing that needs your decision, and a request it leaves unsettled comes back to ask you
+- **[Watcher](plugin/hooks/meetproxy.js)** — A Claude Code mod that receives from each connected source by the delegations, runs triage, keeps requests in the inbox, counts them in the status line, lists them through its `inbox` tool and sends replies through its `post` tool
+- **[inbox skill](plugin/skills/inbox/SKILL.md)** and **[handle skill](plugin/skills/handle/SKILL.md)** — List the requests and take one up by id so only one session works on it, then follow the skill its delegation names and post only what you approve
 - **[delegate](plugin/skills/delegate/SKILL.md)**, **[triage](plugin/skills/triage/SKILL.md)**, **[allow](plugin/skills/allow/SKILL.md)**, **[pause](plugin/skills/pause/SKILL.md)**, **[map](plugin/skills/map/SKILL.md)**, **[slack](plugin/skills/slack/SKILL.md)** and **[status](plugin/skills/status/SKILL.md)** skills — The settings and checks in the table above
 - **[review skill](plugin/skills/review/SKILL.md)** and **[investigate skill](plugin/skills/investigate/SKILL.md)** — The tasks a delegation can name besides answering, also runnable by hand with a link
 - **Posting guard** — A PreToolUse hook on Bash, every MCP tool, Write, Edit and NotebookEdit, described under [Safe by default](#safe-by-default)
-- **Work map** — Built from your own Claude Code transcripts the first time a session starts, then refreshed once a day by the first session of the day in a separate process that never touches a session. Run `/meetproxy:map` to refresh it at once. It knows the places you work in, the skills and commands you have, and which place, skills and files answered each request you typed. A request is matched in layers: a place it names, then past requests that agree, then a model picks among a few candidates. It also learns how you write each kind of output, such as commits, pull requests, review replies, Linear issues and Slack messages: the sections of your CLAUDE.md, rules and memory files whose heading names that kind, by file and line only, and your three newest outputs of each kind that went through, kept on your machine. A session runs `meetproxy map format <kind>` before it writes one
+- **Work map** — Built from your own Claude Code transcripts the first time a session starts, then refreshed once a day by the first session of the day in a separate process that never touches a session. Run `/meetproxy:map` to refresh it at once. It knows the places you work in and the skills and commands you have, and learns how you write each kind of output, such as commits, pull requests, review replies, Linear issues and Slack messages: the sections of your CLAUDE.md, rules and memory files whose heading names that kind, by file and line only, and your three newest outputs of each kind that went through, kept on your machine. A session runs `meetproxy map format <kind>` before it writes one
 - **Location map** — A PostToolUse hook that records the paths read while handling a request, in a repository or in the session directory, and `meetproxy locate` to find them for the next one
 - **[Launcher](plugin/bin/meetproxy)** — Runs the binary for the plugin version from a cache, a checksum verified release, or `go install`
 
@@ -164,9 +166,9 @@ meetproxy turns the sentence into a delegation with when, do and post parts, the
 
 Request text is untrusted, since anyone who can mention you writes it. The skills that handle a request get narrow allowed tools, which is the main defense. The posting guard is defense in depth around them.
 
-- **Where posts may go** — While a session handles a request, from the take until the turn that settled it ends, posts may go only to where the request came from, the pull request or issue the task works on, and the [allow list](plugin/skills/allow/SKILL.md). The `post` tool makes the same check before it sends, and a check that fails or times out denies the post
+- **You approve every reply** — The skills show you each reply and post only after you say send
+- **Where posts may go** — While a session handles a request, from the take until the turn that settled it ends or the session ends, posts may go only to where the request came from, the pull request or issue the task works on, and the [allow list](plugin/skills/allow/SKILL.md). The `post` tool makes the same check before it sends, and a check that fails or times out denies the post
 - **What is left to you** — Merging, closing, deleting, approving a pull request without a delegation that allows it, and changing meetproxy settings such as delegations, triage, the allow list or pause. Editing the plugin data directory with a file tool or a shell redirection is denied too
-- **Who may steer it** — A request from outside your Slack workspace or GitHub organization asks you first whatever triage said. Guests and restricted Slack accounts never count as your team, a channel shared with another organization counts as outside, and a delegation posts alone only for author ids it names, never display names. A request found more than an hour late asks you too
 - **What it parses** — Every repository a `gh` write names must pass, including commands chained, wrapped, run through `bash -c`, `eval` or `xargs`, or hidden in substitutions. A `gh` write to a host other than github.com and a `gh` command it cannot judge are denied. An allow pattern that covers a whole source such as `slack:*` is refused
 - **Fails closed** — An MCP tool that may write somewhere the guard cannot tell is denied, a guard that errors denies, and without a binary the launcher blocks the tool call while a session handles a request. Commands that do not post are never blocked, and outside a request the guard steps aside so your own sessions work as usual
 - **Honest posts** — Every post ends with `_Written by Claude on behalf of the user_`, because hidden AI use costs more trust than disclosed use
@@ -192,7 +194,7 @@ Everything lives in `${CLAUDE_PLUGIN_DATA}`, which is `~/.claude/plugins/data/me
 
 | Path | Holds | Kept |
 |---|---|---|
-| `inbox/<id>.json` | one request: link, sender id, keywords, place, status. Not the message text | waiting, asked and question requests close after 14 days, held ones after 30, and closed ones are removed 7 days later |
+| `inbox/<id>.json` | one request per thread: link, source, sender id and name, the first 200 characters of the newest message's first line, status | open and question requests close after 14 days, held ones after 30, and closed ones are removed 7 days later |
 | `inbox/ignored.jsonl` | messages read and not queued: link, sender, delegation and reason, never the text | 3 days |
 | `inbox/corrupt/` | request files that could not be read, moved aside | until you remove them |
 | `inbox/cursor*`, `inbox/lease-*.json`, `inbox/paused`, `inbox/lock` | where each read left off, which session reads each source, the pause switch | replaced in place, a lease lasts 3 minutes |
@@ -202,7 +204,7 @@ Everything lives in `${CLAUDE_PLUGIN_DATA}`, which is `~/.claude/plugins/data/me
 | `relay/observed/` | paths read while a request was handled | 30 days, longer while its relay is still open |
 | `relay/closed.jsonl` | each answered request: topic, keywords and evidence paths | 90 days |
 | `map.jsonl` | location map: topic, keywords, paths and weight | compacted past 256 KB to the last record of each request, dropping files that are gone |
-| `workmap/` | `places.json`, `methods.json` with skill names and descriptions, `cases.jsonl` with the requests you typed and the place, skills and files that answered them, `formats.json` with guide locations and up to three examples of 1500 characters per output kind, `state.json` | rebuilt daily. Cases newer than 180 days or the newest 5000 |
+| `workmap/` | `places.json`, `methods.json` with skill names and descriptions, `cases.jsonl` with the requests you typed and the place they were typed in, `formats.json` with guide locations and up to three examples of 1500 characters per output kind, `state.json` | rebuilt daily. Cases newer than 180 days or the newest 5000 |
 | `delegations.json`, `dest.json`, `triage.json` | your delegations, allow list and triage engine | until you change them |
 | `slack/token` | the personal Slack token, mode 0600 | until you remove it |
 | `slack/auth.json`, `slack/users.json`, `slack/setup.json` | who the token acts for, users looked up, your answer to the token question | users for 24 hours, the rest until replaced |
@@ -212,7 +214,7 @@ Everything lives in `${CLAUDE_PLUGIN_DATA}`, which is `~/.claude/plugins/data/me
 Outside the data directory:
 
 - `~/.meetproxy/bin/v<version>/meetproxy` holds the downloaded binary of each version
-- The watcher's mod store, which Claude Code keeps in `~/.claude/plugins/store/meetproxy_meetproxy-*.json`, holds small keys: `session:<id>` and `activity:<id>` for open sessions, `slackUser`, `slackEmail`, `slackTeam` and `githubUser` for who you are, `slackTrust:<user>` and `slackShared:<channel>` cached for 24 hours, `ghseen:<notification>` for a day, `slackSetupAsked`, and `nag:<source>` and `muted:<source>` for source problems
+- The watcher's mod store, which Claude Code keeps in `~/.claude/plugins/store/meetproxy_meetproxy-*.json`, holds small keys: `slackUser`, `slackEmail` and `githubUser` for who you are, `ghseen:<notification>` for a day, and `nag:<source>` and `muted:<source>` for source problems
 
 ### What leaves your machine
 
@@ -250,7 +252,7 @@ rm -f ~/.claude/plugins/store/meetproxy_meetproxy-*.json
 
 ### The session shows as busy every minute in a terminal multiplexer such as cmux
 
-Without a Slack token the session holding the Slack lease reads Slack through the connector each minute. Each connector call fires the PreToolUse hooks, so the multiplexer shows the session as running. Run `/meetproxy:slack setup` to read Slack with a token instead, and no tool call runs in any session.
+meetproxy 0.1.9 and later never call a tool from the minute check, so this comes from an older version or another plugin. Run `/reload-plugins` after updating. Slack without a token is read through the connector only while `/meetproxy:inbox` runs, inside your own turn.
 
 ### The guard denied a post
 
@@ -278,14 +280,14 @@ A request file that cannot be read is moved to `inbox/corrupt/<name>.<unix secon
 
 ### Nothing arrives
 
-Run `/meetproxy:status`. A source with an error names its fix, `/meetproxy:delegate` checks what a source needs, and `/meetproxy:pause resume` undoes a pause. At least one session has to be open, since the watcher runs inside sessions.
+Run `/meetproxy:status`. A source with an error names its fix, `/meetproxy:delegate` checks what a source needs, and `/meetproxy:pause resume` undoes a pause. Without a Slack token, Slack requests appear only when you run `/meetproxy:inbox`. At least one session has to be open, since the watcher runs inside sessions.
 
 ## Verifying releases
 
-From 0.1.8 on, each release carries a build provenance attestation for its archives and `checksums.txt`, made by the release workflow of this repository.
+From 0.1.9 on, each release carries a build provenance attestation for its archives and `checksums.txt`, made by the release workflow of this repository.
 
 ```sh
-gh release download v0.1.8 -R jeon-jihyeon/meetproxy -p 'meetproxy_darwin_arm64.tar.gz' -p checksums.txt
+gh release download v0.1.9 -R jeon-jihyeon/meetproxy -p 'meetproxy_darwin_arm64.tar.gz' -p checksums.txt
 gh attestation verify meetproxy_darwin_arm64.tar.gz -R jeon-jihyeon/meetproxy
 gh attestation verify checksums.txt -R jeon-jihyeon/meetproxy
 ```
@@ -299,7 +301,7 @@ The launcher checks every download against `checksums.txt` on its own, so the at
 - [Changelog](CHANGELOG.md) — what changed in each version
 - [Contributing](.github/CONTRIBUTING.md) and [security policy](.github/SECURITY.md)
 - [Claude Code plugins](https://code.claude.com/docs/en/plugins) — how plugins, skills and hooks are installed and loaded
-- [Claude Code hooks](https://code.claude.com/docs/en/hooks) — the PreToolUse, PostToolUse, SessionStart and Stop events the guard, the location map, the waiting notice, tidy and the work map refresh use
-- [Claude Code mods](https://code.claude.com/docs/en/plugins/mods/api) — the timers, MCP calls and commands the watcher uses, Claude Code 2.1.287 or later
+- [Claude Code hooks](https://code.claude.com/docs/en/hooks) — the PreToolUse, PostToolUse, SessionStart, Stop and SessionEnd events the guard, the location map, tidy, the work map refresh and returning takes use
+- [Claude Code mods](https://code.claude.com/docs/en/plugins/mods/api) — the timers, tools and status line the watcher uses, Claude Code 2.1.287 or later
 - [Releases](https://github.com/jeon-jihyeon/meetproxy/releases) — binaries for darwin and linux on amd64 and arm64
 - [License](LICENSE) — MIT

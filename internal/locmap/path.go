@@ -64,20 +64,6 @@ func ResolveIn(raw, dir string) (Path, bool) {
 	return Path{Name: filepath.Base(dir), Root: dir, Rel: rel}, true
 }
 
-// The root and name of the place dir belongs to
-// 1. In a repository: the main checkout
-// 2. Outside any repository: dir itself
-func Place(dir string) (root, name string) {
-	if p, ok := Resolve(dir); ok {
-		return p.Root, p.Name
-	}
-	if abs, err := filepath.Abs(dir); err == nil {
-		dir = abs
-	}
-	dir = filepath.Clean(dir)
-	return dir, filepath.Base(dir)
-}
-
 // A worktree `.git` file points into the main repo's `.git/worktrees`
 func mainRoot(dir string) (string, bool) {
 	gitPath := filepath.Join(dir, ".git")

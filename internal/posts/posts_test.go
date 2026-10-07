@@ -17,7 +17,7 @@ const (
 )
 
 func post(reply string) posts.Post {
-	return posts.Post{Request: request, Origin: origin, Reply: reply, Body: "in config.go", Mode: posts.ModeAuto, Kind: posts.KindAnswer}
+	return posts.Post{Request: request, Origin: origin, Reply: reply, Body: "in config.go", Mode: posts.ModeInbox, Kind: posts.KindAnswer}
 }
 
 func TestStoreAdd(t *testing.T) {

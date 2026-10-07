@@ -18,8 +18,7 @@ import (
 )
 
 const (
-	ModeAuto   = "auto"   // posted by a session nobody watched
-	ModeAsked  = "asked"  // posted after the user was asked
+	ModeInbox  = "inbox"  // posted for a request the user took from the inbox
 	ModeManual = "manual" // posted from a relay the user opened by hand
 
 	KindAnswer   = "answer"   // an answer to the request

@@ -4,7 +4,36 @@ All notable changes to meetproxy are listed here. The format follows [Keep a Cha
 
 A release that raises the protocol between the binary and the watcher needs `/reload-plugins` in every open session, or a restart of it. Until then the old watcher stops and says so instead of misreading the new binary.
 
-## [0.1.8] - Unreleased
+## [0.1.9] - 2026-10-07
+
+Protocol 9. Sessions need `/reload-plugins`.
+
+meetproxy now keeps requests in an inbox you take them from, instead of picking a session and answering on its own.
+
+### Added
+
+- `/meetproxy:inbox` reads the sources and lists the requests, open ones first, and takes up the one you pick in the session you are in. Claude runs it when you ask what waits for you
+- The status line counts the open requests
+- Every message of one Slack thread or one pull request or issue is one request, showing its source, author and the first line of the newest message
+- Every reply is shown to you and posted only once you approve it
+- A session that ends gives back the requests it took, so they open again at once
+
+### Changed
+
+- The minute check never calls a tool, so terminal multiplexers such as cmux no longer show sessions as running. Without a Slack token, Slack is read through the connector only while `/meetproxy:inbox` runs
+- Triage only drops messages that ask you for nothing. Every other message is kept
+- `/meetproxy:handle <id>` takes no `--auto` or `--ask` and always asks you what to do first
+- A take stays with its session until it is settled or the session ends, and opens again after 24 hours at most. The posting guard lasts as long
+
+### Removed
+
+- Matching a request to a session or a place, and answering without you: the work map plan, the location map routing, `inbox claim`, `inbox ask`, `inbox waiting`, `map plan` and the idle session preference
+- Trust checks of the sender and shared channel detection, which only chose between answering alone and asking
+- Delegation fields `post`, `workspace`, `priority` and `handoff`, and the handoff note
+- `[place=<name>]` and `[repo=<name>]` in a request
+- The SessionStart notice of waiting requests, `slack shared` and `slack trusted`
+
+## [0.1.8] - not released, part of 0.1.9
 
 ### Added
 
@@ -21,9 +50,9 @@ A release that raises the protocol between the binary and the watcher needs `/re
 - Releases are created as drafts and published once their attestation exists
 - Release notes are grouped into Features, Fixes and Others, without merge commits
 
-## [0.1.7] - Unreleased
+## [0.1.7] - not released, part of 0.1.9
 
-Protocol 8. Sessions need `/reload-plugins`.
+Protocol 8.
 
 ### Added
 
@@ -45,9 +74,9 @@ Protocol 8. Sessions need `/reload-plugins`.
 - The posting guard also checks Write, Edit and NotebookEdit, so a session never edits meetproxy's own data files while it handles a request
 - A Slack channel shared with another organization counts as outside the trust set, and one that cannot be read counts as shared
 
-## [0.1.6] - Unreleased
+## [0.1.6] - not released, part of 0.1.9
 
-Protocol 7. Sessions need `/reload-plugins`.
+Protocol 7.
 
 ### Added
 
@@ -75,9 +104,9 @@ Protocol 7. Sessions need `/reload-plugins`.
 - A Bash command that edits or redirects into the data directory is denied while a request is handled
 - `gh` writes to a host other than github.com and repositories named as `OWNER/REPO` or `HOST/OWNER/REPO` positionals are checked
 
-## [0.1.5] - Unreleased
+## [0.1.5] - not released, part of 0.1.9
 
-Protocol 6. Sessions need `/reload-plugins`.
+Protocol 6.
 
 ### Security
 

@@ -20,40 +20,59 @@ func TestDelegationValidate(t *testing.T) {
 		host    string
 		link    string
 		do      string
-		post    string
 		approve string
 	}
 	const (
 		channel = delegation.WhenChannel
 		mention = delegation.WhenMention
-		auto    = delegation.PostAuto
 	)
 	tcs := []struct {
 		name   string
 		args   args
+		limits []int
 		failed bool
 	}{
-		{"accepts a channel delegation", args{"alerts", channel, "C090SB4V8L8", "acme.slack.com", "", delegation.DoInvestigate, auto, ""}, false},
-		{"accepts a skill of another plugin", args{"alerts", channel, "C090SB4V8L8", "acme.slack.com", "", "ops:incident-triage", auto, ""}, false},
-		{"accepts a mention with a pull request link", args{"pr", mention, "", "", delegation.LinkPR, delegation.DoReview, auto, delegation.ApproveAny}, false},
-		{"accepts a review request", args{"rr", delegation.WhenReviewRequest, "", "", "", delegation.DoReview, delegation.PostAsk, delegation.ApproveNever}, false},
-		{"refuses the default id", args{"default", channel, "C090SB4V8L8", "acme.slack.com", "", delegation.DoInvestigate, auto, ""}, true},
-		{"refuses an id of the built in delegations", args{"default-review", mention, "", "", "", delegation.DoReview, auto, ""}, true},
-		{"refuses an uppercase id", args{"Alerts", mention, "", "", "", delegation.DoAnswer, auto, ""}, true},
-		{"refuses an unknown when", args{"alerts", "always", "", "", "", delegation.DoAnswer, auto, ""}, true},
-		{"refuses a channel delegation without a host", args{"alerts", channel, "C090SB4V8L8", "", "", delegation.DoInvestigate, auto, ""}, true},
-		{"refuses a channel name", args{"alerts", channel, "#ops", "acme.slack.com", "", delegation.DoInvestigate, auto, ""}, true},
-		{"refuses an unknown link", args{"pr", mention, "", "", "gitlab-mr", delegation.DoReview, auto, ""}, true},
-		{"refuses an unknown post", args{"alerts", channel, "C090SB4V8L8", "acme.slack.com", "", delegation.DoInvestigate, "later", ""}, true},
-		{"refuses an unknown approve", args{"alerts", channel, "C090SB4V8L8", "acme.slack.com", "", delegation.DoInvestigate, auto, "maybe"}, true},
-		{"refuses a skill with spaces", args{"alerts", channel, "C090SB4V8L8", "acme.slack.com", "", "rm -rf", auto, ""}, true},
+		{"accepts a channel delegation",
+			args{"alerts", channel, "C090SB4V8L8", "acme.slack.com", "", delegation.DoInvestigate, ""}, nil, false},
+		{"accepts a skill of another plugin",
+			args{"alerts", channel, "C090SB4V8L8", "acme.slack.com", "", "ops:incident-triage", ""}, nil, false},
+		{"accepts a mention with a pull request link",
+			args{"pr", mention, "", "", delegation.LinkPR, delegation.DoReview, delegation.ApproveAny}, nil, false},
+		{"accepts a review request",
+			args{"rr", delegation.WhenReviewRequest, "", "", "", delegation.DoReview, delegation.ApproveNever}, nil, false},
+		{"accepts a direct message delegation",
+			args{"dms", delegation.WhenDM, "", "", "", delegation.DoAnswer, ""}, nil, false},
+		{"accepts an own pull request delegation",
+			args{"mine", delegation.WhenOwnPR, "", "", "", delegation.DoAnswer, ""}, nil, false},
+		{"accepts limits",
+			args{"alerts", channel, "C090SB4V8L8", "acme.slack.com", "", delegation.DoInvestigate, ""}, []int{5, 10}, false},
+		{"refuses the default id",
+			args{"default", channel, "C090SB4V8L8", "acme.slack.com", "", delegation.DoInvestigate, ""}, nil, true},
+		{"refuses an id of the built in delegations",
+			args{"default-review", mention, "", "", "", delegation.DoReview, ""}, nil, true},
+		{"refuses an uppercase id", args{"Alerts", mention, "", "", "", delegation.DoAnswer, ""}, nil, true},
+		{"refuses an unknown when", args{"alerts", "always", "", "", "", delegation.DoAnswer, ""}, nil, true},
+		{"refuses a channel delegation without a host",
+			args{"alerts", channel, "C090SB4V8L8", "", "", delegation.DoInvestigate, ""}, nil, true},
+		{"refuses a channel name",
+			args{"alerts", channel, "#ops", "acme.slack.com", "", delegation.DoInvestigate, ""}, nil, true},
+		{"refuses an unknown link", args{"pr", mention, "", "", "gitlab-mr", delegation.DoReview, ""}, nil, true},
+		{"refuses an unknown approve",
+			args{"alerts", channel, "C090SB4V8L8", "acme.slack.com", "", delegation.DoInvestigate, "maybe"}, nil, true},
+		{"refuses a skill with spaces",
+			args{"alerts", channel, "C090SB4V8L8", "acme.slack.com", "", "rm -rf", ""}, nil, true},
+		{"refuses negative limits",
+			args{"alerts", channel, "C090SB4V8L8", "acme.slack.com", "", delegation.DoInvestigate, ""}, []int{-1, 0}, true},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			d := delegation.Delegation{
 				Id: tc.args.id, When: tc.args.when, Channel: tc.args.channel, Host: tc.args.host, Link: tc.args.link,
-				Do: tc.args.do, Post: tc.args.post, Approve: tc.args.approve,
+				Do: tc.args.do, Approve: tc.args.approve,
+			}
+			if tc.limits != nil {
+				d.MaxPerHour, d.DedupeMinutes = tc.limits[0], tc.limits[1]
 			}
 			assert.Equal(t, tc.failed, d.Validate() != nil)
 		})
@@ -84,37 +103,12 @@ func TestDelegationMayApprove(t *testing.T) {
 	}
 }
 
-func TestDelegationPostFor(t *testing.T) {
-	t.Parallel()
-	auto := delegation.Delegation{Post: delegation.PostAuto, From: []string{"U9", "Datadog"}}
-	tcs := []struct {
-		name string
-		d    delegation.Delegation
-		msg  delegation.Message
-		want string
-	}{
-		{"posts alone for a trusted sender", auto, delegation.Message{From: "U2", Trusted: true}, delegation.PostAuto},
-		{"asks for a sender outside the trust set", auto, delegation.Message{From: "U2"}, delegation.PostAsk},
-		{"posts alone for an id the delegation names", auto, delegation.Message{From: "u9"}, delegation.PostAuto},
-		{"asks for a display name the delegation names", auto, delegation.Message{From: "U3", Author: "Datadog"}, delegation.PostAsk},
-		{"asks for a sender without an id", delegation.Delegation{Post: delegation.PostAuto, From: []string{""}}, delegation.Message{}, delegation.PostAsk},
-		{"keeps ask for a trusted sender", delegation.Delegation{Post: delegation.PostAsk}, delegation.Message{From: "U2", Trusted: true}, delegation.PostAsk},
-	}
-	for _, tc := range tcs {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, tc.d.PostFor(tc.msg))
-			assert.Equal(t, tc.want == delegation.PostAuto, tc.d.Trusts(tc.msg.From, tc.msg.Trusted) && tc.d.Post == delegation.PostAuto)
-		})
-	}
-}
-
 func TestStore(t *testing.T) {
 	t.Parallel()
 	s := delegation.New(t.TempDir())
-	pr := delegation.Delegation{Id: "PR", When: delegation.WhenMention, Link: delegation.LinkPR, Do: delegation.DoReview, Post: delegation.PostAuto}
+	pr := delegation.Delegation{Id: "PR", When: delegation.WhenMention, Link: delegation.LinkPR, Do: delegation.DoReview}
 	require.NoError(t, s.Put(pr))
-	pr.Post = delegation.PostAsk
+	pr.Approve = delegation.ApproveNever
 	require.NoError(t, s.Put(pr))
 
 	ds, err := s.List()
@@ -124,7 +118,7 @@ func TestStore(t *testing.T) {
 		ids = append(ids, d.Id)
 	}
 	assert.Equal(t, []string{"pr", "default-review", "default-review-request", "default-dm", "default-own-pr", "default"}, ids)
-	assert.Equal(t, delegation.PostAsk, ds[0].Post, "the same id replaces the delegation")
+	assert.Equal(t, delegation.ApproveNever, ds[0].Approve, "the same id replaces the delegation")
 
 	require.NoError(t, s.Remove(" PR "), "the id is matched as it was stored")
 	assert.Error(t, s.Remove("pr"))
@@ -145,7 +139,7 @@ func TestStorePut_Race(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			d := delegation.Delegation{Id: fmt.Sprintf("d%d", n), When: delegation.WhenMention, Do: delegation.DoAnswer, Post: delegation.PostAuto}
+			d := delegation.Delegation{Id: fmt.Sprintf("d%d", n), When: delegation.WhenMention, Do: delegation.DoAnswer}
 			assert.NoError(t, s.Put(d))
 		}()
 	}
@@ -238,30 +232,65 @@ func TestDelegationTarget(t *testing.T) {
 		name       string
 		delegation delegation.Delegation
 		msg        delegation.Message
-		want       []string
+		want       string
 	}{
-		{"a mention review takes the pull request of the text", delegation.DefaultReview, delegation.Message{Text: "see " + pr}, []string{pr, "svc"}},
+		{"a mention review takes the pull request of the text", delegation.DefaultReview, delegation.Message{Text: "see " + pr}, pr},
 		{
 			"a review request takes the pull request it links", delegation.DefaultReviewRequest,
-			delegation.Message{Link: pr, Text: "see https://github.com/o/web/pull/1"}, []string{pr, "svc"},
+			delegation.Message{Link: pr, Text: "see https://github.com/o/web/pull/1"}, pr,
 		},
-		{"an answer has no target", delegation.Default, delegation.Message{Text: "see " + pr}, []string{"", ""}},
+		{"an answer has no target", delegation.Default, delegation.Message{Text: "see " + pr}, ""},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			link, repo := tc.delegation.Target(tc.msg)
-			assert.Equal(t, tc.want, []string{link, repo})
+			assert.Equal(t, tc.want, tc.delegation.Target(tc.msg))
 		})
 	}
 }
 
 func TestPullRequest(t *testing.T) {
 	t.Parallel()
-	link, repo := delegation.PullRequest("<https://github.com/Buzzvil/buzzscreen-api/pull/7880|#7880> please")
-	assert.Equal(t, []string{"https://github.com/Buzzvil/buzzscreen-api/pull/7880", "buzzscreen-api"}, []string{link, repo})
-	link, repo = delegation.PullRequest("no link")
-	assert.Equal(t, []string{"", ""}, []string{link, repo})
+	tcs := []struct {
+		name string
+		text string
+		want string
+	}{
+		{"the first link of a Slack link", "<https://github.com/Buzzvil/buzzscreen-api/pull/7880|#7880> please",
+			"https://github.com/Buzzvil/buzzscreen-api/pull/7880"},
+		{"no link", "no link", ""},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, delegation.PullRequest(tc.text))
+		})
+	}
+}
+
+func TestById(t *testing.T) {
+	t.Parallel()
+	ds := []delegation.Delegation{{Id: "alerts", When: delegation.WhenChannel}, delegation.Default}
+	type want struct {
+		id string
+		ok bool
+	}
+	tcs := []struct {
+		name string
+		id   string
+		want want
+	}{
+		{"an empty id is the default", "", want{"default", true}},
+		{"a known id", "alerts", want{"alerts", true}},
+		{"a removed id", "gone", want{"", false}},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, ok := delegation.ById(ds, tc.id)
+			assert.Equal(t, tc.want, want{d.Id, ok})
+		})
+	}
 }
 
 func TestPick_Sources(t *testing.T) {

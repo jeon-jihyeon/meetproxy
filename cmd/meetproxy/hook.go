@@ -40,12 +40,12 @@ func hook(data, name string, now time.Time, in io.Reader, out io.Writer) error {
 	switch name {
 	case "path":
 		return observePath(data, now, in)
-	case "start":
-		return noticeWaiting(data, now, in, out)
 	case "guard":
 		return guardPost(data, now, in, out)
 	case "stop":
 		return endTurn(data, now, in)
+	case "end":
+		return endSession(data, now, in)
 	default:
 		return fmt.Errorf("unknown hook %v", name)
 	}
@@ -56,7 +56,6 @@ var (
 	errNoSession = errors.New("the hook input names no session")
 )
 
-// A path read while a request is handled also tells the inbox its session still works on it
 func observePath(data string, now time.Time, in io.Reader) error {
 	if data == "" {
 		return errNoData
@@ -87,79 +86,11 @@ func observePath(data string, now time.Time, in io.Reader) error {
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(h.Cwd, target)
 	}
-	if err := heartbeat(data, h.SessionId, now); err != nil {
-		return err
-	}
 	p, ok := locmap.ResolveIn(target, h.Cwd)
 	if !ok {
 		return nil
 	}
 	return relay.New(data).Observe(h.SessionId, p)
-}
-
-// Renews the take whose relay the session has open
-func heartbeat(data, session string, now time.Time) error {
-	r, err := relay.New(data).Current(session)
-	if errors.Is(err, relay.ErrNoOpen) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	it, err := inbox.New(data).Get(inbox.IdOf(r.Origin))
-	switch {
-	case errors.Is(err, inbox.ErrNotFound):
-		return nil
-	case err != nil:
-		return err
-	case it.Status != inbox.StatusTaken || it.SessionId != session:
-		return nil
-	}
-	return inbox.New(data).Touch(session, now)
-}
-
-// Names the requests waiting for the place this session starts in
-// Only ids and links are shown since request text is untrusted
-func noticeWaiting(data string, now time.Time, in io.Reader, out io.Writer) error {
-	if data == "" {
-		return errNoData
-	}
-	var h hookInput
-	if err := json.NewDecoder(in).Decode(&h); err != nil {
-		return err
-	}
-	if h.Cwd == "" {
-		return nil
-	}
-	root, name := locmap.Place(h.Cwd)
-	waiting, err := inbox.New(data).Waiting(now)
-	if err != nil {
-		return err
-	}
-	var items []inbox.Item
-	for _, it := range waiting {
-		if it.At(root, name) {
-			items = append(items, it)
-		}
-	}
-	if len(items) == 0 {
-		return nil
-	}
-	var b strings.Builder
-	noun := "requests wait"
-	if len(items) == 1 {
-		noun = "request waits"
-	}
-	fmt.Fprintf(&b, "meetproxy: %d %s for %s. Tell the user, and run /meetproxy:handle <id> for the ones they ask for.", len(items), noun, name)
-	for _, it := range items {
-		fmt.Fprintf(&b, "\n%s %s", it.Id, it.Link)
-	}
-	return json.NewEncoder(out).Encode(map[string]any{
-		"hookSpecificOutput": map[string]string{
-			"hookEventName":     "SessionStart",
-			"additionalContext": b.String(),
-		},
-	})
 }
 
 // Enforced by a hook because request text is untrusted and no person reviews the post
@@ -236,7 +167,7 @@ func scopeOf(data, session string, now time.Time) (scope, bool, error) {
 
 // A relay the user opened by hand comes from no request so its review approves as the user asks
 func scopeFor(data, origin, target string) (scope, bool, error) {
-	it, err := inbox.New(data).Get(inbox.IdOf(origin))
+	it, err := inbox.New(data).ByOrigin(origin)
 	switch {
 	case errors.Is(err, inbox.ErrNotFound):
 		return scope{origin, target, true}, true, nil
@@ -260,6 +191,31 @@ func endTurn(data string, now time.Time, in io.Reader) error {
 		return nil
 	}
 	if err := relay.New(data).EndTurn(h.SessionId); err != nil {
+		return err
+	}
+	return releaseScope(data, h.SessionId, now)
+}
+
+// A session that ends gives its takes back so they open again at once and its scope ends with it
+func endSession(data string, now time.Time, in io.Reader) error {
+	if data == "" {
+		return errNoData
+	}
+	var h hookInput
+	if err := json.NewDecoder(in).Decode(&h); err != nil {
+		return err
+	}
+	if h.SessionId == "" {
+		return nil
+	}
+	relays := relay.New(data)
+	if _, err := relays.Close(h.SessionId, now); err != nil && !errors.Is(err, relay.ErrNoOpen) {
+		return err
+	}
+	if _, err := inbox.New(data).Release(h.SessionId, now); err != nil {
+		return err
+	}
+	if err := relays.EndTurn(h.SessionId); err != nil {
 		return err
 	}
 	return releaseScope(data, h.SessionId, now)

@@ -80,8 +80,9 @@ func TestScopeMarkers(t *testing.T) {
 	t.Parallel()
 	link := "https://w.slack.com/archives/C7/p1"
 	id := inbox.IdOf(link)
-	queued := step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes"}, ""}
+	queued := step{"inbox", []string{"add", link}, ""}
 	stop := step{"hook stop", nil, `{"session_id":"s1"}`}
+	end := step{"hook end", nil, `{"session_id":"s1"}`}
 	tcs := []struct {
 		name  string
 		steps []step
@@ -90,12 +91,14 @@ func TestScopeMarkers(t *testing.T) {
 		{"nothing handled leaves no marker", []step{queued}, nil},
 		{"an open relay marks the session", []step{{"open", []string{link}, ""}}, []string{"s1"}},
 		{"a take marks the session", []step{queued, {"inbox", []string{"take", id}, ""}}, []string{"s1"}},
-		{"a claim marks the session", []step{queued, {"inbox", []string{"claim", id}, ""}}, []string{"s1"}},
 		{"a close keeps the marker for the rest of the turn", []step{{"open", []string{link}, ""}, {"close", []string{"--topic", "t"}, ""}}, []string{"s1"}},
 		{"the turn that ends the scope removes the marker", []step{{"open", []string{link}, ""}, {"close", []string{"--topic", "t"}, ""}, stop}, []string{}},
 		{"a turn that ends with the relay open keeps it", []step{{"open", []string{link}, ""}, stop}, []string{"s1"}},
 		{"a settle keeps it until the turn ends", []step{queued, {"inbox", []string{"take", id}, ""}, {"inbox", []string{"done", id}, ""}}, []string{"s1"}},
 		{"a settled take loses it with the turn", []step{queued, {"inbox", []string{"take", id}, ""}, {"inbox", []string{"done", id}, ""}, stop}, []string{}},
+		{"a take keeps it past the turn", []step{queued, {"inbox", []string{"take", id}, ""}, stop}, []string{"s1"}},
+		{"the end of the session removes the marker of a take", []step{queued, {"inbox", []string{"take", id}, ""}, end}, []string{}},
+		{"the end of the session removes the marker of an open relay", []step{{"open", []string{link}, ""}, end}, []string{}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -103,8 +106,8 @@ func TestScopeMarkers(t *testing.T) {
 			data := t.TempDir()
 			now := time.Now()
 			for _, s := range tc.steps {
-				if s.cmd == "hook stop" {
-					require.NoError(t, runHook(data, []string{"stop"}, now, strings.NewReader(s.stdin), &bytes.Buffer{}))
+				if hook, ok := strings.CutPrefix(s.cmd, "hook "); ok {
+					require.NoError(t, runHook(data, []string{hook}, now, strings.NewReader(s.stdin), &bytes.Buffer{}))
 					continue
 				}
 				mustRun(t, data, "s1", now, s)
@@ -114,16 +117,18 @@ func TestScopeMarkers(t *testing.T) {
 	}
 }
 
-// A claim another session won leaves no marker that would stop the launcher skipping
-func TestScopeMarkers_LostClaim(t *testing.T) {
+// A take another session won leaves no marker that would stop the launcher skipping
+func TestScopeMarkers_LostTake(t *testing.T) {
 	t.Parallel()
 	data := t.TempDir()
 	now := time.Now()
 	link := "https://w.slack.com/archives/C7/p1"
-	mustRun(t, data, "s2", now, step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes"}, ""})
+	mustRun(t, data, "s2", now, step{"inbox", []string{"add", link}, ""})
 	mustRun(t, data, "s2", now, step{"inbox", []string{"take", inbox.IdOf(link)}, ""})
 
-	code, _ := run("inbox", []string{"--data", data, "claim", inbox.IdOf(link)}, "s1", now, nil, &bytes.Buffer{})
+	code, err := run("inbox", []string{"--data", data, "take", inbox.IdOf(link)}, "s1", now, nil, &bytes.Buffer{})
+
+	assert.ErrorIs(t, err, inbox.ErrTaken)
 
 	assert.Equal(t, exitFailed, code)
 	assert.Equal(t, []string{"s2"}, markers(t, data))
@@ -136,7 +141,7 @@ func TestScopeMarkers_Migration(t *testing.T) {
 	now := time.Now()
 	_, err := relay.New(data).Open("old", "https://w.slack.com/archives/C7/p1", "", now)
 	require.NoError(t, err)
-	_, _, err = inbox.New(data).Add(inbox.Item{Link: "https://w.slack.com/archives/C7/p2", Status: inbox.StatusNew}, now)
+	_, _, err = inbox.New(data).Add(inbox.Item{Link: "https://w.slack.com/archives/C7/p2", Status: inbox.StatusOpen}, now)
 	require.NoError(t, err)
 	_, err = inbox.New(data).Take(inbox.IdOf("https://w.slack.com/archives/C7/p2"), "taker", now)
 	require.NoError(t, err)
@@ -155,7 +160,9 @@ func TestRun_StatusAndHealth(t *testing.T) {
 	now := time.Unix(1893456000, 0)
 	mustRun(t, data, "s1", now, step{"health", []string{"github"}, `{"ok":false,"error":"gh: HTTP 401","found":0}`})
 	mustRun(t, data, "s1", now, step{"health", []string{"slack"}, `{"ok":true,"found":2}`})
-	mustRun(t, data, "s1", now, step{"inbox", []string{"add", "https://w.slack.com/archives/C1/p1", "--verdict", "ask"}, ""})
+	mustRun(t, data, "s1", now, step{"inbox", []string{"add", "https://w.slack.com/archives/C1/p1", "--summary", "hi"}, ""})
+	mustRun(t, data, "s1", now, step{"inbox", []string{"add", "https://w.slack.com/archives/C1/p4"}, ""})
+	mustRun(t, data, "s1", now, step{"inbox", []string{"hold", inbox.IdOf("https://w.slack.com/archives/C1/p4")}, ""})
 	mustRun(t, data, "s1", now, step{"open", []string{"https://w.slack.com/archives/C1/p2"}, ""})
 	require.NoError(t, os.WriteFile(filepath.Join(data, "inbox", inbox.IdOf("https://w.slack.com/archives/C1/p3")+".json"), []byte("{"), 0o600))
 	// A hook that fails still exits 0 and leaves its failure for status
@@ -167,7 +174,8 @@ func TestRun_StatusAndHealth(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out), &st))
 	at := now.UTC()
 	assert.Equal(t, map[string]sourceHealth{"github": {Error: "gh: HTTP 401", At: at}, "slack": {Ok: true, Found: 2, At: at}}, st.Sources)
-	assert.Equal(t, inboxCounts{Waiting: 1, Corrupt: 1}, st.Inbox)
+	assert.Equal(t, inboxCounts{Open: 1, Held: 1, Corrupt: 1}, st.Inbox)
+	assert.Equal(t, []heldRow{{Id: inbox.IdOf("https://w.slack.com/archives/C1/p4"), Link: "https://w.slack.com/archives/C1/p4"}}, st.Held)
 	assert.Equal(t, []any{protocol, 1, false, 1}, []any{st.Protocol, st.RelaysOpen, st.Slack.Token, len(st.Hooks)})
 	assert.Equal(t, "stop", st.Hooks[0].Hook)
 }
@@ -177,7 +185,7 @@ func TestRun_TidyDaily(t *testing.T) {
 	data := t.TempDir()
 	now := time.Now()
 	old := now.Add(-15 * 24 * time.Hour)
-	mustRun(t, data, "s1", old, step{"inbox", []string{"add", "https://w.slack.com/archives/C1/p1", "--verdict", "ask"}, ""})
+	mustRun(t, data, "s1", old, step{"inbox", []string{"add", "https://w.slack.com/archives/C1/p1"}, ""})
 	loose := filepath.Join(data, "dest.json")
 	require.NoError(t, os.WriteFile(loose, []byte("{}"), 0o644))
 
@@ -188,71 +196,59 @@ func TestRun_TidyDaily(t *testing.T) {
 	info, err := os.Stat(loose)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"tidied, 1 requests expired", ""}, []string{strings.TrimSpace(first), second})
-	assert.Contains(t, rows, "\tdone\t")
+	assert.Empty(t, rows)
 	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 	assert.Equal(t, []string{}, markers(t, data))
 }
 
-// A tick during a turn keeps the session's take from aging into ask
-func TestRun_TickBusy(t *testing.T) {
+// A take keeps the scope with no heartbeat until it settles, the session ends or a day passes
+func TestScope_Take(t *testing.T) {
 	t.Parallel()
 	link := "https://w.slack.com/archives/C1/p1"
+	id := inbox.IdOf(link)
+	type args struct {
+		// Steps after the take each run at its offset
+		steps []step
+		after time.Duration
+	}
+	type want struct {
+		scoped  bool
+		markers []string
+	}
+	stop := step{"hook stop", nil, `{"session_id":"s1"}`}
+	end := step{"hook end", nil, `{"session_id":"s1"}`}
 	tcs := []struct {
 		name string
-		busy bool
-		want int
+		args args
+		want want
 	}{
-		{"a busy tick renews the take", true, 0},
-		{"an idle tick lets it age", false, 1},
+		{"lasts an hour without a tick", args{nil, time.Hour}, want{true, []string{"s1"}}},
+		{"lasts past turns that end", args{[]step{stop, stop}, 23 * time.Hour}, want{true, []string{"s1"}}},
+		{"ends a day after the take", args{nil, 25 * time.Hour}, want{false, []string{"s1"}}},
+		{"ends with the turn of a done", args{[]step{{"inbox", []string{"done", id}, ""}, stop}, time.Hour}, want{false, []string{}}},
+		{"stays in the turn of a done", args{[]step{{"inbox", []string{"done", id}, ""}}, time.Hour}, want{true, []string{"s1"}}},
+		{"ends with the session", args{[]step{end}, time.Hour}, want{false, []string{}}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			data := t.TempDir()
 			start := time.Now()
-			mustRun(t, data, "s1", start, step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes"}, ""})
-			mustRun(t, data, "s1", start, step{"inbox", []string{"take", inbox.IdOf(link)}, ""})
-			args := []string{"--cwd", "/tmp/notes", "--session", "s1"}
-			if tc.busy {
-				args = append(args, "--busy")
+			mustRun(t, data, "s1", start, step{"inbox", []string{"add", link}, ""})
+			mustRun(t, data, "s1", start, step{"inbox", []string{"take", id}, ""})
+			for i, s := range tc.args.steps {
+				at := start.Add(time.Duration(i+1) * time.Minute)
+				if hook, ok := strings.CutPrefix(s.cmd, "hook "); ok {
+					require.NoError(t, runHook(data, []string{hook}, at, strings.NewReader(s.stdin), &bytes.Buffer{}))
+					continue
+				}
+				mustRun(t, data, "s1", at, s)
 			}
-			mustRun(t, data, "", start.Add(15*time.Minute), step{"tick", args, ""})
 
-			out := mustRun(t, data, "", start.Add(30*time.Minute), step{"tick", []string{"--cwd", "/tmp/notes"}, ""})
+			_, scoped, err := scopeOf(data, "s1", start.Add(tc.args.after))
 
-			var tk tick
-			require.NoError(t, json.Unmarshal([]byte(out), &tk))
-			assert.Len(t, tk.Waiting, tc.want)
-		})
-	}
-}
-
-// A busy tick after the take aged and the turn that ended took its marker never leaves a scope the launcher skips
-func TestRun_TickBusy_Expired(t *testing.T) {
-	t.Parallel()
-	link := "https://w.slack.com/archives/C1/p1"
-	tcs := []struct {
-		name  string
-		after time.Duration
-	}{
-		{"a tick right after the take aged", 21 * time.Minute},
-		{"a tick long after the take aged", 2 * time.Hour},
-	}
-	for _, tc := range tcs {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			data := t.TempDir()
-			start := time.Now()
-			mustRun(t, data, "s1", start, step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes"}, ""})
-			mustRun(t, data, "s1", start, step{"inbox", []string{"take", inbox.IdOf(link)}, ""})
-			require.NoError(t, runHook(data, []string{"stop"}, start.Add(tc.after), strings.NewReader(`{"session_id":"s1"}`), &bytes.Buffer{}))
-			require.Equal(t, []string{}, markers(t, data))
-
-			mustRun(t, data, "", start.Add(tc.after+time.Minute), step{"tick", []string{"--cwd", "/tmp/notes", "--session", "s1", "--busy"}, ""})
-
-			_, scoped, err := scopeOf(data, "s1", start.Add(tc.after+2*time.Minute))
 			require.NoError(t, err)
-			assert.Equal(t, []any{false, []string{}}, []any{scoped, markers(t, data)})
+			assert.Equal(t, tc.want, want{scoped, markers(t, data)})
 		})
 	}
 }

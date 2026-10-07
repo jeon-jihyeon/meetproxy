@@ -28,15 +28,12 @@ func addRequest(c cli, args []string, f flags) (int, error) {
 	return exitCode(c.inboxAdd(it, inbox.Limits{PerHour: perHour, Dedupe: time.Duration(dedupe) * time.Minute}, f.key))
 }
 
+// Characters of the first line of a message the list shows
+const summaryRunes = 200
+
 // The request the flags describe as the delegation d caught it
-// A sender outside the trust set is asked about whatever triage said since the request text may steer the session
-// The user's own request is always trusted
 func (f flags) request(link string, d delegation.Delegation) (inbox.Item, error) {
-	status, ok := map[string]inbox.Status{triage.Handle: inbox.StatusNew, triage.Ask: inbox.StatusAsk}[f.verdict]
-	if !ok {
-		return inbox.Item{}, fmt.Errorf("%w: inbox add needs --verdict handle or ask, not %q", errUsage, f.verdict)
-	}
-	for name, v := range map[string]string{"trusted": f.trusted, "followup": f.followup, "correction": f.correction} {
+	for name, v := range map[string]string{"followup": f.followup, "correction": f.correction} {
 		if !slices.Contains([]string{"", "yes", "no"}, v) {
 			return inbox.Item{}, fmt.Errorf("%w: --%s is yes or no, not %q", errUsage, name, v)
 		}
@@ -44,17 +41,25 @@ func (f flags) request(link string, d delegation.Delegation) (inbox.Item, error)
 	if !slices.Contains([]string{"", delegation.DepthQuick, delegation.DepthDeep}, f.depth) {
 		return inbox.Item{}, fmt.Errorf("%w: --depth is quick or deep, not %q", errUsage, f.depth)
 	}
-	reason := f.reason
-	if status == inbox.StatusNew && f.self != "yes" && !d.Trusts(f.from, f.trusted == "yes") {
-		status, reason = inbox.StatusAsk, "sender outside the trust set"
-	}
 	return inbox.Item{
-		Link: link, From: f.from, Ts: f.ts, Keywords: split(f.keywords), Name: f.name, Place: f.place,
-		Skills: split(f.skills), Files: split(f.files), Status: status, Reason: reason,
-		Delegation: d.Id, Task: d.Do, Target: f.target, MayApprove: d.MayApprove(f.self == "yes"),
-		Depth: f.depth, Followup: f.followup == "yes", Correction: f.correction == "yes", Digest: f.digest,
-		Priority: d.Priority, Handoff: d.Handoff,
+		Thread: f.thread, Link: link, Source: f.source, From: f.from, Author: f.author, Channel: f.channel,
+		Summary: summary(f.summary), Ts: f.ts, Reason: f.reason, Delegation: d.Id, Task: d.Do, Target: f.target,
+		MayApprove: d.MayApprove(f.self == "yes"), Depth: f.depth, Followup: f.followup == "yes",
+		Correction: f.correction == "yes", Digest: f.digest,
 	}, nil
+}
+
+// The first line of a message cut to summaryRunes
+func summary(text string) string {
+	for line := range strings.SplitSeq(text, "\n") {
+		if line = strings.Join(strings.Fields(line), " "); line != "" {
+			if r := []rune(line); len(r) > summaryRunes {
+				return string(r[:summaryRunes-1]) + "…"
+			}
+			return line
+		}
+	}
+	return ""
 }
 
 // A request with a timestamp also moves the cursor of key past it
@@ -74,7 +79,7 @@ func (c cli) inboxAdd(it inbox.Item, lim inbox.Limits, key string) error {
 				return err
 			}
 		}
-		fmt.Fprintf(c.out, "%s\tignored\t%s\t%s\n", inbox.IdOf(it.Link), orDash(it.Name), err)
+		fmt.Fprintf(c.out, "%s\tignored\t%s\n", it.Link, err)
 		return nil
 	}
 	if err != nil {
@@ -89,7 +94,7 @@ func (c cli) inboxAdd(it inbox.Item, lim inbox.Limits, key string) error {
 	if !created {
 		seen = "seen"
 	}
-	fmt.Fprintf(c.out, "%s\t%s\t%s\t%s\n", stored.Id, stored.Status, orDash(stored.Name), seen)
+	fmt.Fprintf(c.out, "%s\t%s\t%s\n", stored.Id, stored.Status, seen)
 	return nil
 }
 
@@ -109,8 +114,7 @@ func (c cli) delegationOf(id string) (delegation.Delegation, error) {
 	return ds[i], nil
 }
 
-// Prints the link, the task, the target, whether a review may approve, the place, the suggested skills and files,
-// the depth and the flags of a follow-up
+// Prints the link, the task, the target, whether a review may approve, the depth and the flags of a follow-up
 func (c cli) inboxTake(id string) error {
 	var it inbox.Item
 	err := withScope(c.data, c.session, c.now, func() (err error) {
@@ -139,42 +143,8 @@ func (c cli) inboxTake(id string) error {
 	if it.Correction {
 		marks = append(marks, "correction")
 	}
-	fmt.Fprintf(c.out, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", it.Link, task, orDash(it.Target), approve,
-		orDash(it.Place), orDash(strings.Join(it.Skills, ",")), orDash(strings.Join(it.Files, ",")), depth, orDash(strings.Join(marks, ",")))
+	fmt.Fprintf(c.out, "%s\t%s\t%s\t%s\t%s\t%s\n", it.Link, task, orDash(it.Target), approve, depth, orDash(strings.Join(marks, ",")))
 	return nil
-}
-
-// Prints the link like take, or nothing when the session is busy
-// A session with an open relay is busy as well as one still working on a request it took
-func (c cli) inboxClaim(id string) error {
-	_, err := relay.New(c.data).Current(c.session)
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, relay.ErrNoOpen) {
-		return err
-	}
-	var it inbox.Item
-	var ok bool
-	err = withScope(c.data, c.session, c.now, func() (err error) {
-		it, ok, err = inbox.New(c.data).Claim(id, c.session, c.now)
-		return err
-	})
-	if err != nil || !ok {
-		return err
-	}
-	fmt.Fprintln(c.out, it.Link)
-	return nil
-}
-
-// Each settle closes the relay of the request before its status changes
-// A failed close then leaves the status as it was so the same command runs again
-func (c cli) ask(id, reason string) error {
-	if err := c.closeRelayOf(id); err != nil {
-		return err
-	}
-	_, err := inbox.New(c.data).Ask(id, c.session, reason, c.now)
-	return err
 }
 
 func (c cli) hold(id, until string) error {
@@ -219,26 +189,26 @@ func (c cli) closeRelayOf(id string) error {
 	return err
 }
 
+// Prints the requests not done newest first
+// Each line is the id, the status, the source, the author, the link and the summary
+// Statuses read as the list offers them so a held request whose time came is open
 func (c cli) inboxList(limit int) error {
 	items, err := inbox.New(c.data).List()
 	if err != nil {
 		return err
 	}
+	items = slices.DeleteFunc(items, func(it inbox.Item) bool { return it.Status == inbox.StatusDone })
 	if limit > 0 && len(items) > limit {
 		items = items[:limit]
 	}
 	for _, it := range items {
-		fmt.Fprintf(c.out, "%s\t%s\t%s\t%s\t%s\n", it.Id, it.Status, orDash(it.Name), it.Link, it.Reason)
+		st := it.Status
+		if it.Open(c.now) {
+			st = inbox.StatusOpen
+		}
+		fmt.Fprintf(c.out, "%s\t%s\t%s\t%s\t%s\t%s\n", it.Id, st, orDash(it.Source), orDash(it.Author), it.Link, orDash(it.Summary))
 	}
 	return nil
-}
-
-func (c cli) inboxWaiting() error {
-	items, err := inbox.New(c.data).Waiting(c.now)
-	for _, it := range items {
-		fmt.Fprintf(c.out, "%s\t%s\t%s\t%d\t%s\n", it.Id, it.Status, orDash(it.Name), it.AddedAt.Unix(), it.Link)
-	}
-	return err
 }
 
 // Prints where reading resumes
@@ -338,11 +308,8 @@ func (c cli) delegationRemove(id string) error { return delegation.New(c.data).R
 type matched struct {
 	Delegation string `json:"delegation"`
 	Task       string `json:"task"`
-	Post       string `json:"post"`
 	Triage     bool   `json:"triage"`
 	Target     string `json:"target,omitempty"`
-	// Empty when the work map has to pick it
-	Workspace string `json:"workspace,omitempty"`
 	// quick or deep
 	Depth string `json:"depth"`
 	// What duplicates of the message share
@@ -369,16 +336,10 @@ func (c cli) delegationMatch(key string, followup bool) error {
 	if !ok {
 		return nil
 	}
-	out := matched{
-		Delegation: d.Id, Task: d.Do, Post: d.PostFor(m), Triage: d.Triaged() || followup, Workspace: d.Workspace,
+	return json.NewEncoder(c.out).Encode(matched{
+		Delegation: d.Id, Task: d.Do, Triage: d.Triaged() || followup, Target: d.Target(m),
 		Depth: delegation.Depth(m.Text), Digest: delegation.Digest(m.Text),
-	}
-	var repo string
-	out.Target, repo = d.Target(m)
-	if out.Workspace == "" {
-		out.Workspace = repo
-	}
-	return json.NewEncoder(c.out).Encode(out)
+	})
 }
 
 func (c cli) delegationPut() error {

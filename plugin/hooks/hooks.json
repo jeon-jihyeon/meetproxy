@@ -8,10 +8,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy hook start"
-          },
-          {
-            "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy map refresh daily --data \"${CLAUDE_PLUGIN_DATA}\"",
             "async": true
           },
@@ -40,6 +36,16 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy hook stop"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy hook end"
           }
         ]
       }
