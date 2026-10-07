@@ -13,7 +13,7 @@ Each delegation says when a message becomes a request, what the session does and
 | Field | Values |
 |---|---|
 | `id` | short lowercase name such as `alerts`, never starting with `default` |
-| `when` | `mention` for Slack messages and GitHub comments that mention the user, `review-request` for pull requests that ask the user for a review, `channel` for every message of one Slack channel |
+| `when` | `mention` for Slack messages and GitHub comments that mention the user, `review-request` for pull requests that ask the user for a review, `dm` for Slack direct messages that do not mention the user, `own-pr` for comments of others on the user's own pull requests, `channel` for every message of one Slack channel |
 | `channel`, `host` | channel id such as `C0123` and workspace host such as `acme.slack.com`, both for `channel` |
 | `from` | author ids or exact display names, any of which must match without case, such as `["Datadog"]` |
 | `words` | words that must all appear, such as `["Triggered"]` |
@@ -23,8 +23,16 @@ Each delegation says when a message becomes a request, what the session does and
 | `approve` | for `review` only: `self` approves only the user's own requests and is the default, `never` comments only, `any` approves anyone's |
 | `workspace` | the place to run in, the absolute path of a repository or directory or the name of a place, empty to let the work map or triage pick it |
 | `note` | the user's sentence |
+| `priority` | a whole number, higher first when several requests are asked about together |
+| `max_per_hour` | requests queued per hour at most, 20 by default for `channel` and no limit otherwise |
+| `dedupe_minutes` | minutes within which a message with the same text apart from numbers, times and links is a duplicate, 30 by default for `channel` |
+| `handoff` | `true` posts a one line note where it was asked when an automatic attempt gives the request to the user |
 
-Three delegations are built in and come after the user's own: `default-review` reviews a mention with a pull request link and approves only the user's own requests, `default-review-request` asks the user before reviewing a requested pull request, and `default` answers other mentions after triage.
+Five delegations are built in and come after the user's own: `default-review` reviews a mention with a pull request link and approves only the user's own requests, `default-review-request` asks the user before reviewing a requested pull request, `default-dm` answers direct messages after triage, `default-own-pr` answers comments on the user's own pull requests after asking, and `default` answers other mentions after triage.
+
+A request may say `[deep]` for a longer answer with more evidence, and `[place=<name>]` or `[repo=<name>]` to name a place the work map knows. Neither changes whether it is answered alone.
+
+Not read yet: `@here` and `@channel`, user group mentions without a Slack token, GitHub Discussions, edits of a message already read, and Linear, Jira or CI sources. Direct messages and Slack follow-ups are read with a Slack token only, and a channel shared with another organization is told apart only with one.
 
 ## No argument
 
@@ -44,9 +52,9 @@ Run `meetproxy delegation remove --data "${CLAUDE_PLUGIN_DATA}" <id>`.
 
    | Needs | Check | Fix |
    |---|---|---|
-   | Slack, for `channel` delegations and Slack mentions | `meetproxy slack whoami --data "${CLAUDE_PLUGIN_DATA}"`, and without a token the Slack user profile tool | No token and no Slack tools: `/meetproxy:slack setup`, or `/plugin install slack@claude-plugins-official` then `/reload-plugins`. An auth error of the tools: log in from `/mcp` |
+   | Slack, for `channel` and `dm` delegations and Slack mentions | `meetproxy slack whoami --data "${CLAUDE_PLUGIN_DATA}"`, and without a token the Slack user profile tool | No token and no Slack tools: `/meetproxy:slack setup`, or `/plugin install slack@claude-plugins-official` then `/reload-plugins`. An auth error of the tools: log in from `/mcp` |
    | A Slack token, for any Slack delegation | `meetproxy slack whoami --data "${CLAUDE_PLUGIN_DATA}"` names the user | Optional. Without it Slack is read through the connector by the session holding the Slack lease, which shows as busy every minute. `/meetproxy:slack setup` sets one up |
-   | GitHub, for `review`, `review-request` and GitHub mentions | `command -v gh` and `gh auth status` | install gh, then the user runs `! gh auth login` |
+   | GitHub, for `review`, `review-request`, `own-pr` and GitHub mentions | `command -v gh` and `gh auth status` | install gh, then the user runs `! gh auth login` |
    | Evidence, for `investigate` | the tools this session has for metrics, logs and the cluster, such as a Datadog MCP, `kubectl` or a cloud CLI | name what is missing and what the verdict will rest on without it |
    | The skill, for any other `do` | the skill is listed in this session | name it as missing |
    | A session to run in | a fixed `workspace` is best served by a session opened in it | say that the session holding the source works there by absolute paths otherwise |

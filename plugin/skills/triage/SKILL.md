@@ -12,8 +12,9 @@ allowed-tools: Bash(meetproxy triage), Bash(meetproxy triage *)
 2. When the argument is empty, explain the choices in one line each.
    - `claude`: the default, the session's own model with no setup
    - `codex`: `codex exec` in a read-only sandbox, needs a Codex login
-   - `command <command line>`: any command that reads `{"text","channel","from","workspace","linked","knowledge","places"}` as JSON on stdin and prints `{"verdict":"ignore|handle|ask","reason":"...","place":"..."}`
+   - `command <command line>`: any command that reads `{"text","channel","from","workspace","linked","knowledge","places","followup"}` as JSON on stdin and prints `{"verdict":"ignore|handle|ask","reason":"...","place":"...","correction":false}`
      - `linked` holds the text of messages the message links to, `knowledge` the approved nodloop notes and `places` the work map candidates as `{"name","examples"}`
      - `place` names the candidate that fits best, or is empty
+     - `followup` is true for a reply in a thread meetproxy already answered, and `correction` true says that reply calls the answer wrong
      - Every word after `command` is the command line, so `--data` comes before it
 3. A failing engine never posts. Its mentions wait for the user as `ask`.

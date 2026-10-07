@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/jeon-jihyeon/meetproxy/internal/guard"
 	"github.com/jeon-jihyeon/meetproxy/internal/inbox"
 	"github.com/jeon-jihyeon/meetproxy/internal/locmap"
+	"github.com/jeon-jihyeon/meetproxy/internal/posts"
 	"github.com/jeon-jihyeon/meetproxy/internal/relay"
 )
 
@@ -56,7 +58,7 @@ func (c cli) locate(terms []string, limit int) error {
 		return err
 	}
 	for _, cand := range cs {
-		fmt.Fprintf(c.out, "%d\t%s\t%s\t%s\n", cand.Score, cand.Name, cand.Abs(), strings.Join(cand.Topics, " | "))
+		fmt.Fprintf(c.out, "%g\t%s\t%s\t%s\n", cand.Score, cand.Name, cand.Abs(), strings.Join(cand.Topics, " | "))
 	}
 	return nil
 }
@@ -173,6 +175,16 @@ type tick struct {
 	Waiting []waitingRow `json:"waiting"`
 	// Whether Slack is read with a token and the user's answer to setting one up
 	Slack slackState `json:"slack"`
+	// Threads read for follow-ups by the session holding the lease of their source
+	Watch []posts.Watch `json:"watch"`
+	// Reactions the lease holder adds to request links
+	Acks []ackRow `json:"acks"`
+}
+
+type ackRow struct {
+	Id    string `json:"id"`
+	Link  string `json:"link"`
+	React string `json:"react"`
 }
 
 type waitingRow struct {
@@ -184,8 +196,17 @@ type waitingRow struct {
 	Added int64  `json:"added"`
 	Link  string `json:"link"`
 	// The request belongs to the place of the session
-	Here bool `json:"here"`
+	Here       bool   `json:"here"`
+	Delegation string `json:"delegation,omitempty"`
+	Priority   int    `json:"priority,omitempty"`
+	// A held request whose time came
+	Due bool `json:"due,omitempty"`
+	// Unix seconds a held request is asked about again, zero when it waits for the user
+	Until int64 `json:"until,omitempty"`
 }
+
+// Requests older than this get no reaction since one so late reads as noise
+const ackWithin = 24 * time.Hour
 
 // With busy the takes of the session get a heartbeat so a long turn never loses them
 func (c cli) tick(cwd string, busy bool) error {
@@ -205,10 +226,66 @@ func (c cli) tick(cwd string, busy bool) error {
 	}
 	rows := make([]waitingRow, 0, len(items))
 	for _, it := range items {
-		rows = append(rows, waitingRow{
-			Id: it.Id, Status: it.Status, Place: it.Place, Name: it.Name,
-			Added: it.AddedAt.Unix(), Link: it.Link, Here: it.At(root, name),
-		})
+		row := waitingRow{
+			Id: it.Id, Status: it.Status, Place: it.Place, Name: it.Name, Added: it.AddedAt.Unix(), Link: it.Link,
+			Here: it.At(root, name), Delegation: it.Delegation, Priority: it.Priority, Due: it.Due(c.now),
+		}
+		if !it.HeldUntil.IsZero() {
+			row.Until = it.HeldUntil.Unix()
+		}
+		rows = append(rows, row)
 	}
-	return json.NewEncoder(c.out).Encode(tick{Protocol: protocol, Place: root, Name: name, Waiting: rows, Slack: readSlackState(c.data, false)})
+	watch, err := posts.New(c.data).Watches(c.now)
+	if err != nil {
+		return err
+	}
+	acks, err := c.acks(store)
+	if err != nil {
+		return err
+	}
+	if watch == nil {
+		watch = []posts.Watch{}
+	}
+	return json.NewEncoder(c.out).Encode(tick{
+		Protocol: protocol, Place: root, Name: name, Waiting: rows, Slack: readSlackState(c.data, false), Watch: watch, Acks: acks,
+	})
+}
+
+// Reactions still owed on request links
+// 1. eyes on a request queued within ackWithin
+// 2. done on a request answered with a post
+// 3. handoff on a request the automatic attempt gave back when its delegation asks for a note
+func (c cli) acks(store inbox.Store) ([]ackRow, error) {
+	all, err := store.List()
+	if err != nil {
+		return nil, err
+	}
+	ledger := posts.New(c.data)
+	out := []ackRow{}
+	for _, it := range all {
+		if c.now.Sub(it.UpdatedAt) > ackWithin {
+			continue
+		}
+		owed := func(react string) {
+			if !slices.Contains(it.Acked, react) {
+				out = append(out, ackRow{it.Id, it.Link, react})
+			}
+		}
+		switch {
+		case it.Status == inbox.StatusDone && it.Reason != "expired":
+			posted, err := ledger.Posted(it.Id)
+			if err != nil {
+				return nil, err
+			}
+			if posted {
+				owed(inbox.AckDone)
+			}
+		case it.Status == inbox.StatusAsk && it.Mode == inbox.ModeAuto && it.Handoff:
+			owed(inbox.AckSeen)
+			owed(inbox.AckHandoff)
+		case it.Status != inbox.StatusDone:
+			owed(inbox.AckSeen)
+		}
+	}
+	return out, nil
 }

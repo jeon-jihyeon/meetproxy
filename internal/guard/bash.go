@@ -33,7 +33,12 @@ var (
 	settings = map[string]bool{
 		"allow": true, "resume": true, "delegation put": true, "delegation remove": true,
 		"inbox take": true, "inbox claim": true, "inbox add": true, "inbox advance": true,
-		"slack token": true,
+		"slack token": true, "hook": true,
+	}
+	// Commands that remove, move or rewrite the files they name
+	fileEdits = map[string]bool{
+		"rm": true, "rmdir": true, "unlink": true, "mv": true, "cp": true, "ln": true, "truncate": true, "tee": true,
+		"dd": true, "shred": true, "find": true, "rsync": true, "install": true, "chmod": true, "sed": true,
 	}
 	// meetproxy flags that take no value
 	meetproxyBools = map[string]bool{"busy": true}
@@ -42,11 +47,14 @@ var (
 // Text inside text deeper than this that still names gh is denied
 const maxDepth = 8
 
-func bash(text string) ([]Post, error) {
+func bash(text, data string) ([]Post, error) {
 	if directAPI.MatchString(text) {
 		return nil, unknown("a direct API call")
 	}
-	var s scan
+	s := scan{data: data}
+	if data != "" {
+		s.data = filepath.Clean(data)
+	}
 	if err := s.text(text, 0); err != nil {
 		return nil, err
 	}
@@ -55,6 +63,8 @@ func bash(text string) ([]Post, error) {
 
 type scan struct {
 	posts []Post
+	// Plugin data directory or empty when unknown
+	data string
 }
 
 // Commands run inside a word are read as commands too
@@ -83,6 +93,7 @@ func (s *scan) text(text string, depth int) error {
 // Texts to read again from the words of c
 // 1. The program of a shell -c or eval is always read
 // 2. The text a gh flag such as --body takes is never run so only its substitutions are read
+// 3. Redirection targets are read for their substitutions the same way
 func nested(c shell.Command) []string {
 	gh := slices.IndexFunc(c.Args, isGh)
 	prog := program(c.Args)
@@ -94,6 +105,9 @@ func nested(c shell.Command) []string {
 		}
 	}
 	add(c.Stdin, true)
+	for _, w := range c.Redirects {
+		add(w, false)
+	}
 	for _, v := range c.Env {
 		add(v, true)
 	}
@@ -148,6 +162,9 @@ func inline(w string) bool {
 
 // Every word whose base name is gh or meetproxy starts a call whatever wrapper comes before it
 func (s *scan) command(c shell.Command) error {
+	if s.editsState(c) {
+		return fmt.Errorf("a file edit in the meetproxy data directory %w", ErrSettings)
+	}
 	if len(c.Args) == 0 {
 		return nil
 	}
@@ -165,7 +182,8 @@ func (s *scan) command(c shell.Command) error {
 	if i < 0 {
 		return nil
 	}
-	posts, err := ghCall(c.Args[i+1:], envRepos(c.Env, c.Args[:i]), slices.ContainsFunc(c.Args[:i], isFeeder))
+	repos, hosts := envValues("GH_REPO", c.Env, c.Args[:i]), envValues("GH_HOST", c.Env, c.Args[:i])
+	posts, err := ghCall(c.Args[i+1:], repos, hosts, slices.ContainsFunc(c.Args[:i], isFeeder))
 	s.posts = append(s.posts, posts...)
 	return err
 }
@@ -190,6 +208,29 @@ func opaque(c shell.Command) error {
 		return unknown("a shell reading its program from a pipe")
 	}
 	return nil
+}
+
+// A file edit or a redirection that names the data directory
+// So the session never ends its own scope or rewrites the allow list by hand
+// A path reached through cd or written relative is not seen
+func (s *scan) editsState(c shell.Command) bool {
+	if s.data == "" {
+		return false
+	}
+	if slices.ContainsFunc(c.Redirects, s.inData) {
+		return true
+	}
+	i := commandName(c.Args)
+	return i >= 0 && fileEdits[base(c.Args[i])] && slices.ContainsFunc(c.Args[i+1:], s.inData)
+}
+
+// A word naming the data directory by its path or its variable
+func (s *scan) inData(w string) bool {
+	if strings.Contains(w, "CLAUDE_PLUGIN_DATA") {
+		return true
+	}
+	p := filepath.Clean(w)
+	return p == s.data || strings.HasPrefix(p, s.data+string(filepath.Separator))
 }
 
 func isInterpreter(w string) bool { return interpreter.MatchString(base(w)) }
@@ -270,14 +311,14 @@ func meetproxyWords(args []string) (pos []string, target string) {
 	return pos, target
 }
 
-// GH_REPO set before gh or through a wrapper such as env
-func envRepos(env map[string]string, pre []string) []string {
+// A variable set before gh or through a wrapper such as env
+func envValues(name string, env map[string]string, pre []string) []string {
 	var out []string
-	if v, ok := env["GH_REPO"]; ok {
+	if v, ok := env[name]; ok {
 		out = append(out, v)
 	}
 	for _, w := range pre {
-		if v, ok := strings.CutPrefix(w, "GH_REPO="); ok {
+		if v, ok := strings.CutPrefix(w, name+"="); ok {
 			out = append(out, v)
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -70,9 +71,11 @@ func (s Store) Plan(text string) (Plan, error) {
 		return Plan{}, err
 	}
 	scored := score(cases, query)
-	root, err := s.place(strings.ToLower(text), query, places, scored)
-	if err != nil {
-		return Plan{}, err
+	root := overridden(text, places)
+	if root == "" {
+		if root, err = s.place(strings.ToLower(text), query, places, scored); err != nil {
+			return Plan{}, err
+		}
 	}
 	if root == "" {
 		return Plan{Candidates: candidates(scored, 3), Skills: describedSkills(methods, query, "")}, nil
@@ -95,6 +98,24 @@ func (s Store) Plan(text string) (Plan, error) {
 		Root: root, Name: filepath.Base(root), Skills: merge(describedSkills(methods, query, root), top(skills, 3), 3),
 		Files: top(files, 5),
 	}, nil
+}
+
+var override = regexp.MustCompile(`(?i)\[(?:place|repo)=([\w.-]+)\]`)
+
+// The root of a known place the request names as [place=<name>] or [repo=<name>]
+// It only routes the request so an unknown name is ignored rather than trusted
+func overridden(text string, places []Place) string {
+	m := override.FindStringSubmatch(text)
+	if m == nil {
+		return ""
+	}
+	name := strings.ToLower(m[1])
+	for _, p := range places {
+		if strings.ToLower(p.Name) == name || slices.Contains(p.Aliases, name) {
+			return p.Root
+		}
+	}
+	return ""
 }
 
 // The root of the place decided in layers where the first that decides wins

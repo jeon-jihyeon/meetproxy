@@ -219,6 +219,19 @@ func TestRunHookGuard_Scope(t *testing.T) {
 			"denies a post elsewhere after a settle in the same turn",
 			args{append(slices.Clone(taken), step{"inbox", []string{"done", id}, ""}), false, elsewhere}, "slack:C9 is not allowed",
 		},
+		{"denies gh in a process substitution read as stdin", args{taken, false, bash("cat < <(gh pr comment 1 -R x/r -b hi)")}, "github:x/r#1"},
+		{"denies gh in a substitution as the output file", args{taken, false, bash(`echo x > "$(gh pr comment 1 -R x/r -b hi)"`)}, "github:x/r#1"},
+		{"denies gh in a substitution as the error file", args{taken, false, bash("ls 2>$(gh pr comment 1 -R x/r -b hi)")}, "github:x/r#1"},
+		{"denies gh in a process substitution behind exec", args{taken, false, bash("exec 3> >(gh pr comment 1 -R x/r -b hi)")}, "github:x/r#1"},
+		{"denies a repository on another host", args{taken, false, bash("gh pr comment 3 -R ghe.acme.io/t/r -b hi")}, "a repository on host ghe.acme.io"},
+		{"denies GH_REPO on another host", args{taken, false, bash("GH_REPO=ghe.acme.io/t/r gh pr comment 3 -b hi")}, "a repository on host ghe.acme.io"},
+		{"denies GH_HOST of another host", args{taken, false, bash("GH_HOST=ghe.acme.io gh pr comment 3 -R t/r -b hi")}, "gh on host ghe.acme.io"},
+		{"allows the target on github.com by host", args{taken, false, bash("gh pr comment 3 -R github.com/t/r -b hi")}, ""},
+		{"denies meetproxy hook stop after a close in the same turn", args{closed, false, bash(`echo '{"session_id":"s1"}' | meetproxy hook stop`)}, "meetproxy hook stop changes meetproxy settings"},
+		{"denies removing the scope marker after a close in the same turn", args{closed, false, bash("rm DATA/scope/s1")}, "a file edit in the meetproxy data directory"},
+		{"denies moving the ended relay after a close in the same turn", args{closed, false, bash("mv DATA/relay/ended/s1.json /tmp/x")}, "a file edit in the meetproxy data directory"},
+		{"denies truncating the request while a take is open", args{taken, false, bash("truncate -s 0 DATA/inbox/" + id + ".json")}, "a file edit in the meetproxy data directory"},
+		{"lets meetproxy hook stop run when nothing is handled", args{nil, false, bash(`echo '{"session_id":"s1"}' | meetproxy hook stop`)}, ""},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -233,7 +246,8 @@ func TestRunHookGuard_Scope(t *testing.T) {
 				require.NoError(t, runHook(data, []string{"stop"}, time.Now(), strings.NewReader(`{"session_id":"s1"}`), &bytes.Buffer{}))
 			}
 			var out bytes.Buffer
-			require.NoError(t, runHook(data, []string{"guard"}, time.Now(), strings.NewReader(hookJSON(t, tc.args.input)), &out))
+			input := strings.ReplaceAll(hookJSON(t, tc.args.input), "DATA", data)
+			require.NoError(t, runHook(data, []string{"guard"}, time.Now(), strings.NewReader(input), &out))
 			reason := denyReason(t, out.Bytes())
 			assert.Contains(t, reason, tc.want)
 			assert.Equal(t, tc.want == "", reason == "")
@@ -354,6 +368,41 @@ func TestRunHook_BadInput(t *testing.T) {
 			assert.Equal(t, tc.want.err, err != nil)
 			assert.Contains(t, reason, tc.want.reason)
 			assert.Equal(t, tc.want.reason == "", reason == "")
+		})
+	}
+}
+
+// A file tool may not edit the data directory while a request is handled
+func TestRunHookGuard_FileEdits(t *testing.T) {
+	t.Parallel()
+	tcs := []struct {
+		name string
+		open bool
+		tool string
+		file func(data string) string
+		want string
+	}{
+		{"a write of the allow list while a request is handled", true, "Write", func(d string) string { return filepath.Join(d, "dest.json") }, "meetproxy data directory"},
+		{"an edit of a relay while a request is handled", true, "Edit", func(d string) string { return filepath.Join(d, "relay", "open", "s1.json") }, "meetproxy data directory"},
+		{"an edit of code while a request is handled", true, "Edit", func(string) string { return "/tmp/svc/main.go" }, ""},
+		{"a write of the data directory with no request", false, "Write", func(d string) string { return filepath.Join(d, "dest.json") }, ""},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			data := t.TempDir()
+			if tc.open {
+				_, err := relay.New(data).Open("s1", "https://w.slack.com/archives/C7/p1", "", time.Now())
+				require.NoError(t, err)
+			}
+			input := map[string]any{"session_id": "s1", "tool_name": tc.tool, "tool_input": map[string]any{"file_path": tc.file(data)}}
+			var out bytes.Buffer
+
+			require.NoError(t, runHook(data, []string{"guard"}, time.Now(), strings.NewReader(hookJSON(t, input)), &out))
+
+			reason := denyReason(t, out.Bytes())
+			assert.Contains(t, reason, tc.want)
+			assert.Equal(t, tc.want == "", reason == "")
 		})
 	}
 }

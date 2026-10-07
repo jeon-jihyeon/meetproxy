@@ -223,17 +223,96 @@ func TestHistory(t *testing.T) {
 func TestPostAndUserInfo(t *testing.T) {
 	t.Parallel()
 	f := &fake{answers: map[string]func(*http.Request) (int, any){
-		"chat.postMessage": func(*http.Request) (int, any) { return ok(map[string]any{}) },
+		"chat.postMessage": func(*http.Request) (int, any) { return ok(map[string]any{"ts": "1.3"}) },
 		"users.info": func(*http.Request) (int, any) {
 			return ok(map[string]any{"user": map[string]any{"id": "U2", "team_id": "T1", "name": "kai", "real_name": "Kai", "is_ultra_restricted": true}})
 		},
 	}}
 	c := f.client(t)
 
-	require.NoError(t, c.Post("C1", "1.2", "hi"))
+	ts, perr := c.Post("C1", "1.2", "hi")
 	u, err := c.UserInfo("U2")
 
+	require.NoError(t, perr)
 	require.NoError(t, err)
+	assert.Equal(t, "1.3", ts)
 	assert.Equal(t, User{Id: "U2", Team: "T1", Name: "Kai", Restricted: true}, u)
 	assert.Equal(t, []string{"chat.postMessage channel=C1&text=hi&thread_ts=1.2", "users.info user=U2"}, f.calls)
+}
+
+func TestEdits(t *testing.T) {
+	t.Parallel()
+	tcs := []struct {
+		name   string
+		answer map[string]any
+		call   func(c Client) error
+		want   string
+		failed bool
+	}{
+		{"update replaces the text", map[string]any{"ok": true}, func(c Client) error { return c.Update("C1", "1.2", "fixed") }, "chat.update channel=C1&text=fixed&ts=1.2", false},
+		{"delete removes the message", map[string]any{"ok": true}, func(c Client) error { return c.Delete("C1", "1.2") }, "chat.delete channel=C1&ts=1.2", false},
+		{"react adds a reaction", map[string]any{"ok": true}, func(c Client) error { return c.React("C1", "1.2", "eyes") }, "reactions.add channel=C1&name=eyes&timestamp=1.2", false},
+		{"a reaction already there counts as added", map[string]any{"ok": false, "error": "already_reacted"}, func(c Client) error { return c.React("C1", "1.2", "eyes") }, "reactions.add channel=C1&name=eyes&timestamp=1.2", false},
+		{"another error fails", map[string]any{"ok": false, "error": "cant_update_message"}, func(c Client) error { return c.Update("C1", "1.2", "x") }, "chat.update channel=C1&text=x&ts=1.2", true},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			answer := func(*http.Request) (int, any) { return http.StatusOK, tc.answer }
+			f := &fake{answers: map[string]func(*http.Request) (int, any){"chat.update": answer, "chat.delete": answer, "reactions.add": answer}}
+
+			err := tc.call(f.client(t))
+
+			assert.Equal(t, tc.failed, err != nil)
+			assert.Equal(t, []string{tc.want}, f.calls)
+		})
+	}
+}
+
+func TestShared(t *testing.T) {
+	t.Parallel()
+	tcs := []struct {
+		name    string
+		channel map[string]any
+		want    bool
+	}{
+		{"an internal channel", map[string]any{}, false},
+		{"a channel shared with another organization", map[string]any{"is_ext_shared": true}, true},
+		{"a channel shared within the organization", map[string]any{"is_shared": true}, true},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fake{answers: map[string]func(*http.Request) (int, any){
+				"conversations.info": func(*http.Request) (int, any) { return ok(map[string]any{"channel": tc.channel}) },
+			}}
+
+			got, err := f.client(t).Shared("C1")
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestDirectMessages(t *testing.T) {
+	t.Parallel()
+	f := &fake{answers: map[string]func(*http.Request) (int, any){
+		"conversations.list": func(*http.Request) (int, any) {
+			return ok(map[string]any{"channels": []map[string]any{{"id": "D1"}, {"id": "G2"}}})
+		},
+		"conversations.history": func(r *http.Request) (int, any) {
+			return ok(map[string]any{"messages": []map[string]any{{"ts": "5.0", "user": "U2", "text": "hi " + r.Form.Get("channel")}}})
+		},
+	}}
+
+	got, err := f.client(t).DirectMessages("4.0")
+
+	require.NoError(t, err)
+	var where []string
+	for _, m := range got {
+		where = append(where, m.Channel.Id+" "+m.Text)
+	}
+	assert.Equal(t, []string{"D1 hi D1", "G2 hi G2"}, where)
+	assert.Contains(t, f.calls[0], "types=im%2Cmpim")
 }

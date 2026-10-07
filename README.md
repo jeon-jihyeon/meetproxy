@@ -41,8 +41,8 @@ From then on, while any session is open, meetproxy checks every connected source
 
 | Source | Receives | Sends | Connected by |
 |---|---|---|---|
-| Slack | mentions, and every message of a channel you delegate | a reply in the thread | a personal token set up with `/meetproxy:slack setup`, or the [Slack plugin](https://github.com/anthropics/claude-plugins-official) |
-| GitHub | mentions in comments, and review requests | a comment, or a reply in the review thread | a logged in `gh` |
+| Slack | mentions, direct messages with a token, and every message of a channel you delegate | a reply in the thread | a personal token set up with `/meetproxy:slack setup`, or the [Slack plugin](https://github.com/anthropics/claude-plugins-official) |
+| GitHub | mentions in comments, review requests, and comments of others on your own pull requests | a comment, or a reply in the review thread | a logged in `gh` |
 
 Adding a service touches one entry in the source table of [internal/dest](internal/dest/dest.go), one case in each of the five dispatchers of the [watcher](plugin/hooks/meetproxy.js) (`owner`, `ready`, `receive`, `answered` and `send`), the tool dispatch of the [posting guard](internal/guard/guard.go) and a reference for the [relay skill](plugin/skills/relay/references). Triage sorts each message.
 
@@ -50,7 +50,11 @@ Adding a service touches one entry in the source table of [internal/dest](intern
 - **handle** — answered where it was asked, at the place on your machine the work map picks, with the skills and starting files you used for similar requests. A session working in that place takes it, otherwise the session reading that source works there by absolute paths. A request need not concern a repository
 - **ask** — needs you, such as a deploy approval or a decision. The session stops to ask whether to answer it now, later or not at all, and posts nothing before you choose
 
-A request you wrote yourself is handled without triage. Replies go only where the request came from. `/meetproxy:relay <link>` still hands over one request by hand, and a request waiting for the place a new session starts in is named when it opens.
+A request you wrote yourself is handled without triage. Replies go only where the request came from. A request that is queued gets an :eyes: reaction and one that was answered a :white_check_mark:, or eyes and hooray on GitHub. A reply that already ends with the meetproxy mark, yours or a teammate's, means the request is covered.
+
+Every post is kept in a ledger for 30 days and its thread is read for three days. A reply there comes back as the same request through triage, and one that says the answer was wrong lowers how much that answer counts in the location map and asks you. A question meetproxy asked back waits for the requester and asks you after three days without an answer. `/meetproxy:status retract <n>` corrects or removes a reply it posted.
+
+When a source stops working an idle session asks you once a day with the exact fix, and you can stop reading that source. When several requests need you they come as one question, a busy session leaves a request to an idle session of the same place, and a request you put off comes back at the time you chose. `/meetproxy:relay <link>` still hands over one request by hand, and a request waiting for the place a new session starts in is named when it opens.
 
 With a token meetproxy reads and posts Slack through its own binary, so no tool call runs and no session shows as busy. Without one only the session holding the Slack lease calls the connector, and it is asked once whether to set a token up. The token is kept in the plugin data directory, readable by you alone. `/meetproxy:status` shows every source, the inbox and any hook failure.
 
@@ -107,6 +111,7 @@ A person in the middle makes three calls before pasting anything. meetproxy make
   - The guard does not parse scripts run by path, copied `gh` binaries, raw IP hosts or WebFetch, and denies inline interpreters it cannot read. The narrow allowed tools of each skill are the main defense and the guard is defense in depth
 - **Honest posts** — Every post says it was written by Claude, because hidden AI use costs more trust than disclosed use
 - **Small and local** — One Go binary on the standard library, with data kept in the plugin data directory
+- **Limits** — Direct messages, Slack follow-ups and channels shared with another organization need a Slack token, since the connector cannot list or tell them. `@here`, `@channel`, user group mentions without a token, GitHub Discussions, edits of a message already read, and Linear, Jira or CI sources are not read yet. A channel delegation queues at most 20 requests an hour and drops repeats within 30 minutes unless it says otherwise
 
 ---
 
