@@ -42,13 +42,13 @@ func TestPrompt(t *testing.T) {
 	t.Parallel()
 	in := triage.Input{
 		Text: "why did this fail", Channel: "C1", From: "U1", Workspace: "svc",
-		Linked: []string{"alloc job failed"}, Knowledge: []string{"deploy pings need me"},
+		Linked: []string{"alloc job failed"},
 		Places: []triage.Place{{Name: "wiki", Examples: []string{"write the oncall runbook"}}},
 	}
 	got := triage.Prompt(in)
 
 	parts := []string{
-		"Workspace: svc", "- deploy pings need me", "<<<\nwhy did this fail\n>>>", "Linked message:\n<<<\nalloc job failed\n>>>",
+		"Workspace: svc", "<<<\nwhy did this fail\n>>>", "Linked message:\n<<<\nalloc job failed\n>>>",
 		"- wiki, once asked:\n<<<\nwrite the oncall runbook\n>>>",
 	}
 	for _, part := range parts {

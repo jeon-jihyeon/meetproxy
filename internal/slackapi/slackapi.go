@@ -25,8 +25,6 @@ const (
 	// Pages read in one call
 	// Far more than a busy channel gets in a day and still a bound on a runaway loop
 	MaxPages = 50
-	// Direct message conversations read in one call
-	maxDMs = 40
 )
 
 // A Slack answer with ok false
@@ -254,10 +252,9 @@ func (c Client) Shared(channel string) (bool, error) {
 	return r.Channel.IsShared || r.Channel.IsExtShared, err
 }
 
-// Direct and group direct messages after the ts oldest, each with its channel id set
-// 1. Conversations are listed once and each is read one page back
-// 2. At most maxDMs conversations are read so a user with many open DMs never runs into rate limits every check
-func (c Client) DirectMessages(oldest string) ([]Message, error) {
+// Ids of the user's direct and group direct conversations
+// Every page is read within MaxPages since a conversation left out would lose its messages
+func (c Client) DirectConversations() ([]string, error) {
 	var ids []string
 	cursor := ""
 	for range MaxPages {
@@ -279,24 +276,11 @@ func (c Client) DirectMessages(oldest string) ([]Message, error) {
 		for _, ch := range r.Channels {
 			ids = append(ids, ch.Id)
 		}
-		if cursor = r.Meta.NextCursor; cursor == "" || len(ids) >= maxDMs {
-			break
+		if cursor = r.Meta.NextCursor; cursor == "" {
+			return ids, nil
 		}
 	}
-	var out []Message
-	for _, id := range ids[:min(len(ids), maxDMs)] {
-		var r struct {
-			Messages []Message `json:"messages"`
-		}
-		if _, err := c.call("conversations.history", url.Values{"channel": {id}, "oldest": {oldest}, "limit": {strconv.Itoa(pageSize)}}, &r); err != nil {
-			return nil, err
-		}
-		for _, m := range r.Messages {
-			m.Channel.Id = id
-			out = append(out, m)
-		}
-	}
-	return out, nil
+	return nil, fmt.Errorf("slack conversations.list: more than %d pages of direct conversations", MaxPages)
 }
 
 // A member of a workspace as the trust check needs it

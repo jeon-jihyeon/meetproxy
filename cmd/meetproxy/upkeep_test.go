@@ -226,3 +226,33 @@ func TestRun_TickBusy(t *testing.T) {
 		})
 	}
 }
+
+// A busy tick after the take aged and the turn that ended took its marker never leaves a scope the launcher skips
+func TestRun_TickBusy_Expired(t *testing.T) {
+	t.Parallel()
+	link := "https://w.slack.com/archives/C1/p1"
+	tcs := []struct {
+		name  string
+		after time.Duration
+	}{
+		{"a tick right after the take aged", 21 * time.Minute},
+		{"a tick long after the take aged", 2 * time.Hour},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			data := t.TempDir()
+			start := time.Now()
+			mustRun(t, data, "s1", start, step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes"}, ""})
+			mustRun(t, data, "s1", start, step{"inbox", []string{"take", inbox.IdOf(link)}, ""})
+			require.NoError(t, runHook(data, []string{"stop"}, start.Add(tc.after), strings.NewReader(`{"session_id":"s1"}`), &bytes.Buffer{}))
+			require.Equal(t, []string{}, markers(t, data))
+
+			mustRun(t, data, "", start.Add(tc.after+time.Minute), step{"tick", []string{"--cwd", "/tmp/notes", "--session", "s1", "--busy"}, ""})
+
+			_, scoped, err := scopeOf(data, "s1", start.Add(tc.after+2*time.Minute))
+			require.NoError(t, err)
+			assert.Equal(t, []any{false, []string{}}, []any{scoped, markers(t, data)})
+		})
+	}
+}

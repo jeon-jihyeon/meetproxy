@@ -105,7 +105,7 @@ Every post is kept in a ledger for 30 days and its thread is read for three days
 
 When a source stops working an idle session asks you once a day with the exact fix, and you can stop reading that source. When several requests need you they come as one question, a busy session leaves a request to an idle session of the same place, and a request you put off comes back at the time you chose. `/meetproxy:relay <link>` still hands over one request by hand, and a request waiting for the place a new session starts in is named when it opens.
 
-Triage uses the session's own Claude by default. `/meetproxy:triage codex` switches to Codex, and `/meetproxy:triage command <cmd>` plugs in any command that reads the message as JSON and prints a verdict. Approved [nodloop](https://github.com/jeon-jihyeon/nodloop) notes for the place go into triage when nodloop is installed. `/meetproxy:pause` stops all of it at once and `/meetproxy:pause resume` starts it again.
+Triage uses the session's own Claude by default. `/meetproxy:triage codex` switches to Codex, and `/meetproxy:triage command <cmd>` plugs in any command that reads the message as JSON and prints a verdict. `/meetproxy:pause` stops all of it at once and `/meetproxy:pause resume` starts it again.
 
 A person in the middle makes three calls before pasting anything. meetproxy makes them in the session instead.
 
