@@ -295,24 +295,20 @@ func TestShared(t *testing.T) {
 	}
 }
 
-func TestDirectMessages(t *testing.T) {
+func TestDirectConversations(t *testing.T) {
 	t.Parallel()
 	f := &fake{answers: map[string]func(*http.Request) (int, any){
-		"conversations.list": func(*http.Request) (int, any) {
-			return ok(map[string]any{"channels": []map[string]any{{"id": "D1"}, {"id": "G2"}}})
-		},
-		"conversations.history": func(r *http.Request) (int, any) {
-			return ok(map[string]any{"messages": []map[string]any{{"ts": "5.0", "user": "U2", "text": "hi " + r.Form.Get("channel")}}})
+		"conversations.list": func(r *http.Request) (int, any) {
+			if r.Form.Get("cursor") == "" {
+				return ok(map[string]any{"channels": []map[string]any{{"id": "D1"}}, "response_metadata": map[string]any{"next_cursor": "p2"}})
+			}
+			return ok(map[string]any{"channels": []map[string]any{{"id": "G2"}}})
 		},
 	}}
 
-	got, err := f.client(t).DirectMessages("4.0")
+	got, err := f.client(t).DirectConversations()
 
 	require.NoError(t, err)
-	var where []string
-	for _, m := range got {
-		where = append(where, m.Channel.Id+" "+m.Text)
-	}
-	assert.Equal(t, []string{"D1 hi D1", "G2 hi G2"}, where)
+	assert.Equal(t, []string{"D1", "G2"}, got)
 	assert.Contains(t, f.calls[0], "types=im%2Cmpim")
 }
