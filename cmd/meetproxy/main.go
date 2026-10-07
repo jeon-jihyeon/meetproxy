@@ -16,7 +16,7 @@ var version = "dev"
 
 // The command set the plugin mod speaks
 // Raised whenever a command the mod calls changes so an older mod stops instead of misreading
-const protocol = 7
+const protocol = 8
 
 const (
 	exitFailed   = 1
@@ -86,12 +86,28 @@ var families = []family{
 			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackHistory(a[0], f.oldest)) },
 		},
 		{
+			name: "slack shared", args: "<channel>", least: 1, most: 1, help: "print whether people outside the workspace read the channel",
+			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.slackShared(a[0])) },
+		},
+		{
+			name: "slack react", args: "<link>", least: 1, most: 1, flags: []string{"react"}, help: "add the reaction --react to the message of a link",
+			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackReact(a[0], f.react)) },
+		},
+		{
+			name: "slack update", args: "<reply link>", least: 1, most: 1, help: "replace a reply with the text on stdin",
+			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.slackEdit(a[0], true)) },
+		},
+		{
+			name: "slack delete", args: "<reply link>", least: 1, most: 1, help: "delete a reply",
+			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.slackEdit(a[0], false)) },
+		},
+		{
 			name: "slack read", args: "<link>", least: 1, most: 1, flags: []string{"limit"}, help: "print the text of the thread a link points at",
 			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackRead(a[0], f.limit)) },
 		},
 		{
 			name: "slack post", args: "<link>", least: 1, most: 1, flags: []string{"session"},
-			help: "post the text on stdin in the thread of a link",
+			help: "post the text on stdin in the thread of a link and print its permalink",
 			run:  func(c cli, a []string, _ flags) (int, error) { return c.slackPost(a[0]) },
 		},
 		{name: "slack manifest", help: "print the app manifest and the link that creates the app", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackManifest()) }},
@@ -133,8 +149,10 @@ type flags struct {
 	name                                 string
 	cwd, keywords, paths                 string
 	skills, files, after, oldest, answer string
-	limit                                int
-	busy                                 bool
+	react                                string
+
+	limit int
+	busy  bool
 }
 
 func (f *flags) set() *flag.FlagSet {
@@ -158,6 +176,9 @@ func (f *flags) set() *flag.FlagSet {
 	fs.StringVar(&f.after, "after", "", "unix seconds to read Slack mentions after")
 	fs.StringVar(&f.oldest, "oldest", "", "Slack ts to read a channel after")
 	fs.StringVar(&f.answer, "answer", "", "now, later or keep")
+
+	fs.StringVar(&f.react, "react", "", "reaction name")
+
 	fs.BoolVar(&f.busy, "busy", false, "a turn is running in the session")
 	return fs
 }

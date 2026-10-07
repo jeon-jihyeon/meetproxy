@@ -13,6 +13,8 @@ type Command struct {
 	Env map[string]string
 	// Body of the here document or here-string the command reads
 	Stdin string
+	// Targets of its redirections whose substitutions still run
+	Redirects []string
 }
 
 // The simple commands of shell text in order
@@ -22,7 +24,7 @@ type Command struct {
 // 4. Here document bodies are never read as commands and become the Stdin of the command declaring them
 // 5. "$(cat <<'EOF' ... EOF)" becomes the body of its here document
 // 6. Other substitutions, backticks, arithmetic and ${...} stay as written inside their word
-// 7. Redirections and their targets are not words of the command
+// 7. Redirection targets are kept apart from the words of the command
 func Commands(text string) []Command {
 	l := lexer{s: text}
 	l.run()
@@ -38,9 +40,9 @@ var (
 type target int
 
 const (
-	toArgs    target = iota
-	toStdin          // the word after <<<
-	toNowhere        // the target of a redirection
+	toArgs     target = iota
+	toStdin           // the word after <<<
+	toRedirect        // the target of a redirection
 )
 
 type lexer struct {
@@ -158,7 +160,7 @@ func (l *lexer) redirection() {
 	if l.i < len(l.s) && strings.IndexByte(">|&", l.s[l.i]) >= 0 {
 		l.i++
 	}
-	l.next = toNowhere
+	l.next = toRedirect
 }
 
 func (l *lexer) heredoc() {
@@ -296,7 +298,8 @@ func (l *lexer) endWord() {
 	case l.next == toStdin:
 		l.cmd.Stdin = w
 		l.reads = true
-	case l.next == toNowhere:
+	case l.next == toRedirect:
+		l.cmd.Redirects = append(l.cmd.Redirects, w)
 	case len(l.cmd.Args) == 0 && assignment.MatchString(l.s[l.start:]):
 		name, value, _ := strings.Cut(w, "=")
 		if l.cmd.Env == nil {
@@ -312,7 +315,7 @@ func (l *lexer) endWord() {
 func (l *lexer) endCommand() {
 	l.endWord()
 	l.next = toArgs
-	if len(l.cmd.Args) > 0 || len(l.cmd.Env) > 0 || l.reads {
+	if len(l.cmd.Args) > 0 || len(l.cmd.Env) > 0 || len(l.cmd.Redirects) > 0 || l.reads {
 		l.out = append(l.out, l.cmd)
 	}
 	l.cmd = Command{}
