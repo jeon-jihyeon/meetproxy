@@ -15,8 +15,8 @@ allowed-tools: Bash(meetproxy status), Bash(meetproxy status *), Bash(meetproxy 
    - meetproxy: `version`, `protocol` and paused when `paused`
    - Slack: token or connector by `slack.token`, `slack.user` at `slack.host`, `slack.missing` scopes, `slack.setup.answer`
    - one row per entry of `sources`: ok with `found` or the `error`, and how long ago `at` was
-   - inbox: `waiting`, `taken`, `held`, `question` and `corrupt`
-   - held: one row per entry of `held` with its id, name and `until` in local time, or until you run it when there is none
+   - inbox: `open`, `taken`, `held`, `question` and `corrupt`
+   - held: one row per entry of `held` with its id, its `summary` cut to 60 characters and `until` in local time, or until taken up when there is none
    - posts: `history.posts` replies in 30 days, `history.retracted` of them retracted, `history.watching` threads read for follow-ups
    - ignored: `history.ignored` messages read and not queued in 3 days
    - relays open: `relays_open`
@@ -24,7 +24,7 @@ allowed-tools: Bash(meetproxy status), Bash(meetproxy status *), Bash(meetproxy 
    - kept: `bytes.map`, `bytes.closed` and `bytes.observed` in KB
 3. Then run `meetproxy posts list --data "${CLAUDE_PLUGIN_DATA}" --limit 5` and list the replies numbered from 1, one line each: when, `mode`, `kind`, the `reply` link and retracted when `retracted_at` is set. Never quote `body`
 4. Under that, one line per problem with its fix and nothing when there is none
-   - Slack read through the connector: `/meetproxy:slack setup` sets up a token so sessions stop showing busy every minute
+   - Slack read through the connector: `/meetproxy:slack setup` sets up a token so Slack is read in the background and not only when the inbox is opened
    - missing scopes: add them under User Token Scopes of the Slack app, reinstall it and run `/meetproxy:slack setup`
    - a source error: `/meetproxy:delegate` checks what that source needs
    - corrupt requests: they were moved to `inbox/corrupt` under the data directory and nothing else needs them

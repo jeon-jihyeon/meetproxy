@@ -394,18 +394,6 @@ func (c cli) readConversations(client slackapi.Client, ids []string, read map[st
 	return out
 }
 
-func (c cli) slackShared(channel string) error {
-	client, err := c.slack()
-	if err != nil {
-		return err
-	}
-	shared, err := client.Shared(channel)
-	if err != nil {
-		return err
-	}
-	return writeJSON(c.out, map[string]bool{"shared": shared})
-}
-
 var validReaction = regexp.MustCompile(`^[a-z0-9_+-]{1,64}$`)
 
 func (c cli) slackReact(link, name string) error {
@@ -473,23 +461,6 @@ func (c cli) slackRead(link string, limit int) error {
 	}
 	users.save()
 	return writeJSON(c.out, map[string]string{"text": strings.Join(lines, "\n")})
-}
-
-// A full member of the user's own workspace
-// Guests, deactivated accounts and members of another team are never trusted
-func (c cli) slackTrusted(id string) error {
-	client, a, err := c.slackSession()
-	if err != nil {
-		return err
-	}
-	users := c.users(client)
-	u, err := users.get(id)
-	if err != nil {
-		return err
-	}
-	users.save()
-	trusted := a.Team != "" && u.Team == a.Team && !u.Restricted && !u.Deleted
-	return writeJSON(c.out, map[string]bool{"trusted": trusted})
 }
 
 // Posts the text on stdin in the thread of the link after the same check as can-post

@@ -193,13 +193,15 @@ func TestRunHookGuard_Scope(t *testing.T) {
 		"session_id": "s1", "tool_name": "mcp__plugin_slack_slack__slack_send_message",
 		"tool_input": map[string]any{"channel_id": "C9", "message": "m"},
 	}
-	queued := step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--target", target}, ""}
+	queued := step{"inbox", []string{"add", link, "--target", target}, ""}
 	taken := []step{queued, {"inbox", []string{"take", id}, ""}}
-	closed := append(slices.Clone(taken), step{"open", []string{link}, ""}, step{"close", []string{"--topic", "t"}, ""})
+	opened := append(slices.Clone(taken), step{"open", []string{link}, ""})
+	closed := append(slices.Clone(opened), step{"close", []string{"--topic", "t"}, ""})
 
 	type args struct {
 		setup []step
-		stop  bool
+		// Hook that runs after the setup
+		hook  string
 		input map[string]any
 	}
 	tcs := []struct {
@@ -207,31 +209,34 @@ func TestRunHookGuard_Scope(t *testing.T) {
 		args args
 		want string
 	}{
-		{"lets a post go anywhere when nothing is handled", args{nil, false, elsewhere}, ""},
-		{"denies a post elsewhere after a take before the relay opens", args{taken, false, elsewhere}, "slack:C9 is not allowed"},
-		{"allows a post to the target after a take", args{taken, false, bash("gh pr comment 3 -R t/r -b hi")}, ""},
-		{"denies an approval the delegation does not allow", args{taken, false, bash("gh pr review 3 -R t/r --approve -b ok")}, "is not delegated"},
-		{"denies meetproxy allow while a take is open", args{taken, false, bash("meetproxy allow slack:C9")}, "changes meetproxy settings"},
-		{"denies opening another request while a take is open", args{taken, false, bash("meetproxy open https://w.slack.com/archives/C9/p2")}, "slack:C9 is not allowed"},
-		{"denies a post elsewhere after a close in the same turn", args{closed, false, elsewhere}, "slack:C9 is not allowed"},
-		{"lets a post go anywhere once the turn of the close ended", args{closed, true, elsewhere}, ""},
+		{"lets a post go anywhere when nothing is handled", args{nil, "", elsewhere}, ""},
+		{"denies a post elsewhere after a take before the relay opens", args{taken, "", elsewhere}, "slack:C9 is not allowed"},
+		{"allows a post to the target after a take", args{taken, "", bash("gh pr comment 3 -R t/r -b hi")}, ""},
+		{"denies an approval the delegation does not allow", args{taken, "", bash("gh pr review 3 -R t/r --approve -b ok")}, "is not delegated"},
+		{"denies meetproxy allow while a take is open", args{taken, "", bash("meetproxy allow slack:C9")}, "changes meetproxy settings"},
+		{"denies opening another request while a take is open", args{taken, "", bash("meetproxy open https://w.slack.com/archives/C9/p2")}, "slack:C9 is not allowed"},
+		{"denies a post elsewhere after a close in the same turn", args{closed, "", elsewhere}, "slack:C9 is not allowed"},
+		{"lets a post go anywhere once the turn of the close ended", args{closed, "stop", elsewhere}, ""},
 		{
 			"denies a post elsewhere after a settle in the same turn",
-			args{append(slices.Clone(taken), step{"inbox", []string{"done", id}, ""}), false, elsewhere}, "slack:C9 is not allowed",
+			args{append(slices.Clone(taken), step{"inbox", []string{"done", id}, ""}), "", elsewhere}, "slack:C9 is not allowed",
 		},
-		{"denies gh in a process substitution read as stdin", args{taken, false, bash("cat < <(gh pr comment 1 -R x/r -b hi)")}, "github:x/r#1"},
-		{"denies gh in a substitution as the output file", args{taken, false, bash(`echo x > "$(gh pr comment 1 -R x/r -b hi)"`)}, "github:x/r#1"},
-		{"denies gh in a substitution as the error file", args{taken, false, bash("ls 2>$(gh pr comment 1 -R x/r -b hi)")}, "github:x/r#1"},
-		{"denies gh in a process substitution behind exec", args{taken, false, bash("exec 3> >(gh pr comment 1 -R x/r -b hi)")}, "github:x/r#1"},
-		{"denies a repository on another host", args{taken, false, bash("gh pr comment 3 -R ghe.acme.io/t/r -b hi")}, "a repository on host ghe.acme.io"},
-		{"denies GH_REPO on another host", args{taken, false, bash("GH_REPO=ghe.acme.io/t/r gh pr comment 3 -b hi")}, "a repository on host ghe.acme.io"},
-		{"denies GH_HOST of another host", args{taken, false, bash("GH_HOST=ghe.acme.io gh pr comment 3 -R t/r -b hi")}, "gh on host ghe.acme.io"},
-		{"allows the target on github.com by host", args{taken, false, bash("gh pr comment 3 -R github.com/t/r -b hi")}, ""},
-		{"denies meetproxy hook stop after a close in the same turn", args{closed, false, bash(`echo '{"session_id":"s1"}' | meetproxy hook stop`)}, "meetproxy hook stop changes meetproxy settings"},
-		{"denies removing the scope marker after a close in the same turn", args{closed, false, bash("rm DATA/scope/s1")}, "a file edit in the meetproxy data directory"},
-		{"denies moving the ended relay after a close in the same turn", args{closed, false, bash("mv DATA/relay/ended/s1.json /tmp/x")}, "a file edit in the meetproxy data directory"},
-		{"denies truncating the request while a take is open", args{taken, false, bash("truncate -s 0 DATA/inbox/" + id + ".json")}, "a file edit in the meetproxy data directory"},
-		{"lets meetproxy hook stop run when nothing is handled", args{nil, false, bash(`echo '{"session_id":"s1"}' | meetproxy hook stop`)}, ""},
+		{"denies gh in a process substitution read as stdin", args{taken, "", bash("cat < <(gh pr comment 1 -R x/r -b hi)")}, "github:x/r#1"},
+		{"denies gh in a substitution as the output file", args{taken, "", bash(`echo x > "$(gh pr comment 1 -R x/r -b hi)"`)}, "github:x/r#1"},
+		{"denies gh in a substitution as the error file", args{taken, "", bash("ls 2>$(gh pr comment 1 -R x/r -b hi)")}, "github:x/r#1"},
+		{"denies gh in a process substitution behind exec", args{taken, "", bash("exec 3> >(gh pr comment 1 -R x/r -b hi)")}, "github:x/r#1"},
+		{"denies a repository on another host", args{taken, "", bash("gh pr comment 3 -R ghe.acme.io/t/r -b hi")}, "a repository on host ghe.acme.io"},
+		{"denies GH_REPO on another host", args{taken, "", bash("GH_REPO=ghe.acme.io/t/r gh pr comment 3 -b hi")}, "a repository on host ghe.acme.io"},
+		{"denies GH_HOST of another host", args{taken, "", bash("GH_HOST=ghe.acme.io gh pr comment 3 -R t/r -b hi")}, "gh on host ghe.acme.io"},
+		{"allows the target on github.com by host", args{taken, "", bash("gh pr comment 3 -R github.com/t/r -b hi")}, ""},
+		{"denies meetproxy hook stop after a close in the same turn", args{closed, "", bash(`echo '{"session_id":"s1"}' | meetproxy hook stop`)}, "meetproxy hook stop changes meetproxy settings"},
+		{"denies removing the scope marker after a close in the same turn", args{closed, "", bash("rm DATA/scope/s1")}, "a file edit in the meetproxy data directory"},
+		{"denies moving the ended relay after a close in the same turn", args{closed, "", bash("mv DATA/relay/ended/s1.json /tmp/x")}, "a file edit in the meetproxy data directory"},
+		{"denies truncating the request while a take is open", args{taken, "", bash("truncate -s 0 DATA/inbox/" + id + ".json")}, "a file edit in the meetproxy data directory"},
+		{"lets a post go anywhere once the session of a take ended", args{taken, "end", elsewhere}, ""},
+		{"lets a post go anywhere once the session of an open relay ended", args{opened, "end", elsewhere}, ""},
+		{"keeps the scope of a take after a turn ends", args{taken, "stop", elsewhere}, "slack:C9 is not allowed"},
+		{"lets meetproxy hook stop run when nothing is handled", args{nil, "", bash(`echo '{"session_id":"s1"}' | meetproxy hook stop`)}, ""},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -242,8 +247,9 @@ func TestRunHookGuard_Scope(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, 0, code)
 			}
-			if tc.args.stop {
-				require.NoError(t, runHook(data, []string{"stop"}, time.Now(), strings.NewReader(`{"session_id":"s1"}`), &bytes.Buffer{}))
+			if tc.args.hook != "" {
+				input := strings.NewReader(`{"session_id":"s1"}`)
+				require.NoError(t, runHook(data, []string{tc.args.hook}, time.Now(), input, &bytes.Buffer{}))
 			}
 			var out bytes.Buffer
 			input := strings.ReplaceAll(hookJSON(t, tc.args.input), "DATA", data)
@@ -252,75 +258,6 @@ func TestRunHookGuard_Scope(t *testing.T) {
 			assert.Contains(t, reason, tc.want)
 			assert.Equal(t, tc.want == "", reason == "")
 			assert.NotContains(t, reason, "meetproxy close", "the denial names no way around it")
-		})
-	}
-}
-
-// Returns the lines of the SessionStart notice or nil when nothing was printed
-func startNotice(t *testing.T, out []byte) []string {
-	t.Helper()
-	if len(out) == 0 {
-		return nil
-	}
-	var o struct {
-		HookSpecificOutput struct {
-			AdditionalContext string `json:"additionalContext"`
-		} `json:"hookSpecificOutput"`
-	}
-	require.NoError(t, json.Unmarshal(out, &o))
-	return strings.Split(o.HookSpecificOutput.AdditionalContext, "\n")
-}
-
-func TestRunHookStart(t *testing.T) {
-	t.Parallel()
-	svc := gitRepo(t, "svc", "main.go")
-	other := t.TempDir()
-	now := time.Now()
-	type spec struct {
-		link     string
-		name     string
-		place    string
-		status   inbox.Status
-		addedAgo time.Duration
-	}
-	specs := []spec{
-		{"https://w.slack.com/archives/C1/p1", "svc", "", inbox.StatusNew, 3 * time.Minute},
-		{"https://w.slack.com/archives/C1/p2", "svc", svc, inbox.StatusAsk, time.Minute},
-		{"https://w.slack.com/archives/C1/p3", "svc", "", inbox.StatusTaken, time.Minute},
-		{"https://w.slack.com/archives/C1/p4", "web", "", inbox.StatusNew, time.Minute},
-		{"https://w.slack.com/archives/C1/p5", "svc", "", inbox.StatusTaken, 2 * time.Hour},
-		{"https://w.slack.com/archives/C1/p6", "svc", "/elsewhere/svc", inbox.StatusNew, time.Minute},
-		{"https://w.slack.com/archives/C1/p7", "core", svc, inbox.StatusNew, time.Minute},
-	}
-	line := func(sp spec) string { return inbox.IdOf(sp.link) + " " + sp.link }
-	tcs := []struct {
-		name string
-		cwd  string
-		want []string
-	}{
-		{
-			"names the requests of the place oldest first by root or by name when stored without one", svc,
-			[]string{
-				"meetproxy: 4 requests wait for svc. Tell the user, and run /meetproxy:handle <id> for the ones they ask for.",
-				line(specs[4]), line(specs[0]), line(specs[1]), line(specs[6]),
-			},
-		},
-		{"stays quiet in a place no request waits for", other, nil},
-	}
-	for _, tc := range tcs {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			data := t.TempDir()
-			store := inbox.New(data)
-			for i, sp := range specs {
-				// Apart by a nanosecond so the order of requests added at once is fixed
-				at := now.Add(-sp.addedAgo).Add(time.Duration(i))
-				_, _, err := store.Add(inbox.Item{Link: sp.link, Name: sp.name, Place: sp.place, Status: sp.status}, at)
-				require.NoError(t, err)
-			}
-			var out bytes.Buffer
-			require.NoError(t, runHook(data, []string{"start"}, now, strings.NewReader(hookJSON(t, map[string]any{"cwd": tc.cwd})), &out))
-			assert.Equal(t, tc.want, startNotice(t, out.Bytes()))
 		})
 	}
 }
@@ -343,8 +280,10 @@ func TestRunHook_BadInput(t *testing.T) {
 	}{
 		{"rejects an unknown hook", args{true, "nope", "{}"}, want{true, ""}},
 		{"path hook errors without a data dir", args{false, "path", "{}"}, want{true, ""}},
-		{"start hook errors without a data dir", args{false, "start", "{}"}, want{true, ""}},
-		{"start hook errors on broken input", args{true, "start", "{"}, want{true, ""}},
+		{"start hook is gone", args{true, "start", "{}"}, want{true, ""}},
+		{"end hook errors without a data dir", args{false, "end", "{}"}, want{true, ""}},
+		{"end hook errors on broken input", args{true, "end", "{"}, want{true, ""}},
+		{"end hook passes input without a session", args{true, "end", "{}"}, want{false, ""}},
 		{"guard passes non posting calls without a data dir", args{false, "guard", "{}"}, want{false, ""}},
 		{
 			"guard denies posts without a data dir",
@@ -403,6 +342,79 @@ func TestRunHookGuard_FileEdits(t *testing.T) {
 			reason := denyReason(t, out.Bytes())
 			assert.Contains(t, reason, tc.want)
 			assert.Equal(t, tc.want == "", reason == "")
+		})
+	}
+}
+
+// The end of a session gives its takes back, closes its relay and drops its marker
+func TestRunHookEnd(t *testing.T) {
+	t.Parallel()
+	mine, other := "https://w.slack.com/archives/C1/p1", "https://w.slack.com/archives/C1/p2"
+	type args struct {
+		setup []step
+		input string
+	}
+	type want struct {
+		statuses map[string]inbox.Status
+		reason   string
+		relay    bool
+		markers  []string
+	}
+	add := func(link string) step { return step{"inbox", []string{"add", link}, ""} }
+	take := func(link, session string) step {
+		return step{"inbox", []string{"take", inbox.IdOf(link), "--session", session}, ""}
+	}
+	statuses := func(m, o inbox.Status) map[string]inbox.Status {
+		return map[string]inbox.Status{inbox.IdOf(mine): m, inbox.IdOf(other): o}
+	}
+	tcs := []struct {
+		name string
+		args args
+		want want
+	}{
+		{
+			"opens the take of the session again",
+			args{[]step{add(mine), add(other), take(mine, "s1")}, `{"session_id":"s1"}`},
+			want{statuses(inbox.StatusOpen, inbox.StatusOpen), inbox.Released, false, []string{}},
+		},
+		{
+			"closes the relay of the take",
+			args{[]step{add(mine), add(other), take(mine, "s1"), {"open", []string{mine, "--session", "s1"}, ""}}, `{"session_id":"s1"}`},
+			want{statuses(inbox.StatusOpen, inbox.StatusOpen), inbox.Released, false, []string{}},
+		},
+		{
+			"leaves the take of another session",
+			args{[]step{add(mine), add(other), take(mine, "s1"), take(other, "s2")}, `{"session_id":"s1"}`},
+			want{statuses(inbox.StatusOpen, inbox.StatusTaken), inbox.Released, false, []string{"s2"}},
+		},
+		{
+			"does nothing without a session",
+			args{[]step{add(mine), add(other), take(mine, "s1")}, `{}`},
+			want{statuses(inbox.StatusTaken, inbox.StatusOpen), "", false, []string{"s1"}},
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			data := t.TempDir()
+			now := time.Now()
+			for _, s := range tc.args.setup {
+				mustRun(t, data, "", now, s)
+			}
+
+			require.NoError(t, runHook(data, []string{"end"}, now, strings.NewReader(tc.args.input), &bytes.Buffer{}))
+
+			store := inbox.New(data)
+			got := map[string]inbox.Status{}
+			for id := range tc.want.statuses {
+				it, err := store.Get(id)
+				require.NoError(t, err)
+				got[id] = it.Status
+			}
+			it, err := store.Get(inbox.IdOf(mine))
+			require.NoError(t, err)
+			_, err = relay.New(data).Current("s1")
+			assert.Equal(t, tc.want, want{got, it.Reason, err == nil, markers(t, data)})
 		})
 	}
 }

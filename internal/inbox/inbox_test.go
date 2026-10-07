@@ -22,110 +22,208 @@ const (
 	other = "https://w.slack.com/archives/C1/p2"
 )
 
+// Stores a request and brings it to status the way session s1 would
+func seed(t *testing.T, s inbox.Store, it inbox.Item, status inbox.Status, at time.Time) inbox.Item {
+	t.Helper()
+	stored, _, err := s.Add(it, at)
+	require.NoError(t, err)
+	switch status {
+	case inbox.StatusTaken:
+		stored, err = s.Take(stored.Id, "s1", at)
+	case inbox.StatusHeld:
+		stored, err = s.Hold(stored.Id, "s1", time.Time{}, at)
+	case inbox.StatusQuestion:
+		if stored, err = s.Take(stored.Id, "s1", at); err == nil {
+			stored, err = s.Question(stored.Id, "s1", at)
+		}
+	case inbox.StatusDone:
+		stored, err = s.Done(stored.Id, "s1", at)
+	}
+	require.NoError(t, err)
+	return stored
+}
+
 func TestStoreAdd(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
+	type stored struct {
+		item   inbox.Item
+		status inbox.Status
+	}
 	type want struct {
 		added  bool
 		status inbox.Status
 		reason string
 		ts     string
+		again  bool
 		failed bool
 		count  int
 	}
 	tcs := []struct {
 		name   string
-		first  inbox.Item
+		first  stored
 		paused bool
 		add    inbox.Item
 		want   want
 	}{
 		{
-			"stores a new link",
-			inbox.Item{Link: other, Status: inbox.StatusNew}, false,
-			inbox.Item{Link: link, Status: inbox.StatusNew},
-			want{true, inbox.StatusNew, "", "", false, 2},
+			"stores a new thread as open",
+			stored{inbox.Item{Link: other}, inbox.StatusOpen}, false,
+			inbox.Item{Link: link, Status: inbox.StatusDone},
+			want{true, inbox.StatusOpen, "", "", false, false, 2},
 		},
 		{
-			"keeps a link seen before",
-			inbox.Item{Link: link, Status: inbox.StatusAsk, Reason: "a"}, false,
-			inbox.Item{Link: link, Status: inbox.StatusNew, Reason: "b"},
-			want{false, inbox.StatusAsk, "a", "", false, 1},
+			"keeps a thread seen before",
+			stored{inbox.Item{Link: link, Reason: "a"}, inbox.StatusOpen}, false,
+			inbox.Item{Link: link, Reason: "b"},
+			want{false, inbox.StatusOpen, "a", "", false, false, 1},
 		},
 		{
-			"keeps a waiting request asked again with its newest timestamp",
-			inbox.Item{Link: link, Status: inbox.StatusNew, Ts: "1"}, false,
-			inbox.Item{Link: link, Status: inbox.StatusAsk, Ts: "2"},
-			want{false, inbox.StatusNew, "", "2", false, 1},
+			"keeps an open request asked again with its newest timestamp",
+			stored{inbox.Item{Link: link, Ts: "1"}, inbox.StatusOpen}, false,
+			inbox.Item{Link: link, Ts: "2"},
+			want{false, inbox.StatusOpen, "", "2", false, false, 1},
 		},
 		{
-			"keeps the timestamp of a waiting request found by an older scan",
-			inbox.Item{Link: link, Status: inbox.StatusNew, Ts: "2"}, false,
-			inbox.Item{Link: link, Status: inbox.StatusAsk, Ts: "1"},
-			want{false, inbox.StatusNew, "", "2", false, 1},
+			"keeps the timestamp of an open request found by an older scan",
+			stored{inbox.Item{Link: link, Ts: "2"}, inbox.StatusOpen}, false,
+			inbox.Item{Link: link, Ts: "1"},
+			want{false, inbox.StatusOpen, "", "2", false, false, 1},
+		},
+		{
+			"marks a taken request asked again",
+			stored{inbox.Item{Link: link, Ts: "1"}, inbox.StatusTaken}, false,
+			inbox.Item{Link: link, Reason: "new", Ts: "2"},
+			want{false, inbox.StatusTaken, "", "2", true, false, 1},
+		},
+		{
+			"reopens a held request asked again",
+			stored{inbox.Item{Link: link, Reason: "old", Ts: "1"}, inbox.StatusHeld}, false,
+			inbox.Item{Link: link, Reason: "new", Ts: "2"},
+			want{true, inbox.StatusOpen, "new", "2", false, false, 1},
+		},
+		{
+			"reopens a question asked again",
+			stored{inbox.Item{Link: link, Reason: "old", Ts: "1"}, inbox.StatusQuestion}, false,
+			inbox.Item{Link: link, Reason: "new", Ts: "2"},
+			want{true, inbox.StatusOpen, "new", "2", false, false, 1},
 		},
 		{
 			"reopens a done request asked again",
-			inbox.Item{Link: link, Status: inbox.StatusDone, Reason: "old", Ts: "1"}, false,
-			inbox.Item{Link: link, Status: inbox.StatusAsk, Reason: "new", Ts: "2"},
-			want{true, inbox.StatusAsk, "new", "2", false, 1},
+			stored{inbox.Item{Link: link, Reason: "old", Ts: "1"}, inbox.StatusDone}, false,
+			inbox.Item{Link: link, Reason: "new", Ts: "2"},
+			want{true, inbox.StatusOpen, "new", "2", false, false, 1},
 		},
 		{
 			"compares timestamps as numbers",
-			inbox.Item{Link: link, Status: inbox.StatusDone, Ts: "9"}, false,
-			inbox.Item{Link: link, Status: inbox.StatusAsk, Ts: "10"},
-			want{true, inbox.StatusAsk, "", "10", false, 1},
+			stored{inbox.Item{Link: link, Ts: "9"}, inbox.StatusDone}, false,
+			inbox.Item{Link: link, Ts: "10"},
+			want{true, inbox.StatusOpen, "", "10", false, false, 1},
 		},
 		{
 			"tells microseconds apart",
-			inbox.Item{Link: link, Status: inbox.StatusDone, Ts: "1712345678.123456"}, false,
-			inbox.Item{Link: link, Status: inbox.StatusAsk, Ts: "1712345678.123457"},
-			want{true, inbox.StatusAsk, "", "1712345678.123457", false, 1},
+			stored{inbox.Item{Link: link, Ts: "1712345678.123456"}, inbox.StatusDone}, false,
+			inbox.Item{Link: link, Ts: "1712345678.123457"},
+			want{true, inbox.StatusOpen, "", "1712345678.123457", false, false, 1},
 		},
 		{
 			"keeps a done request found again at the same timestamp",
-			inbox.Item{Link: link, Status: inbox.StatusDone, Ts: "1"}, false,
-			inbox.Item{Link: link, Status: inbox.StatusAsk, Ts: "1.0"},
-			want{false, inbox.StatusDone, "", "1", false, 1},
+			stored{inbox.Item{Link: link, Ts: "1"}, inbox.StatusDone}, false,
+			inbox.Item{Link: link, Ts: "1.0"},
+			want{false, inbox.StatusDone, "", "1", false, false, 1},
 		},
 		{
 			"keeps a done request found again at an older timestamp",
-			inbox.Item{Link: link, Status: inbox.StatusDone, Ts: "2"}, false,
-			inbox.Item{Link: link, Status: inbox.StatusAsk, Ts: "1"},
-			want{false, inbox.StatusDone, "", "2", false, 1},
+			stored{inbox.Item{Link: link, Ts: "2"}, inbox.StatusDone}, false,
+			inbox.Item{Link: link, Ts: "1"},
+			want{false, inbox.StatusDone, "", "2", false, false, 1},
 		},
 		{
 			"keeps a done request found again without a timestamp",
-			inbox.Item{Link: link, Status: inbox.StatusDone, Ts: "1"}, false,
-			inbox.Item{Link: link, Status: inbox.StatusAsk},
-			want{false, inbox.StatusDone, "", "1", false, 1},
+			stored{inbox.Item{Link: link, Ts: "1"}, inbox.StatusDone}, false,
+			inbox.Item{Link: link},
+			want{false, inbox.StatusDone, "", "1", false, false, 1},
 		},
 		{
 			"refuses a timestamp that is not unix seconds",
-			inbox.Item{Link: other, Status: inbox.StatusNew}, false,
-			inbox.Item{Link: link, Status: inbox.StatusNew, Ts: "yesterday"},
-			want{false, "", "", "", true, 1},
+			stored{inbox.Item{Link: other}, inbox.StatusOpen}, false,
+			inbox.Item{Link: link, Ts: "yesterday"},
+			want{false, "", "", "", false, true, 1},
 		},
 		{
 			"refuses while paused",
-			inbox.Item{Link: other, Status: inbox.StatusNew}, true,
-			inbox.Item{Link: link, Status: inbox.StatusNew},
-			want{false, "", "", "", true, 1},
+			stored{inbox.Item{Link: other}, inbox.StatusOpen}, true,
+			inbox.Item{Link: link},
+			want{false, "", "", "", false, true, 1},
 		},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := inbox.New(t.TempDir())
-			_, _, err := s.Add(tc.first, now.Add(-time.Minute))
-			require.NoError(t, err)
+			seed(t, s, tc.first.item, tc.first.status, now.Add(-time.Minute))
 			require.NoError(t, s.SetPaused(tc.paused))
 
 			it, added, err := s.Add(tc.add, now)
 
 			items, lerr := s.List()
 			require.NoError(t, lerr)
-			assert.Equal(t, tc.want, want{added, it.Status, it.Reason, it.Ts, err != nil, len(items)})
+			assert.Equal(t, tc.want, want{added, it.Status, it.Reason, it.Ts, it.Again, err != nil, len(items)})
+		})
+	}
+}
+
+// Every message of one thread is one request that keeps the link of the first one
+func TestStoreAdd_Thread(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	first := inbox.Item{Thread: "C1/1", Link: link, Ts: "1", From: "U1", Author: "Ann", Summary: "first"}
+	type want struct {
+		id      string
+		link    string
+		from    string
+		author  string
+		summary string
+		count   int
+	}
+	tcs := []struct {
+		name string
+		add  inbox.Item
+		want want
+	}{
+		{
+			"a newer message moves the author and the summary",
+			inbox.Item{Thread: "C1/1", Link: other, Ts: "2", From: "U2", Author: "Bo", Summary: "second"},
+			want{inbox.IdOf("C1/1"), link, "U2", "Bo", "second", 1},
+		},
+		{
+			"an older message changes nothing",
+			inbox.Item{Thread: "C1/1", Link: other, Ts: "0", From: "U2", Author: "Bo", Summary: "older"},
+			want{inbox.IdOf("C1/1"), link, "U1", "Ann", "first", 1},
+		},
+		{
+			"another thread is another request",
+			inbox.Item{Thread: "C1/2", Link: other, Ts: "2", From: "U2", Author: "Bo", Summary: "second"},
+			want{inbox.IdOf("C1/2"), other, "U2", "Bo", "second", 2},
+		},
+		{
+			"a message without a thread is keyed by its link",
+			inbox.Item{Link: other, Ts: "2", From: "U2", Author: "Bo", Summary: "second"},
+			want{inbox.IdOf(other), other, "U2", "Bo", "second", 2},
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := inbox.New(t.TempDir())
+			seed(t, s, first, inbox.StatusOpen, now)
+
+			it, _, err := s.Add(tc.add, now)
+
+			require.NoError(t, err)
+			items, lerr := s.List()
+			require.NoError(t, lerr)
+			assert.Equal(t, tc.want, want{it.Id, it.Link, it.From, it.Author, it.Summary, len(items)})
 		})
 	}
 }
@@ -135,14 +233,14 @@ func TestStoreAdd_OlderScanAfterDone(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	s := inbox.New(t.TempDir())
-	_, _, err := s.Add(inbox.Item{Link: link, Status: inbox.StatusNew, Ts: "1"}, now)
+	_, _, err := s.Add(inbox.Item{Link: link, Ts: "1"}, now)
 	require.NoError(t, err)
-	_, _, err = s.Add(inbox.Item{Link: link, Status: inbox.StatusNew, Ts: "2"}, now)
+	_, _, err = s.Add(inbox.Item{Link: link, Ts: "2"}, now)
 	require.NoError(t, err)
 	_, err = s.Done(inbox.IdOf(link), "s1", now)
 	require.NoError(t, err)
 
-	_, added, err := s.Add(inbox.Item{Link: link, Status: inbox.StatusNew, Ts: "1"}, now)
+	_, added, err := s.Add(inbox.Item{Link: link, Ts: "1"}, now)
 
 	require.NoError(t, err)
 	it, err := s.Get(inbox.IdOf(link))
@@ -164,21 +262,33 @@ func TestStoreAdd_WhileTaken(t *testing.T) {
 		settle func(s inbox.Store, id string) error
 		want   want
 	}{
-		{"done opens it again as a follow-up", func(s inbox.Store, id string) error { _, err := s.Done(id, "s1", now); return err }, want{inbox.StatusNew, inbox.Replied, true}},
-		{"a question opens it again since the reply may answer it", func(s inbox.Store, id string) error { _, err := s.Question(id, "s1", now); return err }, want{inbox.StatusNew, inbox.Replied, true}},
-		{"asking the user leaves it to the user", func(s inbox.Store, id string) error { _, err := s.Ask(id, "s1", "unsure", now); return err }, want{inbox.StatusAsk, "unsure", true}},
-		{"holding it leaves it to the user", func(s inbox.Store, id string) error { _, err := s.Hold(id, "s1", time.Time{}, now); return err }, want{inbox.StatusHeld, "", true}},
+		{
+			"done opens it again as a follow-up",
+			func(s inbox.Store, id string) error { _, err := s.Done(id, "s1", now); return err },
+			want{inbox.StatusOpen, inbox.Replied, true},
+		},
+		{
+			"a question opens it again since the reply may answer it",
+			func(s inbox.Store, id string) error { _, err := s.Question(id, "s1", now); return err },
+			want{inbox.StatusOpen, inbox.Replied, true},
+		},
+		{
+			"holding it leaves it to the user",
+			func(s inbox.Store, id string) error { _, err := s.Hold(id, "s1", time.Time{}, now); return err },
+			want{inbox.StatusHeld, "", true},
+		},
+		{
+			"the session ending gives it back",
+			func(s inbox.Store, _ string) error { _, err := s.Release("s1", now); return err },
+			want{inbox.StatusOpen, inbox.Released, true},
+		},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := inbox.New(t.TempDir())
-			id := inbox.IdOf(link)
-			_, _, err := s.Add(inbox.Item{Link: link, Status: inbox.StatusNew, Ts: "1"}, now)
-			require.NoError(t, err)
-			_, err = s.Take(id, "s1", now)
-			require.NoError(t, err)
-			_, _, err = s.Add(inbox.Item{Link: link, Status: inbox.StatusNew, Ts: "2", Followup: true}, now)
+			id := seed(t, s, inbox.Item{Link: link, Ts: "1"}, inbox.StatusTaken, now).Id
+			_, _, err := s.Add(inbox.Item{Link: link, Ts: "2", Followup: true}, now)
 			require.NoError(t, err)
 			taken, err := s.Get(id)
 			require.NoError(t, err)
@@ -189,28 +299,7 @@ func TestStoreAdd_WhileTaken(t *testing.T) {
 			it, err := s.Get(id)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, want{it.Status, it.Reason, it.Followup})
-			assert.Empty(t, it.Again)
-		})
-	}
-}
-
-func TestItemAt(t *testing.T) {
-	t.Parallel()
-	tcs := []struct {
-		name string
-		item inbox.Item
-		root string
-		want bool
-	}{
-		{"matches the root", inbox.Item{Place: "/a/svc", Name: "svc"}, "/a/svc", true},
-		{"a place of the same name elsewhere does not match", inbox.Item{Place: "/b/svc", Name: "svc"}, "/a/svc", false},
-		{"a request without a root matches by name", inbox.Item{Name: "svc"}, "/a/svc", true},
-		{"a request without a place matches nothing", inbox.Item{}, "/a/svc", false},
-	}
-	for _, tc := range tcs {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, tc.item.At(tc.root, "svc"))
+			assert.False(t, it.Again)
 		})
 	}
 }
@@ -219,6 +308,7 @@ func TestStoreGet(t *testing.T) {
 	t.Parallel()
 	type want struct {
 		link     string
+		status   inbox.Status
 		notFound bool
 		failed   bool
 	}
@@ -229,10 +319,15 @@ func TestStoreGet(t *testing.T) {
 		id   string
 		want want
 	}{
-		{"reads an item", inbox.IdOf(link), `{"link":"` + link + `"}`, inbox.IdOf(link), want{link, false, false}},
-		{"refuses a corrupt item", inbox.IdOf(link), `{"link":`, inbox.IdOf(link), want{"", false, true}},
-		{"an unknown id is not found", inbox.IdOf(link), `{}`, inbox.IdOf(other), want{"", true, true}},
-		{"a path like id is not found", inbox.IdOf(link), `{}`, "../dest", want{"", true, true}},
+		{"reads an item", inbox.IdOf(link), `{"link":"` + link + `","status":"held"}`, inbox.IdOf(link),
+			want{link, inbox.StatusHeld, false, false}},
+		{"reads a legacy new item as open", inbox.IdOf(link), `{"link":"` + link + `","status":"new"}`, inbox.IdOf(link),
+			want{link, inbox.StatusOpen, false, false}},
+		{"reads a legacy ask item as open", inbox.IdOf(link), `{"link":"` + link + `","status":"ask"}`, inbox.IdOf(link),
+			want{link, inbox.StatusOpen, false, false}},
+		{"refuses a corrupt item", inbox.IdOf(link), `{"link":`, inbox.IdOf(link), want{"", "", false, true}},
+		{"an unknown id is not found", inbox.IdOf(link), `{}`, inbox.IdOf(other), want{"", "", true, true}},
+		{"a path like id is not found", inbox.IdOf(link), `{}`, "../dest", want{"", "", true, true}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -243,7 +338,37 @@ func TestStoreGet(t *testing.T) {
 
 			it, err := inbox.New(dir).Get(tc.id)
 
-			assert.Equal(t, tc.want, want{it.Link, errors.Is(err, inbox.ErrNotFound), err != nil})
+			assert.Equal(t, tc.want, want{it.Link, it.Status, errors.Is(err, inbox.ErrNotFound), err != nil})
+		})
+	}
+}
+
+func TestItemOpen(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	day := 24 * time.Hour
+	item := func(status inbox.Status, age time.Duration) inbox.Item {
+		return inbox.Item{Status: status, UpdatedAt: now.Add(-age)}
+	}
+	tcs := []struct {
+		name string
+		item inbox.Item
+		want bool
+	}{
+		{"an open request", item(inbox.StatusOpen, 0), true},
+		{"a held request without a time waits for the user", item(inbox.StatusHeld, 40*day), false},
+		{"a held request before its time", inbox.Item{Status: inbox.StatusHeld, HeldUntil: now.Add(time.Minute)}, false},
+		{"a held request whose time came", inbox.Item{Status: inbox.StatusHeld, HeldUntil: now}, true},
+		{"a fresh question", item(inbox.StatusQuestion, 2*day), false},
+		{"a question left unanswered", item(inbox.StatusQuestion, 3*day), true},
+		{"a fresh take", item(inbox.StatusTaken, 23*time.Hour), false},
+		{"a take kept past a day", item(inbox.StatusTaken, day), true},
+		{"a done request", item(inbox.StatusDone, 40*day), false},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, tc.item.Open(now))
 		})
 	}
 }
@@ -266,27 +391,28 @@ func TestStoreTake(t *testing.T) {
 		takes  []take
 		want   []step
 	}{
-		{"one session takes a new request", inbox.StatusNew, inbox.IdOf(link), []take{{"s1", 0}}, []step{{"s1", false}}},
+		{"one session takes an open request", inbox.StatusOpen, inbox.IdOf(link), []take{{"s2", 0}}, []step{{"s2", false}}},
 		{
-			"the same session takes again and another is refused", inbox.StatusAsk, inbox.IdOf(link),
-			[]take{{"s1", 0}, {"s1", 0}, {"s2", 0}}, []step{{"s1", false}, {"s1", false}, {"", true}},
+			"the same session takes again and another is refused", inbox.StatusOpen, inbox.IdOf(link),
+			[]take{{"s2", 0}, {"s2", 0}, {"s3", 23 * time.Hour}}, []step{{"s2", false}, {"s2", false}, {"", true}},
 		},
 		{
-			"another session takes over a take left for an hour", inbox.StatusNew, inbox.IdOf(link),
-			[]take{{"s1", 0}, {"s2", 2 * time.Hour}, {"s1", 2 * time.Hour}}, []step{{"s1", false}, {"s2", false}, {"", true}},
+			"another session takes over a take left a day", inbox.StatusOpen, inbox.IdOf(link),
+			[]take{{"s2", 0}, {"s3", 25 * time.Hour}, {"s2", 25 * time.Hour}}, []step{{"s2", false}, {"s3", false}, {"", true}},
 		},
-		{"a held request is taken by its id", inbox.StatusHeld, inbox.IdOf(link), []take{{"s1", 0}}, []step{{"s1", false}}},
-		{"a done request is refused", inbox.StatusDone, inbox.IdOf(link), []take{{"s1", 0}}, []step{{"", true}}},
-		{"a done request stays done long after", inbox.StatusDone, inbox.IdOf(link), []take{{"s1", 2 * time.Hour}}, []step{{"", true}}},
-		{"an unknown id is refused", inbox.StatusNew, inbox.IdOf(other), []take{{"s1", 0}}, []step{{"", true}}},
-		{"a path like id is refused", inbox.StatusNew, "../dest", []take{{"s1", 0}}, []step{{"", true}}},
+		{"a held request is taken by its id", inbox.StatusHeld, inbox.IdOf(link), []take{{"s2", 0}}, []step{{"s2", false}}},
+		{"a question is taken by its id", inbox.StatusQuestion, inbox.IdOf(link), []take{{"s2", 0}}, []step{{"s2", false}}},
+		{"a done request is refused", inbox.StatusDone, inbox.IdOf(link), []take{{"s2", 0}}, []step{{"", true}}},
+		{"a done request stays done long after",
+			inbox.StatusDone, inbox.IdOf(link), []take{{"s2", 25 * time.Hour}}, []step{{"", true}}},
+		{"an unknown id is refused", inbox.StatusOpen, inbox.IdOf(other), []take{{"s2", 0}}, []step{{"", true}}},
+		{"a path like id is refused", inbox.StatusOpen, "../dest", []take{{"s2", 0}}, []step{{"", true}}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := inbox.New(t.TempDir())
-			_, _, err := s.Add(inbox.Item{Link: link, Status: tc.status}, now)
-			require.NoError(t, err)
+			seed(t, s, inbox.Item{Link: link}, tc.status, now)
 
 			got := make([]step, 0, len(tc.takes))
 			for _, tk := range tc.takes {
@@ -299,6 +425,18 @@ func TestStoreTake(t *testing.T) {
 	}
 }
 
+func TestStoreTake_Paused(t *testing.T) {
+	t.Parallel()
+	s := inbox.New(t.TempDir())
+	_, _, err := s.Add(inbox.Item{Link: link}, time.Now())
+	require.NoError(t, err)
+	require.NoError(t, s.SetPaused(true))
+
+	_, err = s.Take(inbox.IdOf(link), "s1", time.Now())
+
+	assert.ErrorIs(t, err, inbox.ErrPaused)
+}
+
 // Sessions race for one request while the winner settles it at once
 func TestStoreTake_Race(t *testing.T) {
 	t.Parallel()
@@ -307,7 +445,7 @@ func TestStoreTake_Race(t *testing.T) {
 	for i := range 50 {
 		s := inbox.New(t.TempDir())
 		l := fmt.Sprintf("https://w.slack.com/archives/C1/p%d", i)
-		it, _, err := s.Add(inbox.Item{Link: l, Status: inbox.StatusNew}, now)
+		it, _, err := s.Add(inbox.Item{Link: l}, now)
 		require.NoError(t, err)
 		var wg sync.WaitGroup
 		var mu sync.Mutex
@@ -332,75 +470,6 @@ func TestStoreTake_Race(t *testing.T) {
 	}
 }
 
-func TestStoreClaim(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	type want struct {
-		ok     bool
-		failed bool
-		status inbox.Status
-	}
-	tcs := []struct {
-		name    string
-		link    string
-		session string
-		after   time.Duration
-		want    want
-	}{
-		{"a session takes one request at a time", other, "s1", 0, want{false, false, inbox.StatusNew}},
-		{"a request taken long ago no longer keeps the session busy", other, "s1", 2 * time.Hour, want{true, false, inbox.StatusTaken}},
-		{"another session takes a request of its own", other, "s2", 0, want{true, false, inbox.StatusTaken}},
-		{"a request another session works on is refused", link, "s2", 0, want{false, true, inbox.StatusTaken}},
-		{"a request left taken for an hour is taken over", link, "s2", 2 * time.Hour, want{true, false, inbox.StatusTaken}},
-	}
-	for _, tc := range tcs {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			s := inbox.New(t.TempDir())
-			for _, l := range []string{link, other} {
-				_, _, err := s.Add(inbox.Item{Link: l, Status: inbox.StatusNew}, now)
-				require.NoError(t, err)
-			}
-			_, ok, err := s.Claim(inbox.IdOf(link), "s1", now)
-			require.NoError(t, err)
-			require.True(t, ok)
-
-			_, ok, err = s.Claim(inbox.IdOf(tc.link), tc.session, now.Add(tc.after))
-
-			it, gerr := s.Get(inbox.IdOf(tc.link))
-			require.NoError(t, gerr)
-			assert.Equal(t, tc.want, want{ok, err != nil, it.Status})
-		})
-	}
-}
-
-// A held request waits for the user so a session never claims it on its own
-func TestStoreClaim_Held(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	s := inbox.New(t.TempDir())
-	_, _, err := s.Add(inbox.Item{Link: link, Status: inbox.StatusHeld}, now)
-	require.NoError(t, err)
-
-	_, ok, err := s.Claim(inbox.IdOf(link), "s1", now)
-
-	it, gerr := s.Get(inbox.IdOf(link))
-	require.NoError(t, gerr)
-	assert.Equal(t, []any{false, true, inbox.StatusHeld}, []any{ok, err != nil, it.Status})
-}
-
-func TestStoreClaim_Paused(t *testing.T) {
-	t.Parallel()
-	s := inbox.New(t.TempDir())
-	_, _, err := s.Add(inbox.Item{Link: link, Status: inbox.StatusNew}, time.Now())
-	require.NoError(t, err)
-	require.NoError(t, s.SetPaused(true))
-
-	_, _, err = s.Claim(inbox.IdOf(link), "s1", time.Now())
-
-	assert.ErrorIs(t, err, inbox.ErrPaused)
-}
-
 func TestStoreTakenBy(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
@@ -417,23 +486,19 @@ func TestStoreTakenBy(t *testing.T) {
 	}{
 		{"finds the request the session took", "s1", 0, false, want{link, true}},
 		{"finds nothing for another session", "s2", 0, false, want{"", false}},
-		{"finds nothing once the take is an hour old", "s1", 2 * time.Hour, false, want{"", false}},
+		{"finds nothing once the take is a day old", "s1", 25 * time.Hour, false, want{"", false}},
 		{"finds nothing once the request is done", "s1", 0, true, want{"", false}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := inbox.New(t.TempDir())
-			for _, l := range []string{link, other} {
-				_, _, err := s.Add(inbox.Item{Link: l, Status: inbox.StatusNew}, now)
-				require.NoError(t, err)
-			}
-			_, err := s.Take(inbox.IdOf(link), "s1", now)
-			require.NoError(t, err)
+			seed(t, s, inbox.Item{Link: other}, inbox.StatusOpen, now)
+			status := inbox.StatusTaken
 			if tc.done {
-				_, err = s.Done(inbox.IdOf(link), "s1", now)
-				require.NoError(t, err)
+				status = inbox.StatusDone
 			}
+			seed(t, s, inbox.Item{Link: link}, status, now)
 
 			it, found, err := s.TakenBy(tc.session, now.Add(tc.after))
 
@@ -449,39 +514,6 @@ type settled struct {
 	failed bool
 }
 
-func TestStoreAsk(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	tcs := []struct {
-		name    string
-		status  inbox.Status
-		session string
-		reason  string
-		want    settled
-	}{
-		{"a taken request asks the user", inbox.StatusTaken, "s1", "needs a decision", settled{inbox.StatusAsk, "needs a decision", false}},
-		{"a new request asks the user", inbox.StatusNew, "s2", "needs a decision", settled{inbox.StatusAsk, "needs a decision", false}},
-		{"an empty reason keeps the stored one", inbox.StatusTaken, "s1", "", settled{inbox.StatusAsk, "stored", false}},
-		{"a request another session took is refused", inbox.StatusTaken, "s2", "late", settled{inbox.StatusTaken, "stored", true}},
-		{"a held request is refused", inbox.StatusHeld, "s1", "late", settled{inbox.StatusHeld, "stored", true}},
-		{"a done request is refused", inbox.StatusDone, "s1", "late", settled{inbox.StatusDone, "stored", true}},
-	}
-	for _, tc := range tcs {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			s := inbox.New(t.TempDir())
-			_, _, err := s.Add(inbox.Item{Link: link, Status: tc.status, Reason: "stored", SessionId: "s1"}, now)
-			require.NoError(t, err)
-
-			_, err = s.Ask(inbox.IdOf(link), tc.session, tc.reason, now)
-
-			it, gerr := s.Get(inbox.IdOf(link))
-			require.NoError(t, gerr)
-			assert.Equal(t, tc.want, settled{it.Status, it.Reason, err != nil})
-		})
-	}
-}
-
 func TestStoreHold(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
@@ -492,19 +524,50 @@ func TestStoreHold(t *testing.T) {
 		want    settled
 	}{
 		{"a taken request is put off", inbox.StatusTaken, "s1", settled{inbox.StatusHeld, "", false}},
-		{"a request for the user is put off", inbox.StatusAsk, "s2", settled{inbox.StatusHeld, "", false}},
-		{"a question that came back to the user is put off", inbox.StatusQuestion, "s2", settled{inbox.StatusHeld, "", false}},
+		{"an open request is put off", inbox.StatusOpen, "s2", settled{inbox.StatusHeld, "", false}},
+		{"a question is put off", inbox.StatusQuestion, "s2", settled{inbox.StatusHeld, "", false}},
+		{"a held request is put off again", inbox.StatusHeld, "s2", settled{inbox.StatusHeld, "", false}},
 		{"a request another session took is refused", inbox.StatusTaken, "s2", settled{inbox.StatusTaken, "", true}},
-		{"a new request is refused", inbox.StatusNew, "s1", settled{inbox.StatusNew, "", true}},
+		{"a done request is refused", inbox.StatusDone, "s1", settled{inbox.StatusDone, "", true}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := inbox.New(t.TempDir())
-			_, _, err := s.Add(inbox.Item{Link: link, Status: tc.status, SessionId: "s1"}, now)
-			require.NoError(t, err)
+			seed(t, s, inbox.Item{Link: link}, tc.status, now)
 
-			_, err = s.Hold(inbox.IdOf(link), tc.session, time.Time{}, now)
+			_, err := s.Hold(inbox.IdOf(link), tc.session, time.Time{}, now)
+
+			it, gerr := s.Get(inbox.IdOf(link))
+			require.NoError(t, gerr)
+			assert.Equal(t, tc.want, settled{it.Status, it.Reason, err != nil})
+		})
+	}
+}
+
+// Only a take of the session waits for the requester
+func TestStoreQuestion_From(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	tcs := []struct {
+		name    string
+		status  inbox.Status
+		session string
+		want    settled
+	}{
+		{"a taken request waits for the requester", inbox.StatusTaken, "s1", settled{inbox.StatusQuestion, "", false}},
+		{"a request another session took is refused", inbox.StatusTaken, "s2", settled{inbox.StatusTaken, "", true}},
+		{"an open request is refused", inbox.StatusOpen, "s1", settled{inbox.StatusOpen, "", true}},
+		{"a held request is refused", inbox.StatusHeld, "s1", settled{inbox.StatusHeld, "", true}},
+		{"a done request is refused", inbox.StatusDone, "s1", settled{inbox.StatusDone, "", true}},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := inbox.New(t.TempDir())
+			seed(t, s, inbox.Item{Link: link}, tc.status, now)
+
+			_, err := s.Question(inbox.IdOf(link), tc.session, now)
 
 			it, gerr := s.Get(inbox.IdOf(link))
 			require.NoError(t, gerr)
@@ -532,16 +595,22 @@ func TestStoreDone_Session(t *testing.T) {
 	}{
 		{"the holder settles its take", []string{"s1"}, 0, "s1", 0, want{inbox.StatusDone, "", false}},
 		{"another session cannot settle an active take", []string{"s1"}, 0, "s2", 0, want{inbox.StatusTaken, "s1", true}},
-		{"the old session cannot settle after a takeover", []string{"s1", "s2"}, 2 * time.Hour, "s1", 2 * time.Hour, want{inbox.StatusTaken, "s2", true}},
-		{"the new holder settles after a takeover", []string{"s1", "s2"}, 2 * time.Hour, "s2", 2 * time.Hour, want{inbox.StatusDone, "", false}},
-		{"any session settles a take left for an hour", []string{"s1"}, 0, "s2", 2 * time.Hour, want{inbox.StatusDone, "", false}},
+		{
+			"the old session cannot settle after a takeover", []string{"s1", "s2"}, 25 * time.Hour, "s1", 25 * time.Hour,
+			want{inbox.StatusTaken, "s2", true},
+		},
+		{
+			"the new holder settles after a takeover", []string{"s1", "s2"}, 25 * time.Hour, "s2", 25 * time.Hour,
+			want{inbox.StatusDone, "", false},
+		},
+		{"any session settles a take left a day", []string{"s1"}, 0, "s2", 25 * time.Hour, want{inbox.StatusDone, "", false}},
 		{"any session settles a request no one took", nil, 0, "s2", 0, want{inbox.StatusDone, "", false}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := inbox.New(t.TempDir())
-			_, _, err := s.Add(inbox.Item{Link: link, Status: inbox.StatusNew}, now)
+			_, _, err := s.Add(inbox.Item{Link: link}, now)
 			require.NoError(t, err)
 			for i, session := range tc.takes {
 				_, err := s.Take(inbox.IdOf(link), session, now.Add(time.Duration(i)*tc.takeover))
@@ -557,28 +626,33 @@ func TestStoreDone_Session(t *testing.T) {
 	}
 }
 
-func TestStoreDoneByLink(t *testing.T) {
+func TestStoreDoneById(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	tcs := []struct {
-		name   string
-		status inbox.Status
-		link   string
-		want   settled
+		name    string
+		status  inbox.Status
+		id      string
+		session string
+		want    settled
 	}{
-		{"a taken request is done", inbox.StatusTaken, link, settled{inbox.StatusDone, "", false}},
-		{"a held request is done", inbox.StatusHeld, link, settled{inbox.StatusDone, "", false}},
-		{"closing twice is fine", inbox.StatusDone, link, settled{inbox.StatusDone, "", false}},
-		{"a link that never came through the inbox is fine", inbox.StatusNew, "https://github.com/o/r/pull/1", settled{inbox.StatusNew, "", false}},
+		{"a taken request is done", inbox.StatusTaken, inbox.IdOf(link), "s1", settled{inbox.StatusDone, "", false}},
+		{"an open request is done", inbox.StatusOpen, inbox.IdOf(link), "s2", settled{inbox.StatusDone, "", false}},
+		{"a held request is done", inbox.StatusHeld, inbox.IdOf(link), "s1", settled{inbox.StatusDone, "", false}},
+		{"a question is done", inbox.StatusQuestion, inbox.IdOf(link), "s1", settled{inbox.StatusDone, "", false}},
+		{"closing twice is fine", inbox.StatusDone, inbox.IdOf(link), "s1", settled{inbox.StatusDone, "", false}},
+		{"a request another session took is refused",
+			inbox.StatusTaken, inbox.IdOf(link), "s2", settled{inbox.StatusTaken, "", true}},
+		{"an id that never came through the inbox is fine",
+			inbox.StatusOpen, inbox.IdOf(other), "s1", settled{inbox.StatusOpen, "", false}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := inbox.New(t.TempDir())
-			_, _, err := s.Add(inbox.Item{Link: link, Status: tc.status, SessionId: "s1"}, now)
-			require.NoError(t, err)
+			seed(t, s, inbox.Item{Link: link}, tc.status, now)
 
-			err = s.DoneByLink(tc.link, "s1", now)
+			err := s.DoneById(tc.id, tc.session, now)
 
 			it, gerr := s.Get(inbox.IdOf(link))
 			require.NoError(t, gerr)
@@ -587,34 +661,122 @@ func TestStoreDoneByLink(t *testing.T) {
 	}
 }
 
+func TestStoreByOrigin(t *testing.T) {
+	t.Parallel()
+	s := inbox.New(t.TempDir())
+	seed(t, s, inbox.Item{Thread: "C1/1", Link: link}, inbox.StatusOpen, time.Now())
+	seed(t, s, inbox.Item{Link: "https://github.com/o/r/pull/1"}, inbox.StatusOpen, time.Now())
+	type want struct {
+		id       string
+		notFound bool
+	}
+	tcs := []struct {
+		name   string
+		origin string
+		want   want
+	}{
+		{"the link of the first message", link, want{inbox.IdOf("C1/1"), false}},
+		{"the thread key", "C1/1", want{inbox.IdOf("C1/1"), false}},
+		{"a request without a thread",
+			"https://github.com/o/r/pull/1", want{inbox.IdOf("https://github.com/o/r/pull/1"), false}},
+		{"a link opened by hand is not found", other, want{"", true}},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			it, err := s.ByOrigin(tc.origin)
+			assert.Equal(t, tc.want, want{it.Id, errors.Is(err, inbox.ErrNotFound)})
+		})
+	}
+}
+
+// A session that ended gives its takes back at once
+func TestStoreRelease(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	type want struct {
+		count    int
+		statuses []string
+	}
+	tcs := []struct {
+		name    string
+		session string
+		want    want
+	}{
+		{
+			"the session's takes open with a reason", "s1",
+			want{2, []string{"p1 open " + inbox.Released, "p2 open " + inbox.Released, "p3 taken s2", "p4 held", "p5 question"}},
+		},
+		{
+			"a session with no take changes nothing", "s9",
+			want{0, []string{"p1 taken s1", "p2 taken s1", "p3 taken s2", "p4 held", "p5 question"}},
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := inbox.New(t.TempDir())
+			seed(t, s, inbox.Item{Link: "p1"}, inbox.StatusTaken, now.Add(-5*time.Minute))
+			seed(t, s, inbox.Item{Link: "p2"}, inbox.StatusTaken, now.Add(-4*time.Minute))
+			_, err := s.Take(seed(t, s, inbox.Item{Link: "p3"}, inbox.StatusOpen, now.Add(-3*time.Minute)).Id, "s2", now)
+			require.NoError(t, err)
+			seed(t, s, inbox.Item{Link: "p4"}, inbox.StatusHeld, now.Add(-2*time.Minute))
+			seed(t, s, inbox.Item{Link: "p5"}, inbox.StatusQuestion, now.Add(-time.Minute))
+
+			n, err := s.Release(tc.session, now)
+
+			require.NoError(t, err)
+			items, err := s.List()
+			require.NoError(t, err)
+			got := []string{}
+			for i := len(items) - 1; i >= 0; i-- {
+				it := items[i]
+				row := strings.Join([]string{it.Link, string(it.Status), it.SessionId + it.Reason}, " ")
+				got = append(got, strings.TrimSpace(row))
+			}
+			assert.Equal(t, tc.want, want{n, got})
+		})
+	}
+}
+
 func TestStoreWaiting(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	stored := []struct {
-		item inbox.Item
-		at   time.Duration
+		link   string
+		status inbox.Status
+		at     time.Duration
 	}{
-		{inbox.Item{Link: "p1", Status: inbox.StatusTaken, SessionId: "s1"}, -3 * time.Hour},
-		{inbox.Item{Link: "p2", Status: inbox.StatusNew}, -2 * time.Hour},
-		{inbox.Item{Link: "p3", Status: inbox.StatusDone}, -90 * time.Minute},
-		{inbox.Item{Link: "p4", Status: inbox.StatusTaken, SessionId: "s2"}, -15 * time.Minute},
-		{inbox.Item{Link: "p5", Status: inbox.StatusHeld}, -10 * time.Minute},
+		{"p0", inbox.StatusQuestion, -4 * 24 * time.Hour},
+		{"p1", inbox.StatusTaken, -25 * time.Hour},
+		{"p2", inbox.StatusOpen, -2 * time.Hour},
+		{"p3", inbox.StatusDone, -90 * time.Minute},
+		{"p4", inbox.StatusTaken, -15 * time.Minute},
+		{"p5", inbox.StatusHeld, -10 * time.Minute},
 	}
 	tcs := []struct {
 		name  string
 		after time.Duration
 		want  []string
 	}{
-		{"oldest first with a take left for an hour as ask", 0, []string{"p1 ask", "p2 new", "p5 held"}},
-		{"a take ages into ask", time.Hour, []string{"p1 ask", "p2 new", "p4 ask", "p5 held"}},
+		{
+			"oldest first with a take left a day and an unanswered question as open", 0,
+			[]string{"p0 open " + inbox.Unanswered, "p1 open " + inbox.Released, "p2 open ", "p5 held "},
+		},
+		{
+			"a take ages into open", 24 * time.Hour,
+			[]string{
+				"p0 open " + inbox.Unanswered, "p1 open " + inbox.Released, "p2 open ",
+				"p4 open " + inbox.Released, "p5 held ",
+			},
+		},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := inbox.New(t.TempDir())
 			for _, st := range stored {
-				_, _, err := s.Add(st.item, now.Add(st.at))
-				require.NoError(t, err)
+				seed(t, s, inbox.Item{Link: st.link}, st.status, now.Add(st.at))
 			}
 
 			items, err := s.Waiting(now.Add(tc.after))
@@ -622,21 +784,20 @@ func TestStoreWaiting(t *testing.T) {
 			require.NoError(t, err)
 			got := make([]string, 0, len(items))
 			for _, it := range items {
-				got = append(got, it.Link+" "+string(it.Status))
+				got = append(got, it.Link+" "+string(it.Status)+" "+it.Reason)
 			}
 			assert.Equal(t, tc.want, got)
 		})
 	}
 }
 
-// Another session prunes or settles while the list is read
 func TestStoreList_Removed(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	dir := t.TempDir()
 	s := inbox.New(dir)
 	for i := range 200 {
-		_, _, err := s.Add(inbox.Item{Link: fmt.Sprintf("x%d", i), Status: inbox.StatusNew}, now)
+		_, _, err := s.Add(inbox.Item{Link: fmt.Sprintf("x%d", i)}, now)
 		require.NoError(t, err)
 	}
 	items, err := s.List()
@@ -787,16 +948,16 @@ func TestStoreAdd_PrunesOldDone(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	s := inbox.New(t.TempDir())
-	_, _, err := s.Add(inbox.Item{Link: link, Status: inbox.StatusNew}, now.Add(-10*24*time.Hour))
+	_, _, err := s.Add(inbox.Item{Link: link}, now.Add(-10*24*time.Hour))
 	require.NoError(t, err)
 	_, err = s.Done(inbox.IdOf(link), "s1", now.Add(-8*24*time.Hour))
 	require.NoError(t, err)
-	_, _, err = s.Add(inbox.Item{Link: "https://w.slack.com/archives/C1/p9", Status: inbox.StatusNew}, now.Add(-24*time.Hour))
+	_, _, err = s.Add(inbox.Item{Link: "https://w.slack.com/archives/C1/p9"}, now.Add(-24*time.Hour))
 	require.NoError(t, err)
 	_, err = s.Done(inbox.IdOf("https://w.slack.com/archives/C1/p9"), "s1", now.Add(-24*time.Hour))
 	require.NoError(t, err)
 
-	_, _, err = s.Add(inbox.Item{Link: other, Status: inbox.StatusNew}, now)
+	_, _, err = s.Add(inbox.Item{Link: other}, now)
 	require.NoError(t, err)
 
 	items, err := s.List()

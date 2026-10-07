@@ -225,7 +225,7 @@ func TestPostAndUserInfo(t *testing.T) {
 	f := &fake{answers: map[string]func(*http.Request) (int, any){
 		"chat.postMessage": func(*http.Request) (int, any) { return ok(map[string]any{"ts": "1.3"}) },
 		"users.info": func(*http.Request) (int, any) {
-			return ok(map[string]any{"user": map[string]any{"id": "U2", "team_id": "T1", "name": "kai", "real_name": "Kai", "is_ultra_restricted": true}})
+			return ok(map[string]any{"user": map[string]any{"id": "U2", "name": "kai", "real_name": "Kai"}})
 		},
 	}}
 	c := f.client(t)
@@ -236,7 +236,7 @@ func TestPostAndUserInfo(t *testing.T) {
 	require.NoError(t, perr)
 	require.NoError(t, err)
 	assert.Equal(t, "1.3", ts)
-	assert.Equal(t, User{Id: "U2", Team: "T1", Name: "Kai", Restricted: true}, u)
+	assert.Equal(t, User{Id: "U2", Name: "Kai"}, u)
 	assert.Equal(t, []string{"chat.postMessage channel=C1&text=hi&thread_ts=1.2", "users.info user=U2"}, f.calls)
 }
 
@@ -265,32 +265,6 @@ func TestEdits(t *testing.T) {
 
 			assert.Equal(t, tc.failed, err != nil)
 			assert.Equal(t, []string{tc.want}, f.calls)
-		})
-	}
-}
-
-func TestShared(t *testing.T) {
-	t.Parallel()
-	tcs := []struct {
-		name    string
-		channel map[string]any
-		want    bool
-	}{
-		{"an internal channel", map[string]any{}, false},
-		{"a channel shared with another organization", map[string]any{"is_ext_shared": true}, true},
-		{"a channel shared within the organization", map[string]any{"is_shared": true}, true},
-	}
-	for _, tc := range tcs {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			f := &fake{answers: map[string]func(*http.Request) (int, any){
-				"conversations.info": func(*http.Request) (int, any) { return ok(map[string]any{"channel": tc.channel}) },
-			}}
-
-			got, err := f.client(t).Shared("C1")
-
-			require.NoError(t, err)
-			assert.Equal(t, tc.want, got)
 		})
 	}
 }
