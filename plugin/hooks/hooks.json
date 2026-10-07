@@ -25,7 +25,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|mcp__.*",
+        "matcher": "Bash|mcp__.*|Write|Edit|NotebookEdit",
         "hooks": [
           {
             "type": "command",

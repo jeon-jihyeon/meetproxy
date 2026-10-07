@@ -560,6 +560,9 @@ func TestPlan(t *testing.T) {
 		{"a single case leaves candidates", "온콜 담당 누구", want{"", "", []string{"wiki"}, nil, nil}},
 		{"a skill matches by its description", "지연 원인 파악 부탁", want{"", "", []string{"svc"}, []string{"incident-triage"}, nil}},
 		{"nothing matches", "점심 메뉴", want{"", "", nil, nil, nil}},
+		{"a known place given as place= routes there", "[place=wiki] 할당 우선순위가 왜 바뀌나", want{"wiki", m.wiki, nil, nil, nil}},
+		{"a known place given as repo= routes there", "[repo=svc] 온콜 담당 누구", want{"svc", m.svc, nil, nil, nil}},
+		{"an unknown place given is ignored", "[place=elsewhere] 할당 우선순위가 왜 바뀌나", want{"svc", m.svc, nil, nil, alloc}},
 		{"a request without words plans nothing", "?? !!", want{"", "", nil, nil, nil}},
 	}
 	for _, tc := range tcs {

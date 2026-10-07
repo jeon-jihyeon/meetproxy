@@ -2,6 +2,8 @@
 package delegation
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -16,6 +18,8 @@ const (
 	WhenMention       = "mention"        // messages that mention the user in any source
 	WhenReviewRequest = "review-request" // pull requests that ask the user for a review
 	WhenChannel       = "channel"        // every message of one Slack channel
+	WhenDM            = "dm"             // direct messages to the user that do not mention them
+	WhenOwnPR         = "own-pr"         // comments of others on the user's own pull requests
 
 	DoAnswer      = "answer"      // relay skill
 	DoReview      = "review"      // review skill on the pull request the message links
@@ -51,6 +55,38 @@ type Delegation struct {
 	Workspace string `json:"workspace,omitempty"`
 	// The sentence the user said
 	Note string `json:"note,omitempty"`
+	// Order among requests asked together, higher first
+	Priority int `json:"priority,omitempty"`
+	// Requests queued per hour at most
+	// Zero is the default of the kind
+	MaxPerHour int `json:"max_per_hour,omitempty"`
+	// Minutes within which the same text is a duplicate
+	// Zero is the default of the kind
+	DedupeMinutes int `json:"dedupe_minutes,omitempty"`
+	// Post a one line note where it was asked when the automatic attempt gives up
+	Handoff bool `json:"handoff,omitempty"`
+}
+
+// Defaults of channel delegations whose every message is a candidate
+// Mentions and the other kinds name the user so they are rare enough to need no limit
+const (
+	channelPerHour = 20
+	channelDedupe  = 30
+)
+
+// Requests per hour and duplicate window in minutes, zero for no limit
+func (d Delegation) Limits() (perHour, dedupeMinutes int) {
+	perHour, dedupeMinutes = d.MaxPerHour, d.DedupeMinutes
+	if d.When != WhenChannel {
+		return perHour, dedupeMinutes
+	}
+	if perHour == 0 {
+		perHour = channelPerHour
+	}
+	if dedupeMinutes == 0 {
+		dedupeMinutes = channelDedupe
+	}
+	return perHour, dedupeMinutes
 }
 
 var (
@@ -59,15 +95,56 @@ var (
 	DefaultReview = Delegation{Id: "default-review", When: WhenMention, Link: LinkPR, Do: DoReview, Post: PostAuto, Approve: ApproveSelf}
 	// A review someone requested asks the user before anything is posted
 	DefaultReviewRequest = Delegation{Id: "default-review-request", When: WhenReviewRequest, Do: DoReview, Post: PostAsk, Approve: ApproveSelf}
+	// Direct messages are answered after triage
+	DefaultDM = Delegation{Id: "default-dm", When: WhenDM, Do: DoAnswer, Post: PostAuto}
+	// Comments on the user's own pull requests often ask for a change so the user is asked first
+	DefaultOwnPR = Delegation{Id: "default-own-pr", When: WhenOwnPR, Do: DoAnswer, Post: PostAsk}
 	// Mentions that no delegation catches are answered after triage
 	Default = Delegation{Id: "default", When: WhenMention, Do: DoAnswer, Post: PostAuto}
 )
 
 // Built in after the user's delegations so one of the user goes first
-var builtIn = []Delegation{DefaultReview, DefaultReviewRequest, Default}
+var builtIn = []Delegation{DefaultReview, DefaultReviewRequest, DefaultDM, DefaultOwnPR, Default}
 
-// Triage only decides for answers to mentions since every other delegation already names its task
-func (d Delegation) Triaged() bool { return d.When == WhenMention && d.Do == DoAnswer }
+// Kinds whose messages name the user and match delegations of that kind
+var kinds = []string{WhenMention, WhenReviewRequest, WhenDM, WhenOwnPR}
+
+// Triage only decides for answers to messages addressed to the user since every other delegation already names its task
+func (d Delegation) Triaged() bool {
+	return slices.Contains([]string{WhenMention, WhenDM, WhenOwnPR}, d.When) && d.Do == DoAnswer
+}
+
+const (
+	DepthQuick = "quick" // one paragraph and one piece of evidence
+	DepthDeep  = "deep"  // up to four pieces of evidence
+)
+
+// quick unless the request asks for [deep]
+func Depth(text string) string {
+	if strings.Contains(strings.ToLower(text), "[deep]") {
+		return DepthDeep
+	}
+	return DepthQuick
+}
+
+var (
+	digestLinks = regexp.MustCompile(`<[^>]*>|https?://\S+`)
+	digestTimes = regexp.MustCompile(`\d{1,2}:\d{2}(:\d{2})?`)
+	digestNoise = regexp.MustCompile(`\d+`)
+	digestSpace = regexp.MustCompile(`\s+`)
+)
+
+// What repeats of one message share
+// Links, times and digits differ between repeats of one alert so they are dropped before hashing
+func Digest(text string) string {
+	t := strings.ToLower(text)
+	t = digestLinks.ReplaceAllString(t, " ")
+	t = digestTimes.ReplaceAllString(t, " ")
+	t = digestNoise.ReplaceAllString(t, " ")
+	t = strings.TrimSpace(digestSpace.ReplaceAllString(t, " "))
+	sum := sha256.Sum256([]byte(t))
+	return hex.EncodeToString(sum[:])[:12]
+}
 
 var (
 	validId    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
@@ -79,8 +156,8 @@ func (d Delegation) Validate() error {
 	switch {
 	case !validId.MatchString(d.Id) || strings.HasPrefix(d.Id, "default"):
 		return fmt.Errorf("id must be lowercase letters, digits and dashes and not start with default %q", d.Id)
-	case !slices.Contains([]string{WhenMention, WhenReviewRequest, WhenChannel}, d.When):
-		return fmt.Errorf("when must be mention, review-request or channel %q", d.When)
+	case !slices.Contains(append([]string{WhenChannel}, kinds...), d.When):
+		return fmt.Errorf("when must be mention, review-request, dm, own-pr or channel %q", d.When)
 	case d.When == WhenChannel && (!channelId.MatchString(d.Channel) || d.Host == ""):
 		return errors.New("a channel delegation needs a channel id such as C0123 and a host such as acme.slack.com")
 	case !validSkill.MatchString(d.Do):
@@ -91,6 +168,8 @@ func (d Delegation) Validate() error {
 		return fmt.Errorf("approve must be never, self or any %q", d.Approve)
 	case d.Link != "" && d.Link != LinkPR:
 		return fmt.Errorf("link must be github-pr %q", d.Link)
+	case d.MaxPerHour < 0 || d.DedupeMinutes < 0:
+		return errors.New("max_per_hour and dedupe_minutes must not be negative")
 	}
 	return nil
 }
@@ -188,11 +267,24 @@ func (d Delegation) Matches(m Message) bool {
 	})
 }
 
+// The delegation that took a request before
+// A follow-up goes to it whatever its filters say since the thread is already its
+func ById(ds []Delegation, id string) (Delegation, bool) {
+	if id == "" {
+		return Default, true
+	}
+	i := slices.IndexFunc(ds, func(d Delegation) bool { return d.Id == id })
+	if i < 0 {
+		return Delegation{}, false
+	}
+	return ds[i], true
+}
+
 // The delegation that takes the message
-// 1. mention and review-request pick the first delegation of that kind the message matches
+// 1. mention, review-request, dm and own-pr pick the first delegation of that kind the message matches
 // 2. Any other key is the id of a channel delegation that must match the message
 func Pick(ds []Delegation, key string, m Message) (Delegation, bool) {
-	byKind := key == WhenMention || key == WhenReviewRequest
+	byKind := slices.Contains(kinds, key)
 	for _, d := range ds {
 		picked := d.When == key
 		if !byKind {

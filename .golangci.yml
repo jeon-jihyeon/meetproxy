@@ -52,6 +52,7 @@ linters:
             - "**/internal/inbox/**"
             - "**/internal/triage/**"
             - "**/internal/delegation/**"
+            - "**/internal/posts/**"
           deny:
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/relay
               desc: leaf packages do not import relay

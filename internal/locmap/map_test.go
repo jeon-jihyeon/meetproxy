@@ -175,3 +175,50 @@ func TestMapCompact(t *testing.T) {
 		})
 	}
 }
+
+// A corrected answer counts half so the next one of the same words ranks first
+func TestMapCorrect(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	repo := t.TempDir()
+	for _, rel := range []string{"retry.go", "config.go"} {
+		require.NoError(t, os.WriteFile(filepath.Join(repo, rel), nil, 0o644))
+	}
+	tcs := []struct {
+		name    string
+		correct []string
+		want    []string
+		weight  float64
+		failed  bool
+	}{
+		{"ties sort by path", nil, []string{"config.go", "retry.go"}, 0, false},
+		{"a corrected relay drops behind", []string{"r1"}, []string{"retry.go", "config.go"}, 0.5, false},
+		{"each correction halves again", []string{"r1", "r1"}, []string{"retry.go", "config.go"}, 0.25, false},
+		{"a relay the map never recorded cannot be corrected", []string{"nope"}, []string{"config.go", "retry.go"}, 0, true},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := locmap.New(t.TempDir())
+			for _, e := range []struct{ relay, rel string }{{"r1", "config.go"}, {"r2", "retry.go"}} {
+				require.NoError(t, m.Add(locmap.Entry{RelayId: e.relay, Topic: "retry", Keywords: []string{"retry"}, Paths: []locmap.Path{{Root: repo, Rel: e.rel}}, RecordedAt: now}))
+			}
+			var e locmap.Entry
+			var err error
+			for _, r := range tc.correct {
+				e, err = m.Correct(r, now)
+			}
+
+			cs, lerr := m.Locate([]string{"retry"}, 0)
+			require.NoError(t, lerr)
+
+			rels := []string{}
+			for _, c := range cs {
+				rels = append(rels, c.Rel)
+			}
+			assert.Equal(t, tc.failed, err != nil)
+			assert.Equal(t, tc.want, rels)
+			assert.Equal(t, tc.weight, e.Weight)
+		})
+	}
+}

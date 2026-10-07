@@ -25,6 +25,8 @@ const (
 	// Pages read in one call
 	// Far more than a busy channel gets in a day and still a bound on a runaway loop
 	MaxPages = 50
+	// Direct message conversations read in one call
+	maxDMs = 40
 )
 
 // A Slack answer with ok false
@@ -203,14 +205,98 @@ func (c Client) Replies(channel, ts, oldest string, limit int) ([]Message, error
 	return r.Messages, err
 }
 
-// Posts text in the thread of thread or in the channel when thread is empty
-func (c Client) Post(channel, thread, text string) error {
+// Posts text in the thread of thread or in the channel when thread is empty and returns the ts of the post
+func (c Client) Post(channel, thread, text string) (string, error) {
 	form := url.Values{"channel": {channel}, "text": {text}}
 	if thread != "" {
 		form.Set("thread_ts", thread)
 	}
-	_, err := c.call("chat.postMessage", form, nil)
+	var r struct {
+		Ts string `json:"ts"`
+	}
+	_, err := c.call("chat.postMessage", form, &r)
+	return r.Ts, err
+}
+
+// Replaces the text of a message the token's user posted
+func (c Client) Update(channel, ts, text string) error {
+	_, err := c.call("chat.update", url.Values{"channel": {channel}, "ts": {ts}, "text": {text}}, nil)
 	return err
+}
+
+// Deletes a message the token's user posted
+func (c Client) Delete(channel, ts string) error {
+	_, err := c.call("chat.delete", url.Values{"channel": {channel}, "ts": {ts}}, nil)
+	return err
+}
+
+// Adds a reaction to a message
+// One already there counts as added so a retry never fails
+func (c Client) React(channel, ts, name string) error {
+	_, err := c.call("reactions.add", url.Values{"channel": {channel}, "timestamp": {ts}, "name": {name}}, nil)
+	var e *Error
+	if errors.As(err, &e) && e.Code == "already_reacted" {
+		return nil
+	}
+	return err
+}
+
+// Whether people outside the user's workspace can read the channel
+// A channel shared within an organization counts too since its members may sit in another workspace
+func (c Client) Shared(channel string) (bool, error) {
+	var r struct {
+		Channel struct {
+			IsShared    bool `json:"is_shared"`
+			IsExtShared bool `json:"is_ext_shared"`
+		} `json:"channel"`
+	}
+	_, err := c.call("conversations.info", url.Values{"channel": {channel}}, &r)
+	return r.Channel.IsShared || r.Channel.IsExtShared, err
+}
+
+// Direct and group direct messages after the ts oldest, each with its channel id set
+// 1. Conversations are listed once and each is read one page back
+// 2. At most maxDMs conversations are read so a user with many open DMs never runs into rate limits every check
+func (c Client) DirectMessages(oldest string) ([]Message, error) {
+	var ids []string
+	cursor := ""
+	for range MaxPages {
+		var r struct {
+			Channels []struct {
+				Id string `json:"id"`
+			} `json:"channels"`
+			Meta struct {
+				NextCursor string `json:"next_cursor"`
+			} `json:"response_metadata"`
+		}
+		form := url.Values{"types": {"im,mpim"}, "exclude_archived": {"true"}, "limit": {"200"}}
+		if cursor != "" {
+			form.Set("cursor", cursor)
+		}
+		if _, err := c.call("conversations.list", form, &r); err != nil {
+			return nil, err
+		}
+		for _, ch := range r.Channels {
+			ids = append(ids, ch.Id)
+		}
+		if cursor = r.Meta.NextCursor; cursor == "" || len(ids) >= maxDMs {
+			break
+		}
+	}
+	var out []Message
+	for _, id := range ids[:min(len(ids), maxDMs)] {
+		var r struct {
+			Messages []Message `json:"messages"`
+		}
+		if _, err := c.call("conversations.history", url.Values{"channel": {id}, "oldest": {oldest}, "limit": {strconv.Itoa(pageSize)}}, &r); err != nil {
+			return nil, err
+		}
+		for _, m := range r.Messages {
+			m.Channel.Id = id
+			out = append(out, m)
+		}
+	}
+	return out, nil
 }
 
 // A member of a workspace as the trust check needs it

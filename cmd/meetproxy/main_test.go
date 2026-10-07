@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jeon-jihyeon/meetproxy/internal/delegation"
 	"github.com/jeon-jihyeon/meetproxy/internal/dest"
 	"github.com/jeon-jihyeon/meetproxy/internal/inbox"
 	"github.com/jeon-jihyeon/meetproxy/internal/relay"
@@ -47,6 +48,8 @@ func TestRun(t *testing.T) {
 	prDelegation := `{"id":"pr","when":"mention","link":"github-pr","do":"review","post":"auto"}`
 	builtIn := `{"id":"default-review","when":"mention","link":"github-pr","do":"review","post":"auto","approve":"self"},` +
 		`{"id":"default-review-request","when":"review-request","do":"review","post":"ask","approve":"self"},` +
+		`{"id":"default-dm","when":"dm","do":"answer","post":"auto"},` +
+		`{"id":"default-own-pr","when":"own-pr","do":"answer","post":"ask"},` +
 		`{"id":"default","when":"mention","do":"answer","post":"auto"}]`
 	added := strconv.FormatInt(now.Unix(), 10)
 	recorded := []step{
@@ -106,7 +109,7 @@ func TestRun(t *testing.T) {
 		{"usage error for tick without --cwd", "s1", false, nil, step{"tick", nil, ""}, want{exitUsage, "", true}},
 		{
 			"tick prints an empty list when nothing waits", "s1", false, nil, step{"tick", []string{"--cwd", "/tmp/notes"}, ""},
-			want{0, `{"protocol":` + strconv.Itoa(protocol) + `,"place":"/tmp/notes","name":"notes","waiting":[],"slack":{"token":false}}`, false},
+			want{0, `{"protocol":` + strconv.Itoa(protocol) + `,"place":"/tmp/notes","name":"notes","waiting":[],"slack":{"token":false},"watch":[],"acks":[]}`, false},
 		},
 		{"allowed lists the patterns", "s1", false, []step{allowed}, step{"allowed", nil, ""}, want{0, "slack:C1", false}},
 		{
@@ -185,12 +188,12 @@ func TestRun(t *testing.T) {
 		},
 		{
 			"inbox take prints link, task, target and approve", "s1", false, []step{allowed, queued},
-			step{"inbox", []string{"take", id}, ""}, want{0, link + "\tanswer\t-\tno\t-\t-\t-", false},
+			step{"inbox", []string{"take", id}, ""}, want{0, link + "\tanswer\t-\tno\t-\t-\t-\tquick\t-", false},
 		},
 		{
 			"inbox take prints the place, skills and files of the work map", "s1", false,
 			[]step{{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--place", "/w/svc", "--skills", "incident-triage,review", "--files", "/w/svc/a.go"}, ""}},
-			step{"inbox", []string{"take", id}, ""}, want{0, link + "\tanswer\t-\tno\t/w/svc\tincident-triage,review\t/w/svc/a.go", false},
+			step{"inbox", []string{"take", id}, ""}, want{0, link + "\tanswer\t-\tno\t/w/svc\tincident-triage,review\t/w/svc/a.go\tquick\t-", false},
 		},
 		{
 			"inbox add keeps the task of a delegation and lets a review approve the user's request", "s1", false,
@@ -198,7 +201,7 @@ func TestRun(t *testing.T) {
 				"add", link, "--verdict", "handle", "--trusted", "yes", "--delegation", "pr",
 				"--target", "https://github.com/o/r/pull/1", "--self", "yes", "--name", "r",
 			}, ""}},
-			step{"inbox", []string{"take", id}, ""}, want{0, link + "\treview\thttps://github.com/o/r/pull/1\tyes\t-\t-\t-", false},
+			step{"inbox", []string{"take", id}, ""}, want{0, link + "\treview\thttps://github.com/o/r/pull/1\tyes\t-\t-\t-\tquick\t-", false},
 		},
 		{
 			"inbox cursor keeps one per key", "s1", false,
@@ -218,22 +221,32 @@ func TestRun(t *testing.T) {
 		{
 			"delegation match picks a review for a pull request link", "s1", false, []step{{"delegation", []string{"put"}, prDelegation}},
 			step{"delegation", []string{"match", "mention"}, `{"text":"<@U1> review https://github.com/o/svc/pull/7 please","from":"U2","trusted":true}`},
-			want{0, `{"delegation":"pr","task":"review","post":"auto","triage":false,"target":"https://github.com/o/svc/pull/7","workspace":"svc"}`, false},
+			want{0, `{"delegation":"pr","task":"review","post":"auto","triage":false,"target":"https://github.com/o/svc/pull/7","workspace":"svc","depth":"quick","digest":"d4893200715e"}`, false},
 		},
 		{
 			"delegation match reviews a requested pull request after asking", "s1", false, nil,
 			step{"delegation", []string{"match", "review-request"}, `{"link":"https://github.com/o/svc/pull/9","text":"Review requested: fix","from":"a"}`},
-			want{0, `{"delegation":"default-review-request","task":"review","post":"ask","triage":false,"target":"https://github.com/o/svc/pull/9","workspace":"svc"}`, false},
+			want{0, `{"delegation":"default-review-request","task":"review","post":"ask","triage":false,"target":"https://github.com/o/svc/pull/9","workspace":"svc","depth":"quick","digest":"a7387bdfe8ee"}`, false},
 		},
 		{
 			"delegation match falls back to the default for a question", "s1", false, []step{{"delegation", []string{"put"}, prDelegation}},
 			step{"delegation", []string{"match", "mention"}, `{"text":"where is alloc","from":"U2","trusted":true}`},
-			want{0, `{"delegation":"default","task":"answer","post":"auto","triage":true}`, false},
+			want{0, `{"delegation":"default","task":"answer","post":"auto","triage":true,"depth":"quick","digest":"f6c5abd79fc4"}`, false},
+		},
+		{
+			"delegation match reads a deep request", "s1", false, nil,
+			step{"delegation", []string{"match", "dm"}, `{"text":"[deep] why is alloc slow","from":"U2","trusted":true}`},
+			want{0, `{"delegation":"default-dm","task":"answer","post":"auto","triage":true,"depth":"deep","digest":"` + delegation.Digest("[deep] why is alloc slow") + `"}`, false},
+		},
+		{
+			"delegation match of a follow-up picks the delegation by id and triages it", "s1", false, []step{{"delegation", []string{"put"}, prDelegation}},
+			step{"delegation", []string{"match", "pr", "--followup", "yes"}, `{"text":"thanks","from":"U2","trusted":true}`},
+			want{0, `{"delegation":"pr","task":"review","post":"auto","triage":true,"depth":"quick","digest":"` + delegation.Digest("thanks") + `"}`, false},
 		},
 		{
 			"delegation match asks first for a sender outside the trust set", "s1", false, nil,
 			step{"delegation", []string{"match", "mention"}, `{"text":"where is alloc","from":"U2"}`},
-			want{0, `{"delegation":"default","task":"answer","post":"ask","triage":true}`, false},
+			want{0, `{"delegation":"default","task":"answer","post":"ask","triage":true,"depth":"quick","digest":"f6c5abd79fc4"}`, false},
 		},
 		{
 			"inbox add asks about a handle from outside the trust set", "s1", false, nil,
@@ -501,9 +514,12 @@ func TestRun_Tick(t *testing.T) {
 		require.Equal(t, 0, code)
 	}
 	row := func(link, status, place, name string, added time.Time, here bool) string {
-		return fmt.Sprintf(`{"id":%q,"status":%q,"place":%q,"name":%q,"added":%d,"link":%q,"here":%t}`,
+		return fmt.Sprintf(`{"id":%q,"status":%q,"place":%q,"name":%q,"added":%d,"link":%q,"here":%t,"delegation":"default"}`,
 			inbox.IdOf(link), status, place, name, added.Unix(), link, here)
 	}
+	// Both were queued now so each still owes the eyes reaction, newest first
+	acks := fmt.Sprintf(`"watch":[],"acks":[{"id":%q,"link":%q,"react":"eyes"},{"id":%q,"link":%q,"react":"eyes"}]`,
+		inbox.IdOf(newer), newer, inbox.IdOf(older), older)
 
 	tcs := []struct {
 		name string
@@ -512,13 +528,13 @@ func TestRun_Tick(t *testing.T) {
 	}{
 		{
 			"a request of the repository belongs here by its root", filepath.Join(repo, "a.go"),
-			fmt.Sprintf(`{"protocol":%d,"place":%q,"name":"svc","waiting":[%s,%s],"slack":{"token":false}}`, protocol, repo,
-				row(older, "new", repo, "svc", now, true), row(newer, "ask", "", "web", now.Add(time.Second), false)),
+			fmt.Sprintf(`{"protocol":%d,"place":%q,"name":"svc","waiting":[%s,%s],"slack":{"token":false},%s}`, protocol, repo,
+				row(older, "new", repo, "svc", now, true), row(newer, "ask", "", "web", now.Add(time.Second), false), acks),
 		},
 		{
 			"a request stored without a root belongs here by its name", web,
-			fmt.Sprintf(`{"protocol":%d,"place":%q,"name":"web","waiting":[%s,%s],"slack":{"token":false}}`, protocol, web,
-				row(older, "new", repo, "svc", now, false), row(newer, "ask", "", "web", now.Add(time.Second), true)),
+			fmt.Sprintf(`{"protocol":%d,"place":%q,"name":"web","waiting":[%s,%s],"slack":{"token":false},%s}`, protocol, web,
+				row(older, "new", repo, "svc", now, false), row(newer, "ask", "", "web", now.Add(time.Second), true), acks),
 		},
 	}
 	for _, tc := range tcs {

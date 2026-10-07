@@ -169,7 +169,7 @@ func guardPost(data string, now time.Time, in io.Reader, out io.Writer) error {
 	if err := json.NewDecoder(in).Decode(&h); err != nil {
 		return err
 	}
-	posts, destErr := guard.Destinations(h.ToolName, h.ToolInput)
+	posts, destErr := guard.Destinations(h.ToolName, h.ToolInput, data)
 	if destErr == nil && len(posts) == 0 {
 		return nil
 	}

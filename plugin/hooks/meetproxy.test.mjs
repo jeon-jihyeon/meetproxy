@@ -29,7 +29,7 @@ function session({ gh = {}, slack = {}, token, repo = '/tmp/elsewhere', fail = (
   for (const k of Object.keys(testing.reached)) delete testing.reached[k]
   const data = mkdtempSync(join(tmpdir(), 'meetproxy-mod-'))
   const store = {}
-  const env = { data, now, repo, ran: [], sent: [], logs: [], toasts: [], statuses: [], calls: [], ticks: [], mcp: [], ghCalls: [], triaged: 0 }
+  const env = { data, now, repo, ran: [], sent: [], reactions: [], edits: [], asked: [], logs: [], toasts: [], statuses: [], calls: [], ticks: [], mcp: [], ghCalls: [], triaged: 0 }
   env.tools = Object.keys(slack).length ? Object.keys(slack).map(t => ({ name: 'mcp__plugin_slack_slack__' + t, mcp: true })) : []
   if (token) {
     mkdirSync(join(data, 'slack'), { recursive: true })
@@ -65,7 +65,15 @@ function session({ gh = {}, slack = {}, token, repo = '/tmp/elsewhere', fail = (
           const args = argv.slice(1)
           if (args.includes('POST')) {
             if (sendFails) return { exitCode: 1, stdout: '', stderr: 'HTTP 404' }
+            if (args.includes('content=eyes') || args.includes('content=hooray')) {
+              env.reactions.push([args[3], args.at(-1)])
+              return { exitCode: 0, stdout: '{}', stderr: '' }
+            }
             env.sent.push({ path: args[3], body: JSON.parse(init.stdin).body })
+            return { exitCode: 0, stdout: JSON.stringify({ html_url: 'https://github.com/o/svc/pull/7#issuecomment-900' }), stderr: '' }
+          }
+          if (args.includes('PATCH') || args.includes('DELETE')) {
+            env.edits.push([args[2], args[3], init?.stdin ? JSON.parse(init.stdin).body : undefined])
             return { exitCode: 0, stdout: '{}', stderr: '' }
           }
           const path = args.find(a => a.startsWith('repos/') || a.startsWith('https://') || a === 'notifications' || a === 'user')
@@ -104,7 +112,15 @@ function session({ gh = {}, slack = {}, token, repo = '/tmp/elsewhere', fail = (
       },
     },
     command: { run: async c => env.ran.push(c) },
-    ui: { status: s => env.statuses.push(s), toast: t => env.toasts.push(t), log: m => env.logs.push(m), ask: async () => env.answer },
+    ui: {
+      status: s => env.statuses.push(s),
+      toast: t => env.toasts.push(t),
+      log: m => env.logs.push(m),
+      ask: async (q, o) => {
+        env.asked.push({ q, o })
+        return typeof env.answer === 'function' ? env.answer(q, o) : env.answer
+      },
+    },
   }
   return env
 }
@@ -385,7 +401,7 @@ test('triage picks a place among the work map candidates', integration, async ()
   await testing.check(env.$)
   const id = rows(env)[0][0]
   const taken = env.bin(['inbox', 'take', id, '--session', 'S1']).stdout.trim().split('\t')
-  assert.deepEqual(taken.slice(4), ['/w/ops', 'incident-triage', '-'])
+  assert.deepEqual(taken.slice(4), ['/w/ops', 'incident-triage', '-', 'quick', '-'])
   assert.equal(rows(env)[0][2], 'ops')
 })
 
@@ -734,8 +750,10 @@ test('with a token Slack is read and answered through the binary and the connect
     token: {
       mentions: () => ({ out: [{ author: 'Kai', channel: 'C1', from: 'U2', ts: '1893456100.000001', link, text: '<@ME> see https://w.slack.com/archives/C2/p1893456000000001' }] }),
       trusted: () => ({ out: { trusted: true } }),
-      answered: () => ({ out: { answered: false } }),
+      covered: () => ({ out: { covered: false } }),
       read: () => ({ out: { text: 'Lee: the context' } }),
+      dms: () => ({ out: [] }),
+      shared: () => ({ out: { shared: false } }),
       post: (args, stdin) => {
         posted.push([args[0], stdin])
         return { out: 'posted' }
@@ -751,7 +769,7 @@ test('with a token Slack is read and answered through the binary and the connect
   assert.deepEqual(posted, [[link, 'hi']])
   assert.deepEqual(env.mcp, [])
   assert.deepEqual(env.ran, [])
-  assert.deepEqual(slackCalls(env), ['mentions', 'trusted', 'answered', 'read', 'post'])
+  assert.deepEqual(slackCalls(env), ['mentions', 'dms', 'trusted', 'covered', 'read', 'shared', 'post'])
 })
 
 test('without a token a session that does not hold the Slack lease never calls the connector', integration, async () => {
@@ -871,4 +889,226 @@ test('the token tool hands the token to the binary and answers without it', inte
   assert.ok(!JSON.stringify(r).includes('xoxp'))
   env.answer = 'Cancel'
   assert.deepEqual(await handlers['tool.call'](env.$, { tool: 'mcp__meetproxy__slack_token' }, () => 'passed'), { result: 'no token was given' })
+})
+
+// Waits until the check holds or a second passes, for work the watcher does not await
+async function until(check) {
+  for (let i = 0; i < 100 && !check(); i++) await new Promise(r => setTimeout(r, 10))
+}
+
+const origin = 'https://github.com/o/svc/pull/7#issuecomment-1'
+const comment = (id, login, body, at) => ({ id, html_url: `https://github.com/o/svc/pull/7#issuecomment-${id}`, body, user: { login }, author_association: 'MEMBER', created_at: at })
+
+// A request answered through a relay so the ledger holds the post and the thread is watched
+async function answered(env) {
+  env.bin(['open', origin, '--session', 'S1'])
+  assert.equal(await testing.post(env.$, origin, 'retry is in config.go\n\n_Written by Claude on behalf of the user_'), 'posted to ' + origin)
+  env.bin(['close', '--topic', 'retry', '--session', 'S1'])
+}
+
+test('post writes the ledger with the permalink of the reply', integration, async () => {
+  const env = session()
+  await answered(env)
+  const ledger = JSON.parse(env.bin(['posts', 'list']).stdout)
+  assert.deepEqual(ledger.map(p => [p.origin, p.reply, p.mode, p.kind]), [[origin, 'https://github.com/o/svc/pull/7#issuecomment-900', 'manual', 'answer']])
+  assert.deepEqual(tick(env).watch.map(w => w.thread), [origin])
+})
+
+test('a follow-up in a watched thread reopens the same request', integration, async () => {
+  const env = session({
+    gh: {
+      notifications: [[]],
+      'repos/o/svc/issues/7/comments': [[comment(901, 'kai', 'and where is the timeout?', '2030-01-01T00:04:00Z'), comment(902, 'me', 'mine', '2030-01-01T00:03:00Z')]],
+      'repos/o/svc/pulls/7/reviews': [[]],
+    },
+  })
+  await answered(env)
+  await testing.check(env.$)
+  // The request keeps the link and so the id of the request the post answered
+  assert.deepEqual(rows(env).map(r => [r[1], r[3]]), [['new', origin]])
+  assert.deepEqual(JSON.parse(env.bin(['posts', 'list']).stdout).map(p => p.request), [rows(env)[0][0]])
+  assert.deepEqual(tick(env).watch.map(w => w.seen), [at('2030-01-01T00:04:00Z')])
+  // Read once so the next check queues nothing new
+  testing.sorted.clear()
+  await testing.check(env.$)
+  assert.equal(env.triaged, 1)
+})
+
+test('a follow-up that says the answer was wrong halves the record and asks the user', integration, async () => {
+  const env = session({
+    gh: {
+      notifications: [[]],
+      'repos/o/svc/issues/7/comments': [[comment(901, 'kai', 'that is wrong, it is in retry.go', '2030-01-01T00:04:00Z')]],
+      'repos/o/svc/pulls/7/reviews': [[]],
+    },
+  })
+  env.$.model.complete = async () => ({ isAnswered: true, text: '{"verdict":"handle","reason":"fix","correction":true}' })
+  await answered(env)
+  await testing.check(env.$)
+  assert.deepEqual(rows(env).map(r => [r[1], r[4]]), [['ask', 'the requester says the earlier answer was wrong']])
+  assert.ok(env.calls.some(a => a[0] === 'correct'))
+  const taken = env.bin(['inbox', 'take', rows(env)[0][0], '--session', 'S1']).stdout.trim().split('\t')
+  assert.deepEqual(taken.slice(7), ['quick', 'followup,correction'])
+})
+
+test('a reply meetproxy posted for anyone covers the request', integration, async () => {
+  const gh = githubMention()
+  gh['repos/o/svc/issues/7/comments'][0][1].body = 'it is in config.go\n\n_Written by Claude on behalf of the user_'
+  const env = session({ gh })
+  env.bin(['inbox', 'advance', at('2030-01-01T00:00:00Z'), '--key', 'github'])
+  await testing.check(env.$)
+  assert.deepEqual(rows(env), [])
+  assert.equal(env.triaged, 0)
+})
+
+test('comments on the user own pull request come from others only and ask first', integration, async () => {
+  const env = session({
+    gh: {
+      notifications: [[{
+        reason: 'author', updated_at: '2030-01-01T00:05:00Z', repository: { full_name: 'o/svc' },
+        subject: { type: 'PullRequest', title: 'Fix', url: 'https://api.github.com/repos/o/svc/pulls/7' },
+      }]],
+      'https://api.github.com/repos/o/svc/pulls/7': { html_url: 'https://github.com/o/svc/pull/7', user: { login: 'me' } },
+      'repos/o/svc/issues/7/comments': [[
+        comment(1, 'kai', 'why a new retry?', '2030-01-01T00:04:00Z'),
+        comment(2, 'me', 'opening note', '2030-01-01T00:03:00Z'),
+        { ...comment(3, 'dependabot[bot]', 'bump', '2030-01-01T00:04:20Z'), user: { login: 'dependabot[bot]', type: 'Bot' } },
+      ]],
+      'repos/o/svc/pulls/7/comments': [[]],
+      'repos/o/svc/pulls/7/reviews': [[]],
+    },
+  })
+  env.bin(['inbox', 'advance', at('2030-01-01T00:00:00Z'), '--key', 'github'])
+  await testing.check(env.$)
+  assert.deepEqual(rows(env).map(r => [r[1], r[3]]), [['ask', 'https://github.com/o/svc/pull/7#issuecomment-1']])
+  assert.deepEqual(tick(env).waiting.map(r => r.delegation), ['default-own-pr'])
+})
+
+// A session reading Slack with a token where every new timer path has something to do
+function tokenSession(extra = {}) {
+  const link = 'https://w.slack.com/archives/C1/p1893456100000001'
+  const reacted = []
+  const env = session({
+    slack: { slack_read_user_profile: () => ({ result: 'User ID: ME\nTeam: T1\n' }) },
+    token: {
+      mentions: () => ({ out: [{ author: 'Kai', channel: 'C1', from: 'U2', ts: '1893456100.000001', link, text: '<@ME> where is retry' }] }),
+      // The same message seen by both readers is queued once
+      dms: () => ({ out: [{ author: 'Kai', channel: 'C1', from: 'U2', ts: '1893456100.000001', link, text: '<@ME> where is retry' }] }),
+      trusted: () => ({ out: { trusted: true } }),
+      covered: () => ({ out: { covered: false } }),
+      shared: () => ({ out: { shared: true } }),
+      replies: () => ({ out: [] }),
+      react: args => {
+        reacted.push(args)
+        return { out: '' }
+      },
+      ...extra,
+    },
+  })
+  env.bin(['inbox', 'advance', '1893456000', '--key', 'mention'])
+  env.bin(['inbox', 'advance', '1893456000', '--key', 'dm'])
+  return { env, link, reacted }
+}
+
+test('with a token a shared channel asks first, reactions go once and the connector is never called', integration, async () => {
+  const { env, link, reacted } = tokenSession()
+  await testing.check(env.$)
+  assert.deepEqual(rows(env).map(r => [r[1], r[3], r[4]]), [['ask', link, 'shared channel with people outside the workspace']])
+  await testing.check(env.$)
+  assert.deepEqual(reacted, [[link, '--react', 'eyes']])
+  assert.deepEqual(env.mcp, [])
+})
+
+test('with a token a Slack follow-up is read through the binary', integration, async () => {
+  const thread = 'https://w.slack.com/archives/C1/p1893456100000001'
+  const { env } = tokenSession({
+    mentions: () => ({ out: [] }),
+    dms: () => ({ out: [] }),
+    shared: () => ({ out: { shared: false } }),
+    post: () => ({ out: thread.replace('p1893456100000001', 'p1893456150000001') + '?thread_ts=1893456100.000001&cid=C1' }),
+    replies: args => ({ out: args[0] === thread ? [{ author: 'Kai', channel: 'C1', from: 'U2', ts: '1893456200.000001', link: thread + '?x', text: 'and the timeout?' }] : [] }),
+  })
+  env.bin(['open', thread, '--session', 'S1'])
+  assert.equal(await testing.post(env.$, thread, 'in config.go'), 'posted to ' + thread)
+  env.bin(['close', '--topic', 'retry', '--session', 'S1'])
+  await testing.check(env.$)
+  assert.deepEqual(rows(env).map(r => [r[1], r[3]]), [['new', thread]])
+  assert.deepEqual(env.mcp, [])
+})
+
+test('a busy session leaves a request to an idle session of its place', integration, async () => {
+  for (const tc of [
+    { peer: { place: '/tmp/notes', name: 'notes' }, ago: 11 * 60_000, want: [] },
+    { peer: { place: '/w/web', name: 'web' }, ago: 2 * 60_000, want: [] },
+    { peer: { place: '/w/web', name: 'web' }, ago: 11 * 60_000, want: ['--auto'] },
+  ]) {
+    const env = session({ repo: '/tmp/notes', now: Date.now() + tc.ago })
+    await env.$.store.set('session:S2', { ...tc.peer, at: env.now })
+    await env.$.store.set('activity:S2', { in_turn: false })
+    env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p1', '--verdict', 'handle', '--trusted', 'yes', '--name', 'notes', '--place', '/tmp/notes'])
+    testing.busy(true)
+    await testing.pickUp(env.$, tick(env))
+    assert.deepEqual(env.ran.map(c => c.args.split(' ')[1]), tc.want)
+  }
+})
+
+test('several requests that need the user are offered in one question', integration, async () => {
+  const env = session({ repo: '/tmp/notes' })
+  for (const n of [1, 2, 3]) env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p' + n, '--verdict', 'ask', '--name', 'notes', '--place', '/tmp/notes'])
+  const ids = tick(env).waiting.map(r => r.id)
+  env.answer = (q, o) => o.options[1]
+  await testing.pickUp(env.$, tick(env))
+  await until(() => env.ran.length)
+  assert.equal(env.asked.length, 1)
+  assert.deepEqual(env.asked[0].o.options, ids.map(id => `${id} · notes · default`))
+  assert.equal(env.asked[0].o.multiSelect, true)
+  assert.ok(!JSON.stringify(env.asked).includes('slack.com'))
+  assert.deepEqual(env.ran.map(c => c.args), [ids[1] + ' --ask'])
+  const held = tick(env).waiting.filter(r => r.status === 'held')
+  assert.deepEqual(held.map(r => r.id), [ids[0], ids[2]])
+  assert.ok(held.every(r => r.until > Date.now() / 1000 + 3600))
+})
+
+test('a held request whose time came is asked about again', integration, async () => {
+  const env = session({ repo: '/tmp/notes' })
+  env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p1', '--verdict', 'ask', '--name', 'notes', '--place', '/tmp/notes'])
+  const id = rows(env)[0][0]
+  assert.equal(env.bin(['inbox', 'hold', id, '--until', '2000-01-01T00:00:00Z', '--session', 'S1']).exitCode, 0)
+  assert.equal(tick(env).waiting[0].due, true)
+  await testing.pickUp(env.$, tick(env))
+  assert.deepEqual(env.ran.map(c => c.args), [id + ' --ask'])
+})
+
+test('a source that fails asks once a day with its fix and can be stopped', integration, async () => {
+  const env = session({ gh: { notifications: undefined } })
+  await testing.check(env.$)
+  // A minute passes between ticks so the first question is answered before the next one
+  const settle = () => new Promise(r => setTimeout(r, 20))
+  await testing.nag(env.$, tick(env))
+  await settle()
+  await testing.nag(env.$, tick(env))
+  await settle()
+  assert.equal(env.asked.length, 1)
+  assert.match(env.asked[0].q, /gh auth login/)
+  assert.deepEqual(env.asked[0].o.options, ['Done', 'Remind tomorrow', 'Stop reading github'])
+  env.now += 25 * 60 * 60_000
+  env.answer = 'Stop reading github'
+  await testing.nag(env.$, tick(env))
+  await settle()
+  assert.equal(env.asked.length, 2)
+  assert.equal(await env.$.store.get('muted:github'), true)
+  env.ghCalls.length = 0
+  await testing.check(env.$)
+  assert.deepEqual(env.ghCalls, [])
+})
+
+test('retract refuses a reply outside the ledger and edits one in it', integration, async () => {
+  const env = session()
+  assert.match(await testing.retract(env.$, 'https://github.com/o/svc/pull/7#issuecomment-5', 'x'), /^denied/)
+  await answered(env)
+  const reply = 'https://github.com/o/svc/pull/7#issuecomment-900'
+  assert.equal(await testing.retract(env.$, reply, 'it is in retry.go'), 'corrected ' + reply)
+  assert.deepEqual(env.edits, [['PATCH', 'repos/o/svc/issues/comments/900', 'it is in retry.go\n\n_Written by Claude on behalf of the user_']])
+  assert.ok(JSON.parse(env.bin(['posts', 'list']).stdout)[0].retracted_at)
+  assert.match(await testing.retract(env.$, reply), /already retracted/)
 })
