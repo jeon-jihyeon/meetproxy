@@ -35,6 +35,9 @@ const (
 // Reason a question left unanswered for questionFor comes back with
 const Unanswered = "requester did not answer"
 
+// Reason a request opens again with when a newer message came while it was taken
+const Replied = "the requester wrote again while the request was handled"
+
 // Reactions a request may be acknowledged with
 const (
 	AckSeen    = "eyes"    // the request was queued
@@ -92,6 +95,9 @@ type Item struct {
 	Handoff bool `json:"handoff,omitempty"`
 	// Reactions already added
 	Acked []string `json:"acked,omitempty"`
+	// Status a newer message asked for while a session worked on the request
+	// The request opens again with it once the take settles so the message is never absorbed
+	Again Status `json:"again,omitempty"`
 }
 
 // How long a question to the requester waits before the user is asked
@@ -180,8 +186,9 @@ func (s Store) Add(it Item, now time.Time) (Item, bool, error) {
 // Returns false with the stored item when the link was seen before
 // 1. A done request asked again with a newer timestamp is stored anew and returns true
 // 2. A held or question request asked again with a newer timestamp opens again with the new status
-// 3. Any other open request keeps the newest timestamp so an older scan never reopens it once done
-// 4. A new link past the limits of its delegation fails with ErrLimited or ErrDuplicate counted under the lock
+// 3. A taken request asked again with a newer timestamp opens again once its take settles as done or as a question
+// 4. Any other open request keeps the newest timestamp so an older scan never reopens it once done
+// 5. A new link past the limits of its delegation fails with ErrLimited or ErrDuplicate counted under the lock
 func (s Store) AddLimited(it Item, lim Limits, now time.Time) (Item, bool, error) {
 	if s.Paused() {
 		return Item{}, false, ErrPaused
@@ -208,6 +215,9 @@ func (s Store) AddLimited(it Item, lim Limits, now time.Time) (Item, bool, error
 		seen.Ts, seen.Status, seen.Reason, seen.HeldUntil, seen.UpdatedAt = it.Ts, it.Status, it.Reason, time.Time{}, now.UTC()
 		seen.Followup, seen.Correction = it.Followup, it.Correction
 		return seen, true, s.put(seen)
+	case seen.Status == StatusTaken:
+		seen.Ts, seen.Again, seen.Followup, seen.Correction = it.Ts, it.Status, it.Followup, it.Correction
+		return seen, false, s.put(seen)
 	case seen.Status != StatusDone:
 		seen.Ts = it.Ts
 		return seen, false, s.put(seen)
@@ -416,10 +426,11 @@ func (s Store) Ask(id, sessionId, reason string, now time.Time) (Item, error) {
 // A zero until waits for the user
 func (s Store) Hold(id, sessionId string, until, now time.Time) (Item, error) {
 	return s.update(id, sessionId, now, func(it *Item) error {
-		if !slices.Contains([]Status{StatusTaken, StatusAsk, StatusHeld}, it.Status) {
+		if !slices.Contains([]Status{StatusTaken, StatusAsk, StatusHeld, StatusQuestion}, it.Status) {
 			return fmt.Errorf("request %s is %s", id, it.Status)
 		}
-		it.Status, it.SessionId, it.HeldUntil = StatusHeld, "", until.UTC()
+		// The user looks at the thread when the request comes back so a newer message needs no round of its own
+		it.Status, it.SessionId, it.HeldUntil, it.Again = StatusHeld, "", until.UTC(), ""
 		if until.IsZero() {
 			it.HeldUntil = time.Time{}
 		}
@@ -458,6 +469,7 @@ func (s Store) Done(id, sessionId string, now time.Time) (Item, error) {
 // Frees the request so any session can take it again
 // 1. A request another session still works on stays with it so a session never settles a take it lost
 // 2. An empty reason keeps the one stored
+// 3. A newer message that came during the take opens it again instead of done or a question since it may answer either
 func (s Store) release(id, sessionId string, to Status, reason string, now time.Time, from ...Status) (Item, error) {
 	return s.update(id, sessionId, now, func(it *Item) error {
 		if !slices.Contains(from, it.Status) {
@@ -467,6 +479,10 @@ func (s Store) release(id, sessionId string, to Status, reason string, now time.
 		if reason != "" {
 			it.Reason = reason
 		}
+		if it.Again != "" && (to == StatusDone || to == StatusQuestion) {
+			it.Status, it.Reason, it.Acked = it.Again, Replied, nil
+		}
+		it.Again = ""
 		return nil
 	})
 }
@@ -658,9 +674,10 @@ func (s Store) Corrupt() (int, error) {
 }
 
 // Renews the takes of a session that is still working so they do not age into ask
+// A take already past busyFor stays lost since another session may have taken it over and its scope marker may be gone
 func (s Store) Touch(sessionId string, now time.Time) error {
 	stale := func(it Item) bool {
-		return it.Status == StatusTaken && it.SessionId == sessionId && now.Sub(it.lastSeen()) >= touchEvery
+		return it.Status == StatusTaken && it.SessionId == sessionId && !it.Waiting(now) && now.Sub(it.lastSeen()) >= touchEvery
 	}
 	all, err := s.List()
 	if err != nil || !slices.ContainsFunc(all, stale) {
