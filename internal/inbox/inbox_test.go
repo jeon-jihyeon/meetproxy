@@ -357,6 +357,48 @@ func TestStoreClaim_Paused(t *testing.T) {
 	assert.ErrorIs(t, err, inbox.ErrPaused)
 }
 
+func TestStoreTakenBy(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	type want struct {
+		link  string
+		found bool
+	}
+	tcs := []struct {
+		name    string
+		session string
+		after   time.Duration
+		done    bool
+		want    want
+	}{
+		{"finds the request the session took", "s1", 0, false, want{link, true}},
+		{"finds nothing for another session", "s2", 0, false, want{"", false}},
+		{"finds nothing once the take is an hour old", "s1", 2 * time.Hour, false, want{"", false}},
+		{"finds nothing once the request is done", "s1", 0, true, want{"", false}},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := inbox.New(t.TempDir())
+			for _, l := range []string{link, other} {
+				_, _, err := s.Add(inbox.Item{Link: l, Status: inbox.StatusNew}, now)
+				require.NoError(t, err)
+			}
+			_, err := s.Take(inbox.IdOf(link), "s1", now)
+			require.NoError(t, err)
+			if tc.done {
+				_, err = s.Done(inbox.IdOf(link), "s1", now)
+				require.NoError(t, err)
+			}
+
+			it, found, err := s.TakenBy(tc.session, now.Add(tc.after))
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, want{it.Link, found})
+		})
+	}
+}
+
 type settled struct {
 	status inbox.Status
 	reason string

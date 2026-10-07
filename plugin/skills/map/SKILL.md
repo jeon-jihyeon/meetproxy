@@ -3,7 +3,7 @@ name: map
 description: Refresh the meetproxy work map now, or show what it knows. Run with no argument to refresh, or with show to list its places, skills and output formats.
 disable-model-invocation: true
 argument-hint: "[show]"
-allowed-tools: Bash(meetproxy *)
+allowed-tools: Bash(meetproxy map refresh *), Bash(meetproxy map show *)
 ---
 
 # map

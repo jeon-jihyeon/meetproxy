@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -102,23 +101,23 @@ func (c cli) canPost(link string) (int, error) {
 	if err != nil {
 		return exitFailed, err
 	}
-	r, err := relay.New(c.data).Current(c.session)
-	if err != nil && !errors.Is(err, relay.ErrNoOpen) {
+	sc, _, err := scopeOf(c.data, c.session, c.now)
+	if err != nil {
 		return exitFailed, err
 	}
-	reason, err := denial(c.data, []dest.Location{loc}, r.Origin, r.Target)
+	reason, err := denial(c.data, []guard.Post{{At: loc}}, sc)
 	if err != nil {
 		return exitFailed, err
 	}
 	return c.verdict(reason == "")
 }
 
-// Why posting to locs is denied while the relay of origin and target is open
-// Empty origin and target mean no relay is open so only the allow list counts
-func denial(data string, locs []dest.Location, origin, target string) (string, error) {
-	o, _ := dest.Parse(origin)
-	t, _ := dest.Parse(target)
-	return guard.Decide(locs, o, t, dest.New(data).Allowed)
+// Why posts are denied in the scope sc
+// An empty scope means the session handles nothing so only the allow list counts
+func denial(data string, posts []guard.Post, sc scope) (string, error) {
+	o, _ := dest.Parse(sc.origin)
+	t, _ := dest.Parse(sc.target)
+	return guard.Decide(posts, o, t, sc.mayApprove, dest.New(data).Allowed)
 }
 
 func (c cli) close(topic string, keywords, paths []string) error {

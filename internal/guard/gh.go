@@ -2,6 +2,7 @@ package guard
 
 import (
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -34,6 +35,13 @@ var (
 	ghText = map[string]bool{
 		"-b": true, "--body": true, "-t": true, "--title": true, "-n": true, "--notes": true, "--subject": true,
 	}
+	// The only calls without a subcommand that pass
+	ghInfo = map[string]bool{"--version": true, "--help": true, "-h": true}
+	// Writes the guard leaves to the user even where posts may go
+	ghActs = map[string]string{
+		"pr merge": ActMerge, "pr close": ActClose, "issue close": ActClose, "repo archive": ActClose,
+		"repo delete": ActDelete, "release delete": ActDelete, "label delete": ActDelete, "issue delete": ActDelete,
+	}
 	ownerRepo = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
 	number    = regexp.MustCompile(`^#?(\d+)$`)
 	apiPath   = regexp.MustCompile(`^/?repos/([\w.-]+/[\w.-]+)(?:/(?:issues|pulls)/(\d+))?`)
@@ -45,6 +53,8 @@ type ghArgs struct {
 	positional []string
 	// Values of -R and --repo
 	repos []string
+	// Flags that take no text such as --approve
+	flags []string
 }
 
 func splitGh(args []string) ghArgs {
@@ -67,6 +77,7 @@ func splitGh(args []string) ghArgs {
 		case ghText[w]:
 			j++
 		case strings.HasPrefix(w, "-"):
+			g.flags = append(g.flags, w)
 		default:
 			g.positional = append(g.positional, w)
 		}
@@ -78,32 +89,69 @@ func splitGh(args []string) ghArgs {
 // 1. Known reads post nowhere
 // 2. Writes of a checked group post to every repository they name
 // 3. Anything else fails closed
-func ghCall(args, envRepos []string) ([]dest.Location, error) {
+// fed is a gh run by xargs or parallel whose last words come from its input
+func ghCall(args, envRepos []string, fed bool) ([]Post, error) {
 	g := splitGh(args)
 	g.repos = append(g.repos, envRepos...)
 	if len(g.positional) == 0 {
-		return nil, nil
+		if !fed && len(args) == 1 && ghInfo[args[0]] {
+			return nil, nil
+		}
+		return nil, unknown("gh without a subcommand")
 	}
-	group := g.positional[0]
-	sub := ""
+	group, sub := g.positional[0], ""
 	if len(g.positional) > 1 {
 		sub = g.positional[1]
 	}
+	read := isRead(group, sub)
 	switch {
+	case fed && !read:
+		return nil, unknown("gh given words by xargs or parallel that may not only read")
 	case group == "api":
 		return apiCall(args, g)
-	case ghReads[group] || ghReads[group+" "+sub]:
+	case read:
 		return nil, nil
 	case ghChecked[group] && sub == "":
 		return nil, nil
 	case !ghChecked[group]:
 		return nil, unknown("gh " + group + " is not checked")
 	}
-	locs := g.targets(group+" "+sub, g.positional[2:])
+	cmd := group + " " + sub
+	locs := g.targets(cmd, g.positional[2:])
 	if len(locs) == 0 {
-		return nil, unknown("gh " + group + " " + sub + " names no repository, add -R OWNER/REPO")
+		return nil, unknown("gh " + cmd + " names no repository, add -R OWNER/REPO")
 	}
-	return locs, nil
+	return postsAt(locs, g.act(cmd)), nil
+}
+
+func isRead(group, sub string) bool {
+	return group != "api" && (ghReads[group] || ghReads[group+" "+sub])
+}
+
+func (g ghArgs) act(cmd string) string {
+	if cmd == "pr review" && slices.ContainsFunc(g.flags, approves) {
+		return ActApprove
+	}
+	return ghActs[cmd]
+}
+
+// --approve or a cluster of short flags such as -ab that holds -a before a flag that takes a value
+func approves(flag string) bool {
+	if flag == "--approve" || (strings.HasPrefix(flag, "--approve=") && flag != "--approve=false") {
+		return true
+	}
+	if strings.HasPrefix(flag, "--") {
+		return false
+	}
+	for _, c := range strings.TrimPrefix(flag, "-") {
+		switch c {
+		case 'a':
+			return true
+		case 'b', 'F', 'R':
+			return false
+		}
+	}
+	return false
 }
 
 // Every repository a write names
@@ -156,15 +204,18 @@ func repoAt(v string, n int) []dest.Location {
 }
 
 // A write through gh api posts to the repository of its endpoint
-func apiCall(args []string, g ghArgs) ([]dest.Location, error) {
-	if !apiWrites(args) {
+func apiCall(args []string, g ghArgs) ([]Post, error) {
+	method, writes := apiWrites(args)
+	if !writes {
 		return nil, nil
 	}
 	var locs []dest.Location
+	merges := false
 	for _, w := range g.positional[1:] {
 		if m := apiPath.FindStringSubmatch(w); m != nil {
 			n, _ := strconv.Atoi(m[2])
 			locs = append(locs, dest.Location{Source: dest.GitHub, Name: m[1], Number: n})
+			merges = merges || strings.Contains(w, "/merge")
 		}
 	}
 	for _, r := range g.repos {
@@ -173,15 +224,37 @@ func apiCall(args []string, g ghArgs) ([]dest.Location, error) {
 	if len(locs) == 0 {
 		return nil, unknown("gh api writes to an endpoint without a repository")
 	}
-	return locs, nil
+	return postsAt(locs, apiAct(args, method, merges)), nil
 }
 
-func apiWrites(args []string) bool {
+// The act of a gh api write from its method, its endpoint and its fields
+// Fields are matched in every word so a field joined to its flag still counts
+func apiAct(args []string, method string, merges bool) string {
+	switch {
+	case strings.EqualFold(method, "DELETE"):
+		return ActDelete
+	case merges:
+		return ActMerge
+	}
+	for _, w := range args {
+		switch v := strings.ToLower(w); {
+		case strings.Contains(v, "event=approve"):
+			return ActApprove
+		case strings.Contains(v, "state=closed"):
+			return ActClose
+		}
+	}
+	return ActComment
+}
+
+// The method a gh api call names and whether it writes
+func apiWrites(args []string) (string, bool) {
+	writes := false
+	method := ""
 	for i, w := range args {
-		method := ""
 		switch {
 		case strings.HasPrefix(w, "--field"), strings.HasPrefix(w, "--raw-field"), strings.HasPrefix(w, "--input"):
-			return true
+			writes = true
 		case strings.HasPrefix(w, "--method="):
 			method = strings.TrimPrefix(w, "--method=")
 		case w == "--method" || w == "-X":
@@ -191,11 +264,11 @@ func apiWrites(args []string) bool {
 		case strings.HasPrefix(w, "-X"):
 			method = strings.TrimPrefix(w, "-X")
 		case strings.HasPrefix(w, "-f"), strings.HasPrefix(w, "-F"):
-			return true
-		}
-		if method != "" && !strings.EqualFold(method, "GET") && !strings.EqualFold(method, "HEAD") {
-			return true
+			writes = true
 		}
 	}
-	return false
+	if method != "" && !strings.EqualFold(method, "GET") && !strings.EqualFold(method, "HEAD") {
+		writes = true
+	}
+	return method, writes
 }

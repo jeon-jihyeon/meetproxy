@@ -108,7 +108,7 @@ function githubMention(extra = {}) {
       subject: { type: 'PullRequest', title: 'Fix', url: 'https://api.github.com/repos/o/svc/pulls/7', latest_comment_url: 'x' },
     }]],
     'repos/o/svc/issues/7/comments': [[
-      { html_url: 'https://github.com/o/svc/pull/7#issuecomment-1', body: '@me where is retry set?', user: { login: 'kai' }, created_at: '2030-01-01T00:04:00Z' },
+      { html_url: 'https://github.com/o/svc/pull/7#issuecomment-1', body: '@me where is retry set?', user: { login: 'kai' }, author_association: 'MEMBER', created_at: '2030-01-01T00:04:00Z' },
       { html_url: 'https://github.com/o/svc/pull/7#issuecomment-2', body: 'thanks', user: { login: 'lee' }, created_at: '2030-01-01T00:05:00Z' },
     ]],
     'repos/o/svc/pulls/7/comments': [[]],
@@ -155,6 +155,51 @@ test('a request the user already answered is skipped', integration, async () => 
   await testing.check(env.$)
   assert.deepEqual(rows(env), [])
   assert.equal(env.bin(['inbox', 'cursor', '--key', 'github']).stdout.trim(), at('2030-01-01T00:04:00Z'))
+})
+
+test('a GitHub mention from outside the organization waits for the user', integration, async () => {
+  const gh = githubMention()
+  gh['repos/o/svc/issues/7/comments'][0][0].author_association = 'NONE'
+  const env = session({ gh })
+  env.bin(['inbox', 'advance', at('2030-01-01T00:00:00Z'), '--key', 'github'])
+  await testing.check(env.$)
+  assert.deepEqual(rows(env).map(r => [r[1], r[4]]), [['ask', 'sender outside the trust set']])
+  assert.ok(env.calls.some(a => a[0] === 'inbox' && a[1] === 'add' && a.join(' ').includes('--trusted no')))
+})
+
+test('a Slack mention from a member is handled and one from a guest or another team waits', integration, async () => {
+  const result = (n, from, ts) => `### Result ${n}\nChannel: #dev (ID: C1)\nFrom: P${n} <p@x.com> (ID: ${from}) \nMessage_ts: ${ts}\nPermalink: [link](https://w.slack.com/archives/C1/p${ts.replace('.', '')})\nText: \n<@ME> question ${n}\n\n---\n`
+  const profiles = {
+    undefined: 'User ID: ME\nTeam: T1\nEmail: me@x.com\n',
+    U2: 'User ID: U2\nTeam: T1\n',
+    U3: 'User ID: U3\nTeam: T1\nIs Restricted: true\n',
+    U4: 'User ID: U4\nTeam: T9\n',
+  }
+  const env = session({
+    slack: {
+      slack_read_user_profile: args => ({ result: profiles[args.user_id] }),
+      slack_search_public_and_private: () => ({
+        results: result(1, 'U2', '1893456100.000001') + result(2, 'U3', '1893456110.000001') + result(3, 'U4', '1893456120.000001'),
+      }),
+      slack_read_thread: () => ({ messages: 'THREAD: x' }),
+      slack_read_channel: () => ({ messages: '' }),
+    },
+  })
+  env.bin(['inbox', 'advance', '1893456000', '--key', 'mention'])
+  await testing.check(env.$)
+  assert.deepEqual(rows(env).map(r => [r[3], r[1]]).sort(), [
+    ['https://w.slack.com/archives/C1/p1893456100000001', 'new'],
+    ['https://w.slack.com/archives/C1/p1893456110000001', 'ask'],
+    ['https://w.slack.com/archives/C1/p1893456120000001', 'ask'],
+  ])
+  assert.equal(await testing.slackTrusted(env.$, 'U2'), true)
+  assert.equal(await testing.slackTrusted(env.$, 'U4'), false)
+})
+
+test('a Slack profile that cannot be read is not trusted and not remembered', integration, async () => {
+  const env = session({ slack: { slack_read_user_profile: args => ({ result: args.user_id ? 'not found' : 'User ID: ME\nTeam: T1\n' }) } })
+  assert.equal(await testing.slackTrusted(env.$, 'U2'), false)
+  assert.equal(await env.$.store.get('slackTrust:U2'), undefined)
 })
 
 test('a request found more than an hour late waits for the user', integration, async () => {
@@ -273,10 +318,10 @@ test('a failing source gives up its lease so another session can read it', integ
 test('a session takes requests of its own place and the lease holder waits before taking what nobody covers', integration, async () => {
   const env = session({ repo: '/tmp/notes' })
   await env.$.store.set('session:S2', { place: '/w/svc', name: 'svc', at: NOW })
-  env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p1', '--verdict', 'handle', '--name', 'svc', '--place', '/w/svc'])
-  env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p2', '--verdict', 'handle', '--name', 'web', '--place', '/w/web'])
+  env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p1', '--verdict', 'handle', '--trusted', 'yes', '--name', 'svc', '--place', '/w/svc'])
+  env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p2', '--verdict', 'handle', '--trusted', 'yes', '--name', 'web', '--place', '/w/web'])
   // Same name as this session's place but another root
-  env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p3', '--verdict', 'handle', '--name', 'notes', '--place', '/w/notes'])
+  env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p3', '--verdict', 'handle', '--trusted', 'yes', '--name', 'notes', '--place', '/w/notes'])
   env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p4', '--verdict', 'ask', '--name', 'notes', '--place', '/tmp/notes'])
   await env.$.store.set('lease:slack', { session: 'S1', until: NOW + 60_000 })
   await testing.pickUp(env.$, tick(env))
@@ -290,7 +335,7 @@ test('a session takes requests of its own place and the lease holder waits befor
 test('the lease holder takes a request of a place whose session went quiet', integration, async () => {
   const env = session({ repo: '/tmp/notes', now: Date.now() + 5 * 60_000 })
   await env.$.store.set('session:OLD', { place: '/w/web', name: 'web', at: env.now - LEASE - 1 })
-  env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p1', '--verdict', 'handle', '--name', 'web', '--place', '/w/web'])
+  env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p1', '--verdict', 'handle', '--trusted', 'yes', '--name', 'web', '--place', '/w/web'])
   await env.$.store.set('lease:slack', { session: 'S1', until: env.now + 60_000 })
   await testing.pickUp(env.$, tick(env))
   assert.deepEqual(env.ran.map(c => c.args.split(' ')[1]), ['--auto'])
@@ -300,7 +345,7 @@ test('the lease holder takes a request of a place whose session went quiet', int
 test('a live session covers a request stored with its name only', integration, async () => {
   const env = session({ repo: '/tmp/notes', now: Date.now() + 5 * 60_000 })
   await env.$.store.set('session:S2', { place: '/w/web', name: 'web', at: env.now })
-  env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p1', '--verdict', 'handle', '--name', 'web'])
+  env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p1', '--verdict', 'handle', '--trusted', 'yes', '--name', 'web'])
   await env.$.store.set('lease:slack', { session: 'S1', until: env.now + 60_000 })
   await testing.pickUp(env.$, tick(env))
   assert.deepEqual(env.ran, [])
@@ -337,6 +382,25 @@ test('post checks its input and its destination before sending', integration, as
   assert.equal(await testing.post(env.$, 'https://github.com/o/svc/pull/7#discussion_r55', 'reply'), 'posted to https://github.com/o/svc/pull/7#discussion_r55')
   assert.deepEqual(env.sent, [{ path: 'repos/o/svc/pulls/7/comments/55/replies', body: 'reply' }])
   assert.match(await testing.post(env.$, 'https://w.slack.com/archives/C7/p1790000000000001', 'hi'), /^denied/)
+})
+
+test('a post whose check fails is denied and nothing is sent', integration, async () => {
+  const env = session()
+  const handlers = await started(env, {})
+  env.bin(['open', 'https://github.com/o/svc/pull/7', '--session', 'S1'])
+  const real = env.$.process.run
+  env.$.process.run = async (argv, init) => {
+    if (argv.includes('can-post')) throw new Error('timed out')
+    return real(argv, init)
+  }
+  const posted = await handlers['tool.call'](env.$, { tool: 'mcp__meetproxy__post', link: 'https://github.com/o/svc/pull/7', text: 'reply' }, () => 'passed')
+  assert.deepEqual(posted, { result: 'denied: post check failed timed out' })
+  assert.deepEqual(env.sent, [])
+  // A post hook that outran its budget before it answered is denied too
+  const next = Object.assign(() => 'ran', { called: false, error: { kind: 'timeout' } })
+  assert.deepEqual(handlers['tool.call.catch'](env.$, { tool: 'mcp__meetproxy__post' }, next), { result: 'denied: post check failed timeout' })
+  const other = Object.assign(e => e, { called: true })
+  assert.deepEqual(handlers['tool.call.catch'](env.$, { tool: 'Bash' }, other), { tool: 'Bash' })
 })
 
 test('a request the user wrote in a thread is not taken for their own reply', integration, async () => {
@@ -383,7 +447,7 @@ test('a Slack request the user already replied to is skipped', integration, asyn
 test('a session with no place does not count as covering requests with none', integration, async () => {
   const env = session({ repo: '/tmp/notes', now: Date.now() + 5 * 60_000 })
   await env.$.store.set('session:OLD', { place: '', name: '', at: env.now })
-  env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p1', '--verdict', 'handle'])
+  env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p1', '--verdict', 'handle', '--trusted', 'yes'])
   await env.$.store.set('lease:slack', { session: 'S1', until: env.now + 5 * 60_000 })
   await testing.pickUp(env.$, tick(env))
   assert.deepEqual(env.ran.map(c => c.args.split(' ')[1]), ['--auto'])
@@ -464,7 +528,7 @@ test('a mention in the issue itself counts when no comment names the user', inte
         subject: { type: 'Issue', title: 'Bug', url: 'https://api.github.com/repos/o/svc/issues/8' },
       }]],
       'repos/o/svc/issues/8/comments': [[]],
-      'https://api.github.com/repos/o/svc/issues/8': { html_url: 'https://github.com/o/svc/issues/8', body: '@me can you look', user: { login: 'kai' }, created_at: '2030-01-01T00:03:00Z' },
+      'https://api.github.com/repos/o/svc/issues/8': { html_url: 'https://github.com/o/svc/issues/8', body: '@me can you look', user: { login: 'kai' }, author_association: 'MEMBER', created_at: '2030-01-01T00:03:00Z' },
     },
   })
   env.bin(['inbox', 'advance', at('2030-01-01T00:00:00Z'), '--key', 'github'])
@@ -539,7 +603,10 @@ async function started(env, older) {
     return real(argv, init)
   }
   const handlers = {}
-  register((name, fn) => { handlers[name] = fn })
+  register((name, fn) => {
+    handlers[name] = fn
+    return { catch: c => { handlers[name + '.catch'] = c } }
+  })
   await handlers['session.start'](env.$, {}, e => e)
   return handlers
 }
@@ -578,7 +645,7 @@ for (const tc of [
 ]) {
   test(tc.name, integration, async () => {
     const env = session({ repo: '/tmp/notes' })
-    env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p1', '--verdict', 'handle', '--name', 'notes', '--place', '/tmp/notes'])
+    env.bin(['inbox', 'add', 'https://w.slack.com/archives/C1/p1', '--verdict', 'handle', '--trusted', 'yes', '--name', 'notes', '--place', '/tmp/notes'])
     const id = rows(env)[0][0]
     const file = join(env.data, 'inbox', id + '.json')
     const item = JSON.parse(readFileSync(file, 'utf8'))
