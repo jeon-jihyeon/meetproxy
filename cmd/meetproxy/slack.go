@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -304,6 +305,10 @@ func permalink(host, channel, ts, thread string) string {
 // Direct messages to the user after --after
 // 1. The user's own messages and bots are left out
 // 2. One that mentions the user is left to the mention reader so it is not queued twice
+// 3. At most dmsPerRead conversations are read per call, the ones read longest ago first
+// 4. Only messages up to the time every conversation was last read are printed
+// 5. The mod moves the dm cursor to each message it settles so a newer one would carry it past a conversation not read yet
+// 6. A conversation that could not be read holds the rest back until it is read
 func (c cli) slackDMs(after string) error {
 	if after == "" {
 		return fmt.Errorf("%w: slack dms needs --after", errUsage)
@@ -312,14 +317,26 @@ func (c cli) slackDMs(after string) error {
 	if err != nil {
 		return err
 	}
-	found, err := client.DirectMessages(after)
+	ids, err := client.DirectConversations()
 	if err != nil {
 		return err
+	}
+	read := readDMs(c.data, ids)
+	found := c.readConversations(client, ids, read, after)
+	if err := fileio.WriteJSON(dmsFile(c.data), read); err != nil {
+		return err
+	}
+	through := c.now.Unix()
+	for _, id := range ids {
+		through = min(through, read[id])
 	}
 	users := c.users(client)
 	out := []slackMessage{}
 	for _, m := range found {
-		if !tsLess(after, m.Ts) || m.User == "" || m.User == a.User || m.BotId != "" || strings.Contains(m.Text, "<@"+a.User+">") {
+		if ts, _ := strconv.ParseFloat(m.Ts, 64); !tsLess(after, m.Ts) || ts > float64(through) {
+			continue
+		}
+		if m.User == "" || m.User == a.User || m.BotId != "" || strings.Contains(m.Text, "<@"+a.User+">") {
 			continue
 		}
 		out = append(out, slackMessage{
@@ -328,6 +345,53 @@ func (c cli) slackDMs(after string) error {
 		})
 	}
 	return c.encodeMessages(out, users)
+}
+
+// Direct conversations read in one call so a user with many never runs into rate limits every check
+const dmsPerRead = 40
+
+// Unix seconds each direct conversation was last read through
+func dmsFile(data string) string { return filepath.Join(slackDir(data), "dms.json") }
+
+// When each listed conversation was last read, zero for one never read
+// A conversation no longer listed is forgotten
+func readDMs(data string, ids []string) map[string]int64 {
+	// A lost file only makes every conversation count as never read
+	var kept map[string]int64
+	_, _ = fileio.ReadJSON(dmsFile(data), &kept)
+	read := make(map[string]int64, len(ids))
+	for _, id := range ids {
+		read[id] = kept[id]
+	}
+	return read
+}
+
+// Reads every page back to after of the conversations read longest ago and records when each was read
+// A conversation that fails keeps its last read time and a rate limit stops the rest
+func (c cli) readConversations(client slackapi.Client, ids []string, read map[string]int64, after string) []slackapi.Message {
+	order := slices.Clone(ids)
+	slices.SortStableFunc(order, func(x, y string) int { return cmp.Compare(read[x], read[y]) })
+	var out []slackapi.Message
+	for _, id := range order[:min(len(order), dmsPerRead)] {
+		msgs, truncated, err := client.History(id, after)
+		var e *slackapi.Error
+		switch {
+		case errors.As(err, &e) && e.Code == "ratelimited":
+			fmt.Fprintf(os.Stderr, "direct messages are held back since Slack rate limited reading %s\n", id)
+			return out
+		case err != nil:
+			fmt.Fprintf(os.Stderr, "direct messages are held back since %s could not be read: %v\n", id, err)
+			continue
+		case truncated:
+			fmt.Fprintf(os.Stderr, "%s had more than %d messages since the last check and the older ones are skipped\n", id, slackapi.MaxPages*100)
+		}
+		for _, m := range msgs {
+			m.Channel.Id = id
+			out = append(out, m)
+		}
+		read[id] = c.now.Unix()
+	}
+	return out
 }
 
 func (c cli) slackShared(channel string) error {

@@ -31,13 +31,10 @@ const SORTED_MS = 2 * OVERLAP_MS
 // What the binary must speak
 // A session still running an older watcher stops instead of misreading a newer binary
 const PROTOCOL = 8
-// Characters of nodloop notes given to triage
-const KNOWLEDGE_CHARS = 2000
 // Enough for the one line verdict triage answers with
 const TRIAGE_TOKENS = 200
 const TRIAGE_MS = 30_000
 const UPDATED = 'meetproxy was updated, run /reload-plugins in this session'
-const NODLOOP = 'plugin:nodloop:nodloop'
 const MARK = '_Written by Claude on behalf of the user_'
 // Longer than the two minute run timeout of triage run so a slow engine ends there first
 const BINARY_MS = 150_000
@@ -1179,7 +1176,7 @@ async function classify($, m, d, plan, linked, engine) {
   let v = { verdict: d.post === 'ask' ? 'ask' : 'handle', reason: 'delegation ' + d.delegation, place: '' }
   if (!decided || (!plan.name && candidates.length > 1)) {
     const places = candidates.map(c => ({ name: c.name, examples: c.examples }))
-    const input = { text: m.text, channel: m.channel, from: m.from, workspace: plan.name ?? '', linked, knowledge: await knowledge($, plan.name), places, followup: Boolean(m.watch) }
+    const input = { text: m.text, channel: m.channel, from: m.from, workspace: plan.name ?? '', linked, places, followup: Boolean(m.watch) }
     const t = await triage($, engine, input)
     v = decided ? { ...v, place: t.place } : t
   }
@@ -1224,20 +1221,6 @@ async function triage($, engine, input) {
 
 function parseVerdict(out) {
   return parseJSON(out) ?? { verdict: 'ask', reason: 'triage failed' }
-}
-
-// Approved nodloop notes for the place of this name when the nodloop plugin is there
-// Without nodloop there are none so its absence is no trouble
-async function knowledge($, name) {
-  if (!name) return []
-  try {
-    const r = await $.mcp.call(NODLOOP, 'knowledge_for', { producer: 'meetproxy-triage', labels: { repo: [name] } })
-    const t = text(r).trim()
-    return t ? [t.slice(0, KNOWLEDGE_CHARS)] : []
-  } catch (err) {
-    $.ui.log('meetproxy: no nodloop notes: ' + message(err), { to: 'debug' })
-    return []
-  }
 }
 
 // Handing out
@@ -1315,7 +1298,8 @@ async function pickUp($, t) {
   // A request for the user starts a turn that asks them before anything is posted
   // A take with no heartbeat for twenty minutes comes back from the tick as ask
   if (asking) $.ui.toast('meetproxy: a request needs you ' + link)
-  await $.command.run({ command: $.plugin.name + ':handle', args: pick.id + (asking ? ' --ask' : ' --auto') })
+  // Not awaited since the command lasts the whole turn and the tick must go on renewing the take meanwhile
+  $.command.run({ command: $.plugin.name + ':handle', args: pick.id + (asking ? ' --ask' : ' --auto') }).catch(err => $.ui.log('meetproxy: ' + message(err)))
 }
 
 // The rows of the place first, then priority, then age
@@ -1342,7 +1326,11 @@ async function batch($, me, rows) {
   }
   const picked = new Set(String(answer).split(',').map(a => a.trim()))
   const chosen = offered.filter(r => picked.has(label(r)))
-  for (const r of offered.filter(r => !chosen.includes(r))) await meetproxy($, ['inbox', 'hold', r.id, '--until', BATCH_HOLD, '--session', me])
+  // A hold that failed is logged since the request would be offered again on the next tick
+  for (const r of offered.filter(r => !chosen.includes(r))) {
+    const held = await meetproxy($, ['inbox', 'hold', r.id, '--until', BATCH_HOLD, '--session', me])
+    if (!held.ok) $.ui.log(`meetproxy: could not put off ${r.id}: ${firstLine(held.err) || 'hold exited ' + held.code}`)
+  }
   if (!chosen.length) return
   if (!(await meetproxy($, ['inbox', 'claim', chosen[0].id, '--session', me])).out) return
   for (const r of chosen) await $.command.run({ command: $.plugin.name + ':handle', args: r.id + ' --ask' })

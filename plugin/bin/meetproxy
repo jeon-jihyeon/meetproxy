@@ -21,14 +21,19 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 MANIFEST="${ROOT}/.claude-plugin/plugin.json"
 SRC=$(dirname -- "$ROOT")
 
-# Without a binary the guard blocks the tool call with exit 2 only while a session has a scope
-# State from before markers counts an open relay as one
+# Without a binary the guard blocks the tool call with exit 2 unless the marker directory says no session has a scope
+# State from before markers has no directory and may hold a take so it blocks too
+# A fresh install has neither inbox nor relay so nothing can be in scope and it passes
 # The path hook exits 0 to stay quiet
 fail() {
   echo "meetproxy: $1" >&2
   case "${MODE}" in
     guard)
-      if [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && ! any "${CLAUDE_PLUGIN_DATA}"/scope/* && [ -z "$(ls -A "${CLAUDE_PLUGIN_DATA}/relay/open" 2>/dev/null)" ]; then
+      if [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && [ -d "${CLAUDE_PLUGIN_DATA}/scope" ] && ! any "${CLAUDE_PLUGIN_DATA}"/scope/*; then
+        exit 0
+      fi
+      if [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && [ ! -d "${CLAUDE_PLUGIN_DATA}/scope" ] &&
+        [ ! -e "${CLAUDE_PLUGIN_DATA}/inbox" ] && [ ! -e "${CLAUDE_PLUGIN_DATA}/relay" ]; then
         exit 0
       fi
       exit 2

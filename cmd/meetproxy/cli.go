@@ -209,6 +209,7 @@ type waitingRow struct {
 const ackWithin = 24 * time.Hour
 
 // With busy the takes of the session get a heartbeat so a long turn never loses them
+// The heartbeat runs under the scope so a take it keeps always has a marker the launcher sees
 func (c cli) tick(cwd string, busy bool) error {
 	if cwd == "" {
 		return fmt.Errorf("%w: tick needs --cwd", errUsage)
@@ -216,7 +217,8 @@ func (c cli) tick(cwd string, busy bool) error {
 	root, name := locmap.Place(cwd)
 	store := inbox.New(c.data)
 	if busy && c.session != "" {
-		if err := store.Touch(c.session, c.now); err != nil {
+		touch := func() error { return store.Touch(c.session, c.now) }
+		if err := withScope(c.data, c.session, c.now, touch); err != nil {
 			return err
 		}
 	}
