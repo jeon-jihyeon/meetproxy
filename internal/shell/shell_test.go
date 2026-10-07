@@ -44,11 +44,17 @@ func TestCommands(t *testing.T) {
 		{"keeps assignments alone", "A=1", []cmd{{Env: map[string]string{"A": "1"}}}},
 		{"keeps a wrapper assignment as a word", "env A=1 gh pr view", []cmd{args("env", "A=1", "gh", "pr", "view")}},
 		{
-			"drops redirections and their targets",
+			"keeps redirection targets apart from the words",
 			"gh pr view 1 2>&1 >/dev/null <in >> log &> all 3< x",
-			[]cmd{args("gh", "pr", "view", "1")},
+			[]cmd{{Args: []string{"gh", "pr", "view", "1"}, Redirects: []string{"1", "/dev/null", "in", "log", "all", "x"}}},
 		},
-		{"keeps a quoted number before a redirection", `echo "2">x`, []cmd{args("echo", "2")}},
+		{"keeps a quoted number before a redirection", `echo "2">x`, []cmd{{Args: []string{"echo", "2"}, Redirects: []string{"x"}}}},
+		{
+			"keeps substitutions in redirection targets as written",
+			`cat < <(gh pr view) > "$(gh x)"`,
+			[]cmd{{Args: []string{"cat"}, Redirects: []string{"<(gh pr view)", "$(gh x)"}}},
+		},
+		{"keeps a command of redirections only", "> $(gh x)", []cmd{{Redirects: []string{"$(gh x)"}}}},
 		{
 			"attaches a here document to its command",
 			"git commit -F - <<EOF\nfix: a; b\n$(rm x)\nEOF\ngit push",

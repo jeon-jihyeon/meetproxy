@@ -24,10 +24,10 @@ import (
 const slackAPIEnv = "MEETPROXY_SLACK_API"
 
 // User scopes every Slack command needs
-var slackScopes = []string{"search:read", "channels:history", "groups:history", "im:history", "mpim:history", "users:read", "chat:write"}
-
-// Asked for in the manifest ahead of a feature that reacts to messages
-const reactionScope = "reactions:write"
+var slackScopes = []string{
+	"search:read", "channels:history", "groups:history", "im:history", "mpim:history", "users:read", "chat:write",
+	"reactions:write", "channels:read", "groups:read", "im:read", "mpim:read",
+}
 
 const (
 	// A token is a few dozen characters so more on stdin is not a token
@@ -224,6 +224,69 @@ func tsLess(a, b string) bool {
 	return x < y
 }
 
+// A message link, within its thread when thread names another message
+func permalink(host, channel, ts, thread string) string {
+	link := "https://" + host + "/archives/" + channel + "/p" + strings.Replace(ts, ".", "", 1)
+	if thread != "" && thread != ts {
+		link += "?thread_ts=" + thread + "&cid=" + channel
+	}
+	return link
+}
+
+func (c cli) slackShared(channel string) error {
+	client, err := c.slack()
+	if err != nil {
+		return err
+	}
+	shared, err := client.Shared(channel)
+	if err != nil {
+		return err
+	}
+	return writeJSON(c.out, map[string]bool{"shared": shared})
+}
+
+var validReaction = regexp.MustCompile(`^[a-z0-9_+-]{1,64}$`)
+
+func (c cli) slackReact(link, name string) error {
+	at, err := parseSlackLink(link)
+	if err != nil {
+		return err
+	}
+	if !validReaction.MatchString(name) {
+		return fmt.Errorf("%w: --react must name an emoji such as eyes, not %q", errUsage, name)
+	}
+	client, err := c.slack()
+	if err != nil {
+		return err
+	}
+	return client.React(at.channel, at.ts, name)
+}
+
+// Replaces with the text on stdin or deletes a reply meetproxy posted
+
+func (c cli) slackEdit(reply string, replace bool) error {
+	at, err := parseSlackLink(reply)
+	if err != nil {
+		return err
+	}
+	client, err := c.slack()
+	if err != nil {
+		return err
+	}
+	if !replace {
+		return client.Delete(at.channel, at.ts)
+	}
+	b, err := io.ReadAll(c.in)
+	if err != nil {
+		return err
+	}
+	text := strings.TrimSpace(string(b))
+	if text == "" {
+		return fmt.Errorf("%w: slack update needs the text on stdin", errUsage)
+	}
+	return client.Update(at.channel, at.ts, text)
+}
+
 func (c cli) slackRead(link string, limit int) error {
 	at, err := parseSlackLink(link)
 	if err != nil {
@@ -260,14 +323,15 @@ func (c cli) slackPost(link string) (int, error) {
 	if text == "" {
 		return exitUsage, fmt.Errorf("%w: slack post needs the text on stdin", errUsage)
 	}
-	client, err := c.slack()
+	client, a, err := c.slackSession()
 	if err != nil {
 		return exitFailed, err
 	}
-	if err := client.Post(at.channel, at.thread, text); err != nil {
+	ts, err := client.Post(at.channel, at.thread, text)
+	if err != nil {
 		return exitFailed, err
 	}
-	fmt.Fprintln(c.out, "posted")
+	fmt.Fprintln(c.out, permalink(a.Host, at.channel, ts, at.thread))
 	return 0, nil
 }
 
@@ -284,7 +348,7 @@ func (c cli) slackSession() (slackapi.Client, slackapi.Auth, error) {
 func (c cli) slackManifest() error {
 	manifest := map[string]any{
 		"display_information": map[string]string{"name": "meetproxy", "description": "Reads mentions and replies in threads for the user through meetproxy"},
-		"oauth_config":        map[string]any{"scopes": map[string][]string{"user": append(slices.Clone(slackScopes), reactionScope)}},
+		"oauth_config":        map[string]any{"scopes": map[string][]string{"user": slices.Clone(slackScopes)}},
 		"settings":            map[string]bool{"org_deploy_enabled": false, "socket_mode_enabled": false, "token_rotation_enabled": false},
 	}
 	b, err := json.Marshal(manifest)

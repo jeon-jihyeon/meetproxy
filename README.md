@@ -37,7 +37,7 @@ From then on, while any session is open, meetproxy checks every connected source
 
 | Source | Receives | Sends | Connected by |
 |---|---|---|---|
-| GitHub | mentions in comments, and review requests | a comment, or a reply in the review thread | a logged in `gh` |
+| GitHub | mentions in comments, review requests, and comments of others on your own pull requests | a comment, or a reply in the review thread | a logged in `gh` |
 
 ## How it works
 

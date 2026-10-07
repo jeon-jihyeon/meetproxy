@@ -29,7 +29,8 @@ func TestRun_SlackManifest(t *testing.T) {
 		URL string `json:"url"`
 	}
 	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
-	assert.Equal(t, []string{"search:read", "channels:history", "groups:history", "im:history", "mpim:history", "users:read", "chat:write", "reactions:write"}, got.Manifest.OAuth.Scopes.User)
+	assert.Equal(t, []string{"search:read", "channels:history", "groups:history", "im:history", "mpim:history", "users:read", "chat:write",
+		"reactions:write", "channels:read", "groups:read", "im:read", "mpim:read"}, got.Manifest.OAuth.Scopes.User)
 	assert.True(t, strings.HasPrefix(got.URL, "https://api.slack.com/apps?new_app=1&manifest_json=%7B%22"), got.URL)
 }
 
