@@ -1,0 +1,59 @@
+name: Bug report
+description: Something meetproxy did wrong or failed to do
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. For a security problem use private reporting from the Security tab instead.
+        Leave out tokens, message text and links you would not post publicly.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what meetproxy did, and what you expected instead
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+  - type: input
+    id: claude
+    attributes:
+      label: Claude Code version
+      description: Output of `claude --version`
+      placeholder: 2.1.290 (Claude Code)
+    validations:
+      required: true
+  - type: input
+    id: plugin
+    attributes:
+      label: meetproxy version
+      placeholder: 0.1.8
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - macOS arm64
+        - macOS amd64
+        - Linux amd64
+        - Linux arm64
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: /meetproxy:status output
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Anything else
+      render: text

@@ -1,0 +1,19 @@
+name: Feature request
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are carrying by hand today
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What meetproxy should do
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried
