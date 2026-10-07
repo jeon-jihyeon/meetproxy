@@ -31,20 +31,24 @@ linters:
     # Imports point down only
     # 1. cmd uses everything and nothing imports cmd
     # 4. any package may use fileio and shell which use no package of the module
+    # 5. slackapi speaks HTTP alone and only cmd uses it
     depguard:
       rules:
         base:
           files:
             - "**/internal/fileio/**"
             - "**/internal/shell/**"
+            - "**/internal/slackapi/**"
             - "!$test"
           deny:
             - pkg: github.com/jeon-jihyeon/meetproxy
-              desc: fileio and shell use no package of the module
+              desc: fileio, shell and slackapi use no package of the module
         leaf:
           files:
             - "**/internal/locmap/**"
           deny:
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/slackapi
+              desc: only cmd calls Slack
             - pkg: github.com/jeon-jihyeon/meetproxy/cmd
               desc: nothing imports cmd
   exclusions:
