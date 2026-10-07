@@ -1,0 +1,23 @@
+name: Feature request
+description: A source, a delegation or a behavior meetproxy should have
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are carrying by hand today
+      description: The request you still relay yourself, and where it comes from
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What meetproxy should do
+      description: Who asks, what the session does, where the answer goes, and whether it should ask you first
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried
+      description: A delegation, an allow list entry or another tool that came close

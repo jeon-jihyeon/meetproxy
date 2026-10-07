@@ -24,5 +24,22 @@ archives:
 checksum:
   name_template: checksums.txt
 
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge"
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+
+# The release workflow publishes the draft after attesting the archives
 release:
-  draft: false
+  draft: true

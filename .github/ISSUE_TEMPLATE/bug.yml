@@ -1,0 +1,66 @@
+name: Bug report
+description: Something meetproxy did wrong or failed to do
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. For a security problem use private reporting from the Security tab instead.
+        Leave out tokens, message text and links you would not post publicly.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what meetproxy did, and what you expected instead
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. /meetproxy:delegate ...
+        2. A teammate mentions me in a thread
+        3. ...
+  - type: input
+    id: claude
+    attributes:
+      label: Claude Code version
+      description: Output of `claude --version`
+      placeholder: 2.1.290 (Claude Code)
+    validations:
+      required: true
+  - type: input
+    id: plugin
+    attributes:
+      label: meetproxy version
+      description: The version row of `/meetproxy:status`, or the version in `/plugin`
+      placeholder: 0.1.8
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - macOS arm64
+        - macOS amd64
+        - Linux amd64
+        - Linux arm64
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: /meetproxy:status output
+      description: Paste the table `/meetproxy:status` shows. Remove names or links you do not want public
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Anything else
+      description: "Hook errors, a guard denial message or the launcher output such as `meetproxy: could not fetch ...`"
+      render: text
