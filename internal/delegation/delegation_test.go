@@ -119,15 +119,20 @@ func TestStore(t *testing.T) {
 
 	ds, err := s.List()
 	require.NoError(t, err)
-	require.Len(t, ds, 4)
-	assert.Equal(t, []string{"pr", "default-review", "default-review-request", "default"}, []string{ds[0].Id, ds[1].Id, ds[2].Id, ds[3].Id})
+	ids := []string{}
+	for _, d := range ds {
+		ids = append(ids, d.Id)
+	}
+	assert.Equal(t, []string{"pr", "default-review", "default-review-request", "default-dm", "default-own-pr", "default"}, ids)
 	assert.Equal(t, delegation.PostAsk, ds[0].Post, "the same id replaces the delegation")
 
 	require.NoError(t, s.Remove(" PR "), "the id is matched as it was stored")
 	assert.Error(t, s.Remove("pr"))
 	ds, err = s.List()
 	require.NoError(t, err)
-	assert.Equal(t, []delegation.Delegation{delegation.DefaultReview, delegation.DefaultReviewRequest, delegation.Default}, ds)
+	assert.Equal(t, []delegation.Delegation{
+		delegation.DefaultReview, delegation.DefaultReviewRequest, delegation.DefaultDM, delegation.DefaultOwnPR, delegation.Default,
+	}, ds)
 }
 
 // Sessions adding delegations at once never lose one
@@ -149,7 +154,7 @@ func TestStorePut_Race(t *testing.T) {
 	ds, err := s.List()
 
 	require.NoError(t, err)
-	assert.Len(t, ds, writers+3)
+	assert.Len(t, ds, writers+5)
 }
 
 func TestPick(t *testing.T) {
@@ -257,4 +262,107 @@ func TestPullRequest(t *testing.T) {
 	assert.Equal(t, []string{"https://github.com/Buzzvil/buzzscreen-api/pull/7880", "buzzscreen-api"}, []string{link, repo})
 	link, repo = delegation.PullRequest("no link")
 	assert.Equal(t, []string{"", ""}, []string{link, repo})
+}
+
+func TestPick_Sources(t *testing.T) {
+	t.Parallel()
+	ds, err := delegation.New(t.TempDir()).List()
+	require.NoError(t, err)
+	tcs := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{"a direct message is answered", delegation.WhenDM, "default-dm"},
+		{"a comment on the user's own pull request is answered after asking", delegation.WhenOwnPR, "default-own-pr"},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, ok := delegation.Pick(ds, tc.key, delegation.Message{Text: "where is retry"})
+			require.True(t, ok)
+			assert.Equal(t, tc.want, d.Id)
+			assert.True(t, d.Triaged())
+		})
+	}
+}
+
+func TestDelegationTriaged(t *testing.T) {
+	t.Parallel()
+	tcs := []struct {
+		name string
+		d    delegation.Delegation
+		want bool
+	}{
+		{"answers to mentions", delegation.Default, true},
+		{"answers to direct messages", delegation.DefaultDM, true},
+		{"answers on own pull requests", delegation.DefaultOwnPR, true},
+		{"reviews name their task", delegation.DefaultReview, false},
+		{"channel delegations name their task", delegation.Delegation{When: delegation.WhenChannel, Do: delegation.DoAnswer}, false},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, tc.d.Triaged())
+		})
+	}
+}
+
+func TestDepth(t *testing.T) {
+	t.Parallel()
+	tcs := []struct {
+		name string
+		text string
+		want string
+	}{
+		{"quick by default", "where is retry", delegation.DepthQuick},
+		{"quick when asked", "[quick] where is retry", delegation.DepthQuick},
+		{"deep when asked in any case", "[Deep] why is it slow", delegation.DepthDeep},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, delegation.Depth(tc.text))
+		})
+	}
+}
+
+func TestDigest(t *testing.T) {
+	t.Parallel()
+	tcs := []struct {
+		name string
+		a, b string
+		same bool
+	}{
+		{"repeats of an alert differ in numbers, times and links", "Triggered: cpu 93% on host-1 at 10:31 <https://dd/1|x>", "triggered: CPU 97% on host-2 at 11:02:10 https://dd/2", true},
+		{"other words differ", "Triggered: cpu", "Recovered: cpu", false},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a, b := delegation.Digest(tc.a), delegation.Digest(tc.b)
+			assert.Len(t, a, 12)
+			assert.Equal(t, tc.same, a == b)
+		})
+	}
+}
+
+func TestDelegationLimits(t *testing.T) {
+	t.Parallel()
+	tcs := []struct {
+		name            string
+		d               delegation.Delegation
+		perHour, dedupe int
+	}{
+		{"a channel delegation has defaults", delegation.Delegation{When: delegation.WhenChannel}, 20, 30},
+		{"a channel delegation may set its own", delegation.Delegation{When: delegation.WhenChannel, MaxPerHour: 5, DedupeMinutes: 10}, 5, 10},
+		{"mentions have no limit", delegation.Default, 0, 0},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			perHour, dedupe := tc.d.Limits()
+			assert.Equal(t, []int{tc.perHour, tc.dedupe}, []int{perHour, dedupe})
+		})
+	}
 }

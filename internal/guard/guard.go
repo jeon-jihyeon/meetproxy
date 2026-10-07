@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -46,7 +47,8 @@ var (
 // 2. ErrUnknownDest: the call posts or may post somewhere that cannot be told
 // 3. ErrSettings: the call changes what meetproxy takes or where it may post
 // Fails closed so an unknown posting tool or command is never let through silently
-func Destinations(tool string, input json.RawMessage) ([]Post, error) {
+// data is the plugin data directory whose files a command may not edit and empty when unknown
+func Destinations(tool string, input json.RawMessage, data string) ([]Post, error) {
 	name := strings.ToLower(tool)
 	switch {
 	case tool == "Bash":
@@ -56,7 +58,9 @@ func Destinations(tool string, input json.RawMessage) ([]Post, error) {
 		if err := json.Unmarshal(input, &in); err != nil {
 			return nil, err
 		}
-		return bash(in.Command)
+		return bash(in.Command, data)
+	case tool == "Write" || tool == "Edit" || tool == "NotebookEdit":
+		return nil, fileEdit(input, data)
 	// The post tool makes the same check before it sends
 	case strings.HasPrefix(name, "mcp__meetproxy__"):
 		return nil, nil
@@ -68,6 +72,32 @@ func Destinations(tool string, input json.RawMessage) ([]Post, error) {
 		return nil, unknown("a tool that may post " + tool)
 	}
 	return nil, nil
+}
+
+// A file tool writing in the data directory changes what meetproxy takes or where it may post
+// Any other path returns at once so editing code never waits on state
+func fileEdit(input json.RawMessage, data string) error {
+	if data == "" {
+		return nil
+	}
+	var in struct {
+		FilePath     string `json:"file_path"`
+		NotebookPath string `json:"notebook_path"`
+	}
+	if err := json.Unmarshal(input, &in); err != nil {
+		return err
+	}
+	data = filepath.Clean(data)
+	for _, p := range []string{in.FilePath, in.NotebookPath} {
+		if p == "" {
+			continue
+		}
+		p = filepath.Clean(p)
+		if p == data || strings.HasPrefix(p, data+string(filepath.Separator)) {
+			return fmt.Errorf("a file edit in the meetproxy data directory %w", ErrSettings)
+		}
+	}
+	return nil
 }
 
 // Reason to deny posts while a relay is open and empty when every post passes

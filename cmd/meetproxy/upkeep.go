@@ -13,6 +13,7 @@ import (
 	"github.com/jeon-jihyeon/meetproxy/internal/fileio"
 	"github.com/jeon-jihyeon/meetproxy/internal/inbox"
 	"github.com/jeon-jihyeon/meetproxy/internal/locmap"
+	"github.com/jeon-jihyeon/meetproxy/internal/posts"
 	"github.com/jeon-jihyeon/meetproxy/internal/relay"
 )
 
@@ -115,10 +116,32 @@ func recordHookFailure(data, hook string, failure error, now time.Time) error {
 }
 
 type inboxCounts struct {
-	Waiting int `json:"waiting"`
-	Taken   int `json:"taken"`
-	Held    int `json:"held"`
-	Corrupt int `json:"corrupt"`
+	Waiting  int `json:"waiting"`
+	Taken    int `json:"taken"`
+	Held     int `json:"held"`
+	Question int `json:"question"`
+	Corrupt  int `json:"corrupt"`
+}
+
+// A held request and when it is asked about again
+type heldRow struct {
+	Id   string `json:"id"`
+	Name string `json:"name,omitempty"`
+	Link string `json:"link"`
+	// Zero waits for the user
+	Until time.Time `json:"until,omitzero"`
+}
+
+// Records status counts within the windows they are kept for
+type history struct {
+	// Replies in the ledger of the last 30 days
+	Posts int `json:"posts"`
+	// Of them retracted
+	Retracted int `json:"retracted"`
+	// Messages not queued in the last 3 days
+	Ignored int `json:"ignored"`
+	// Threads read for follow-ups
+	Watching int `json:"watching"`
 }
 
 type sizes struct {
@@ -135,6 +158,8 @@ type status struct {
 	Sources    map[string]sourceHealth `json:"sources"`
 	Hooks      []hookFailure           `json:"hooks,omitempty"`
 	Inbox      inboxCounts             `json:"inbox"`
+	Held       []heldRow               `json:"held"`
+	History    history                 `json:"history"`
 	RelaysOpen int                     `json:"relays_open"`
 	Bytes      sizes                   `json:"bytes"`
 }
@@ -147,10 +172,14 @@ func (c cli) status() error {
 		return err
 	}
 	var counts inboxCounts
+	held := []heldRow{}
 	for _, it := range items {
 		switch {
 		case it.Waiting(c.now) && it.Status == inbox.StatusHeld:
 			counts.Held++
+			held = append(held, heldRow{it.Id, it.Name, it.Link, it.HeldUntil})
+		case it.Status == inbox.StatusQuestion && !it.Unanswered(c.now):
+			counts.Question++
 		case it.Waiting(c.now):
 			counts.Waiting++
 		case it.Status == inbox.StatusTaken:
@@ -160,17 +189,41 @@ func (c cli) status() error {
 	if counts.Corrupt, err = store.Corrupt(); err != nil {
 		return err
 	}
+	hist, err := c.history(store)
+	if err != nil {
+		return err
+	}
 	h := readHealth(c.data)
 	open, _ := os.ReadDir(filepath.Join(c.data, "relay", "open"))
 	return json.NewEncoder(c.out).Encode(status{
 		Protocol: protocol, Version: version, Paused: store.Paused(), Slack: readSlackState(c.data, true),
-		Sources: h.Sources, Hooks: h.Hooks, Inbox: counts, RelaysOpen: len(open),
+		Sources: h.Sources, Hooks: h.Hooks, Inbox: counts, Held: held, History: hist, RelaysOpen: len(open),
 		Bytes: sizes{
 			Map:      size(filepath.Join(c.data, "map.jsonl")),
 			Closed:   size(filepath.Join(c.data, "relay", "closed.jsonl")),
 			Observed: dirSize(filepath.Join(c.data, "relay", "observed")),
 		},
 	})
+}
+
+func (c cli) history(store inbox.Store) (history, error) {
+	ledger := posts.New(c.data)
+	ps, err := ledger.List(0)
+	if err != nil {
+		return history{}, err
+	}
+	ignored, err := store.IgnoredSince(c.now, 0)
+	if err != nil {
+		return history{}, err
+	}
+	watch, err := ledger.Watches(c.now)
+	h := history{Posts: len(ps), Ignored: len(ignored), Watching: len(watch)}
+	for _, p := range ps {
+		if !p.RetractedAt.IsZero() {
+			h.Retracted++
+		}
+	}
+	return h, err
 }
 
 func size(file string) int64 {
@@ -229,7 +282,8 @@ func (c cli) tidy(daily bool) error {
 		return err
 	}
 	compacted, err := locmap.New(c.data).Compact()
-	err = errors.Join(err, relay.New(c.data).Prune(c.now), pruneScope(c.data, c.now))
+	err = errors.Join(err, relay.New(c.data).Prune(c.now), pruneScope(c.data, c.now),
+		inbox.New(c.data).PruneIgnored(c.now), posts.New(c.data).Prune(c.now))
 	if err != nil {
 		return err
 	}

@@ -3,12 +3,12 @@ name: relay
 description: Relay a request from a Slack thread or a GitHub pull request or issue to this session and post the refined answer back without the user carrying it by hand. Run with the request link as the argument.
 disable-model-invocation: true
 argument-hint: "<Slack or GitHub link>"
-allowed-tools: Read, Bash(meetproxy open *), Bash(meetproxy close *), Bash(meetproxy locate *), Bash(meetproxy map format *), Bash(gh pr view *), Bash(gh issue view *), Bash(gh api repos/*/pulls/*/comments), Bash(gh api repos/*/issues/*/comments), mcp__meetproxy__post, mcp__plugin_slack_slack__slack_read_thread, mcp__plugin_slack_slack__slack_read_channel, mcp__plugin_slack_slack__slack_search_public_and_private, mcp__plugin_slack_slack__slack_read_user_profile
+allowed-tools: Read, Bash(git rev-parse *), Bash(git branch -r --contains *), Bash(meetproxy open *), Bash(meetproxy close *), Bash(meetproxy locate *), Bash(meetproxy map format *), Bash(gh pr view *), Bash(gh issue view *), Bash(gh api repos/*/pulls/*/comments), Bash(gh api repos/*/issues/*/comments), mcp__meetproxy__post, mcp__plugin_slack_slack__slack_read_thread, mcp__plugin_slack_slack__slack_read_channel, mcp__plugin_slack_slack__slack_search_public_and_private, mcp__plugin_slack_slack__slack_read_user_profile
 ---
 
 # relay
 
-Relay one request link end to end without asking the user anything. The handle skill may also give a place, the absolute root to work in.
+Relay one request link end to end without asking the user anything. The handle skill may also give a place, the absolute root to work in, and a depth, `quick` unless the request asked for `[deep]`.
 
 ## Rules
 
@@ -26,15 +26,19 @@ Relay one request link end to end without asking the user anything. The handle s
    - GitHub link: [references/github.md](references/github.md)
 3. Ask back
    - If identifying details needed to start are missing, ask the requester in one message.
-   - Post the question with the rules in step 6 and leave the relay open.
-   - When the requester answers, the user runs this again with the same link.
+   - Post the question with the rules in step 6, giving the post tool `kind` `question`.
+   - Run from the handle skill, stop here and let it settle the request. Run by hand, leave the relay open. meetproxy reads the thread for three days and brings the requester's answer back as the same request.
 4. Point to where to look
    - Run `meetproxy locate --data "${CLAUDE_PLUGIN_DATA}" <3 to 6 keywords>`.
    - Output columns are `score name absolute-path past-topics`.
    - Candidates are a starting point. Judge relevance yourself and search directly when there are none.
 5. Handle and refine
    - Base the answer on the actual code and documents.
-   - Refine for the recipient: conclusion first, one piece of evidence they can check, and a first person hedge such as `I'm not sure, but` when confidence is low.
+   - Refine for the recipient: conclusion first, then evidence they can check, and a first person hedge such as `I'm not sure, but` when confidence is low.
+   - `quick`: one paragraph with one piece of evidence. `deep`: a short answer with up to four pieces of evidence.
+   - Cite evidence as permalinks a reader can open
+     1. Code: `https://github.com/<owner>/<repo>/blob/<sha>/<path>#L<from>-L<to>` with the sha from `git rev-parse HEAD`, only when `git branch -r --contains <sha>` names a remote branch. Otherwise name the path and function without a link
+     2. Slack: the permalink of a message you read
    - Mention code paths and function names only to developers.
 6. Post
    - First write it the way the user writes that kind

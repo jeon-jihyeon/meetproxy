@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jeon-jihyeon/meetproxy/internal/fileio"
+	"github.com/jeon-jihyeon/meetproxy/internal/posts"
 	"github.com/jeon-jihyeon/meetproxy/internal/slackapi"
 )
 
@@ -24,10 +25,13 @@ import (
 const slackAPIEnv = "MEETPROXY_SLACK_API"
 
 // User scopes every Slack command needs
-var slackScopes = []string{"search:read", "channels:history", "groups:history", "im:history", "mpim:history", "users:read", "chat:write"}
+var slackScopes = []string{
+	"search:read", "channels:history", "groups:history", "im:history", "mpim:history", "users:read", "chat:write",
+	"reactions:write", "channels:read", "groups:read", "im:read", "mpim:read",
+}
 
-// Asked for in the manifest ahead of a feature that reacts to messages
-const reactionScope = "reactions:write"
+// The line every post of meetproxy ends with
+const mark = "_Written by Claude on behalf of the user_"
 
 const (
 	// A token is a few dozen characters so more on stdin is not a token
@@ -231,9 +235,10 @@ func tsLess(a, b string) bool {
 	return x < y
 }
 
-// Whether the user replied in the thread of the link after --ts
-// Replies by hand and through meetproxy both count
-func (c cli) slackAnswered(link, ts string) error {
+// Whether the thread of the link already has an answer after --ts
+// 1. A reply of the user by hand or through meetproxy
+// 2. A reply of anyone that ends with the meetproxy mark such as one a teammate's meetproxy posted
+func (c cli) slackCovered(link, ts string) error {
 	at, err := parseSlackLink(link)
 	if err != nil {
 		return err
@@ -249,8 +254,137 @@ func (c cli) slackAnswered(link, ts string) error {
 	if err != nil {
 		return err
 	}
-	answered := slices.ContainsFunc(replies, func(m slackapi.Message) bool { return m.User == a.User && tsLess(ts, m.Ts) })
-	return writeJSON(c.out, map[string]bool{"answered": answered})
+	covered := slices.ContainsFunc(replies, func(m slackapi.Message) bool {
+		return tsLess(ts, m.Ts) && (m.User == a.User || strings.HasSuffix(strings.TrimSpace(m.Text), mark))
+	})
+	return writeJSON(c.out, map[string]bool{"covered": covered})
+}
+
+// Replies in the thread of the link after --after that others wrote and meetproxy did not post
+// Each links to itself within the thread
+func (c cli) slackReplies(link, after string) error {
+	at, err := parseSlackLink(link)
+	if err != nil {
+		return err
+	}
+	if after == "" {
+		return fmt.Errorf("%w: slack replies needs --after", errUsage)
+	}
+	client, a, err := c.slackSession()
+	if err != nil {
+		return err
+	}
+	replies, err := client.Replies(at.channel, at.thread, after, repliesRead)
+	if err != nil {
+		return err
+	}
+	users := c.users(client)
+	out := []slackMessage{}
+	for _, m := range replies {
+		if !tsLess(after, m.Ts) || m.User == "" || m.User == a.User || strings.HasSuffix(strings.TrimSpace(m.Text), mark) {
+			continue
+		}
+		out = append(out, slackMessage{
+			Author: users.name(m.User), Channel: at.channel, From: m.User, Ts: m.Ts, Text: m.Text,
+			Link: permalink(a.Host, at.channel, m.Ts, at.thread),
+		})
+	}
+	return c.encodeMessages(out, users)
+}
+
+// A message link, within its thread when thread names another message
+func permalink(host, channel, ts, thread string) string {
+	link := "https://" + host + "/archives/" + channel + "/p" + strings.Replace(ts, ".", "", 1)
+	if thread != "" && thread != ts {
+		link += "?thread_ts=" + thread + "&cid=" + channel
+	}
+	return link
+}
+
+// Direct messages to the user after --after
+// 1. The user's own messages and bots are left out
+// 2. One that mentions the user is left to the mention reader so it is not queued twice
+func (c cli) slackDMs(after string) error {
+	if after == "" {
+		return fmt.Errorf("%w: slack dms needs --after", errUsage)
+	}
+	client, a, err := c.slackSession()
+	if err != nil {
+		return err
+	}
+	found, err := client.DirectMessages(after)
+	if err != nil {
+		return err
+	}
+	users := c.users(client)
+	out := []slackMessage{}
+	for _, m := range found {
+		if !tsLess(after, m.Ts) || m.User == "" || m.User == a.User || m.BotId != "" || strings.Contains(m.Text, "<@"+a.User+">") {
+			continue
+		}
+		out = append(out, slackMessage{
+			Author: users.name(m.User), Channel: m.Channel.Id, From: m.User, Ts: m.Ts, Text: m.Text,
+			Link: permalink(a.Host, m.Channel.Id, m.Ts, ""),
+		})
+	}
+	return c.encodeMessages(out, users)
+}
+
+func (c cli) slackShared(channel string) error {
+	client, err := c.slack()
+	if err != nil {
+		return err
+	}
+	shared, err := client.Shared(channel)
+	if err != nil {
+		return err
+	}
+	return writeJSON(c.out, map[string]bool{"shared": shared})
+}
+
+var validReaction = regexp.MustCompile(`^[a-z0-9_+-]{1,64}$`)
+
+func (c cli) slackReact(link, name string) error {
+	at, err := parseSlackLink(link)
+	if err != nil {
+		return err
+	}
+	if !validReaction.MatchString(name) {
+		return fmt.Errorf("%w: --react must name an emoji such as eyes, not %q", errUsage, name)
+	}
+	client, err := c.slack()
+	if err != nil {
+		return err
+	}
+	return client.React(at.channel, at.ts, name)
+}
+
+// Replaces with the text on stdin or deletes a reply meetproxy posted
+// Only a reply the ledger holds may change so a request can never make meetproxy edit another message
+func (c cli) slackEdit(reply string, replace bool) error {
+	at, err := parseSlackLink(reply)
+	if err != nil {
+		return err
+	}
+	if _, err := posts.New(c.data).Find(reply); err != nil {
+		return err
+	}
+	client, err := c.slack()
+	if err != nil {
+		return err
+	}
+	if !replace {
+		return client.Delete(at.channel, at.ts)
+	}
+	b, err := io.ReadAll(c.in)
+	if err != nil {
+		return err
+	}
+	text := strings.TrimSpace(string(b))
+	if text == "" {
+		return fmt.Errorf("%w: slack update needs the text on stdin", errUsage)
+	}
+	return client.Update(at.channel, at.ts, text)
 }
 
 // The text of the thread a message link points at, one line per message
@@ -315,14 +449,15 @@ func (c cli) slackPost(link string) (int, error) {
 	if !allowed {
 		return c.verdict(false)
 	}
-	client, err := c.slack()
+	client, a, err := c.slackSession()
 	if err != nil {
 		return exitFailed, err
 	}
-	if err := client.Post(at.channel, at.thread, text); err != nil {
+	ts, err := client.Post(at.channel, at.thread, text)
+	if err != nil {
 		return exitFailed, err
 	}
-	fmt.Fprintln(c.out, "posted")
+	fmt.Fprintln(c.out, permalink(a.Host, at.channel, ts, at.thread))
 	return 0, nil
 }
 
@@ -339,7 +474,7 @@ func (c cli) slackSession() (slackapi.Client, slackapi.Auth, error) {
 func (c cli) slackManifest() error {
 	manifest := map[string]any{
 		"display_information": map[string]string{"name": "meetproxy", "description": "Reads mentions and replies in threads for the user through meetproxy"},
-		"oauth_config":        map[string]any{"scopes": map[string][]string{"user": append(slices.Clone(slackScopes), reactionScope)}},
+		"oauth_config":        map[string]any{"scopes": map[string][]string{"user": slices.Clone(slackScopes)}},
 		"settings":            map[string]bool{"org_deploy_enabled": false, "socket_mode_enabled": false, "token_rotation_enabled": false},
 	}
 	b, err := json.Marshal(manifest)
