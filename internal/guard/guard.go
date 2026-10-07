@@ -11,20 +11,42 @@ import (
 	"github.com/jeon-jihyeon/meetproxy/internal/dest"
 )
 
-var ErrUnknownDest = errors.New("posting to an unknown destination, name the repository or channel")
+var (
+	ErrUnknownDest = errors.New("posting to an unknown destination, name the repository or channel")
+	ErrSettings    = errors.New("changes meetproxy settings, ask the user to run it")
+)
 
 func unknown(why string) error { return fmt.Errorf("%w: %s", ErrUnknownDest, why) }
+
+// One post of a tool call
+type Post struct {
+	At  dest.Location
+	Act string
+}
+
+const (
+	ActComment = ""        // a comment, a message or any other write
+	ActApprove = "approve" // an approving review
+	ActMerge   = "merge"
+	ActClose   = "close"  // closing or archiving
+	ActDelete  = "delete" // deleting anything
+)
 
 var (
 	slackReads  = regexp.MustCompile(`_(?:read|search|list|get)_|_draft$`)
 	githubReads = regexp.MustCompile(`__(?:get|list|search)_`)
+	// The tool part of an MCP tool name that only reads
+	toolReads = regexp.MustCompile(`(?i)__(?:get|list|search|read|fetch|find|query|view|lookup)`)
+	// Words in an MCP tool name that may write somewhere the guard cannot tell
+	toolWrites = regexp.MustCompile(`(?i)(?:post|send|comment|create|update|save|merge|delete|approve|reply|publish|share|submit|upload|schedule|add|remove|edit|write)`)
 )
 
 // Where a tool call posts
 // 1. Nothing and no error: the call does not post
 // 2. ErrUnknownDest: the call posts or may post somewhere that cannot be told
+// 3. ErrSettings: the call changes what meetproxy takes or where it may post
 // Fails closed so an unknown posting tool or command is never let through silently
-func Destinations(tool string, input json.RawMessage) ([]dest.Location, error) {
+func Destinations(tool string, input json.RawMessage) ([]Post, error) {
 	name := strings.ToLower(tool)
 	switch {
 	case tool == "Bash":
@@ -35,36 +57,56 @@ func Destinations(tool string, input json.RawMessage) ([]dest.Location, error) {
 			return nil, err
 		}
 		return bash(in.Command)
+	// The post tool makes the same check before it sends
+	case strings.HasPrefix(name, "mcp__meetproxy__"):
+		return nil, nil
 	case strings.Contains(name, "slack"):
 		return slackPost(name, input)
 	case strings.HasPrefix(name, "mcp__") && strings.Contains(name, "github"):
 		return githubPost(name, input)
+	case strings.HasPrefix(name, "mcp__") && toolWrites.MatchString(name) && !toolReads.MatchString(name):
+		return nil, unknown("a tool that may post " + tool)
 	}
 	return nil, nil
 }
 
-// Reason to deny posting to locs while a relay is open and empty when every location passes
-// 1. The origin covers its own thread or channel
-// 2. The target covers only the pull request or issue it names
-// 3. Anything else needs an allow list entry
-func Decide(locs []dest.Location, origin, target dest.Location, allowed func(dest.Location) (bool, error)) (string, error) {
-	for _, l := range locs {
-		if origin.Covers(l) || target.Covers(l) {
+// Reason to deny posts while a relay is open and empty when every post passes
+// 1. Merging, closing and deleting are left to the user
+// 2. Approving needs a delegation that lets the review approve
+// 3. The origin covers its own thread or channel
+// 4. The target covers only the pull request or issue it names
+// 5. Anything else needs an allow list entry
+func Decide(posts []Post, origin, target dest.Location, mayApprove bool, allowed func(dest.Location) (bool, error)) (string, error) {
+	for _, p := range posts {
+		switch {
+		case p.Act == ActMerge || p.Act == ActClose || p.Act == ActDelete:
+			return "a " + p.Act + " of " + p.At.String() + " is left to the user", nil
+		case p.Act == ActApprove && !mayApprove:
+			return "approving " + p.At.String() + " is not delegated", nil
+		case origin.Covers(p.At) || target.Covers(p.At):
 			continue
 		}
-		ok, err := allowed(l)
+		ok, err := allowed(p.At)
 		if err != nil {
 			return "", err
 		}
 		if !ok {
-			return l.String() + " is not allowed", nil
+			return p.At.String() + " is not allowed", nil
 		}
 	}
 	return "", nil
 }
 
+func postsAt(locs []dest.Location, act string) []Post {
+	out := make([]Post, 0, len(locs))
+	for _, l := range locs {
+		out = append(out, Post{At: l, Act: act})
+	}
+	return out
+}
+
 // Reads and drafts do not post and every other Slack tool posts to its channel
-func slackPost(name string, input json.RawMessage) ([]dest.Location, error) {
+func slackPost(name string, input json.RawMessage) ([]Post, error) {
 	if slackReads.MatchString(name) {
 		return nil, nil
 	}
@@ -78,11 +120,11 @@ func slackPost(name string, input json.RawMessage) ([]dest.Location, error) {
 	if !ok {
 		return nil, unknown("a Slack post without a channel")
 	}
-	return []dest.Location{loc}, nil
+	return []Post{{At: loc}}, nil
 }
 
 // Reads do not post and every other GitHub tool posts to its repository and number
-func githubPost(name string, input json.RawMessage) ([]dest.Location, error) {
+func githubPost(name string, input json.RawMessage) ([]Post, error) {
 	if githubReads.MatchString(name) {
 		return nil, nil
 	}
@@ -91,6 +133,8 @@ func githubPost(name string, input json.RawMessage) ([]dest.Location, error) {
 		Repo        string      `json:"repo"`
 		IssueNumber json.Number `json:"issue_number"`
 		PullNumber  json.Number `json:"pull_number"`
+		Event       string      `json:"event"`
+		State       string      `json:"state"`
 	}
 	if err := json.Unmarshal(input, &in); err != nil {
 		return nil, err
@@ -106,5 +150,16 @@ func githubPost(name string, input json.RawMessage) ([]dest.Location, error) {
 	if err == nil {
 		loc.Number = int(n)
 	}
-	return []dest.Location{loc}, nil
+	act := ActComment
+	switch {
+	case strings.Contains(name, "merge"):
+		act = ActMerge
+	case strings.Contains(name, "delete"):
+		act = ActDelete
+	case strings.EqualFold(in.Event, "APPROVE"):
+		act = ActApprove
+	case strings.EqualFold(in.State, "closed"):
+		act = ActClose
+	}
+	return []Post{{At: loc, Act: act}}, nil
 }

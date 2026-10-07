@@ -84,6 +84,31 @@ func TestDelegationMayApprove(t *testing.T) {
 	}
 }
 
+func TestDelegationPostFor(t *testing.T) {
+	t.Parallel()
+	auto := delegation.Delegation{Post: delegation.PostAuto, From: []string{"U9", "Datadog"}}
+	tcs := []struct {
+		name string
+		d    delegation.Delegation
+		msg  delegation.Message
+		want string
+	}{
+		{"posts alone for a trusted sender", auto, delegation.Message{From: "U2", Trusted: true}, delegation.PostAuto},
+		{"asks for a sender outside the trust set", auto, delegation.Message{From: "U2"}, delegation.PostAsk},
+		{"posts alone for an id the delegation names", auto, delegation.Message{From: "u9"}, delegation.PostAuto},
+		{"asks for a display name the delegation names", auto, delegation.Message{From: "U3", Author: "Datadog"}, delegation.PostAsk},
+		{"asks for a sender without an id", delegation.Delegation{Post: delegation.PostAuto, From: []string{""}}, delegation.Message{}, delegation.PostAsk},
+		{"keeps ask for a trusted sender", delegation.Delegation{Post: delegation.PostAsk}, delegation.Message{From: "U2", Trusted: true}, delegation.PostAsk},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, tc.d.PostFor(tc.msg))
+			assert.Equal(t, tc.want == delegation.PostAuto, tc.d.Trusts(tc.msg.From, tc.msg.Trusted) && tc.d.Post == delegation.PostAuto)
+		})
+	}
+}
+
 func TestStore(t *testing.T) {
 	t.Parallel()
 	s := delegation.New(t.TempDir())

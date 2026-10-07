@@ -120,7 +120,10 @@ func TestAllowAdd(t *testing.T) {
 		want    want
 	}{
 		{"takes an owner pattern", "github:o/*", want{false, []string{"github:o/*"}}},
-		{"takes every repository", "github:*", want{false, []string{"github:*"}}},
+		{"takes every repository named alike", "github:*/docs", want{false, []string{"github:*/docs"}}},
+		{"rejects every repository", "github:*", want{true, nil}},
+		{"rejects every repository of every owner", "github:*/*", want{true, nil}},
+		{"rejects every channel", "slack:*", want{true, nil}},
 		{"takes a channel", "slack:C1", want{false, []string{"slack:C1"}}},
 		{"rejects an unknown source", "gitlab:o/r", want{true, nil}},
 		{"rejects a link", "https://github.com/o/r", want{true, nil}},

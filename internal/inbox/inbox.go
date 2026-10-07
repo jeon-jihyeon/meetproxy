@@ -232,17 +232,26 @@ func (s Store) Claim(id, sessionId string, now time.Time) (Item, bool, error) {
 		return Item{}, false, err
 	}
 	defer unlock()
+	_, busy, err := s.TakenBy(sessionId, now)
+	if err != nil || busy {
+		return Item{}, false, err
+	}
+	it, err := s.take(id, sessionId, now, StatusNew, StatusAsk)
+	return it, err == nil, err
+}
+
+// The request the session took and still works on
+func (s Store) TakenBy(sessionId string, now time.Time) (Item, bool, error) {
 	all, err := s.List()
 	if err != nil {
 		return Item{}, false, err
 	}
 	for _, it := range all {
 		if it.Status == StatusTaken && it.SessionId == sessionId && !it.Waiting(now) {
-			return Item{}, false, nil
+			return it, true, nil
 		}
 	}
-	it, err := s.take(id, sessionId, now, StatusNew, StatusAsk)
-	return it, err == nil, err
+	return Item{}, false, nil
 }
 
 // Turns a request the session could not settle into one the user is asked about

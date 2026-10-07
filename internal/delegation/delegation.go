@@ -118,6 +118,23 @@ type Message struct {
 	From string `json:"from"`
 	// Author display name
 	Author string `json:"author"`
+	// The source vouches for the author as a member of the user's own team or organization
+	Trusted bool `json:"trusted"`
+}
+
+// How the delegation posts for the message
+// A sender outside the trust set is asked about first unless the delegation names their id
+func (d Delegation) PostFor(m Message) string {
+	if !d.Trusts(m.From, m.Trusted) {
+		return PostAsk
+	}
+	return d.Post
+}
+
+// Whether a sender the source may vouch for counts as trusted
+// Only an id named in From counts since a display name is anyone's to take
+func (d Delegation) Trusts(from string, trusted bool) bool {
+	return trusted || (from != "" && slices.ContainsFunc(d.From, func(f string) bool { return strings.EqualFold(f, from) }))
 }
 
 var prLink = regexp.MustCompile(`https://github\.com/([\w.-]+)/([\w.-]+)/pull/\d+`)

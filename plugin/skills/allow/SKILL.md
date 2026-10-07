@@ -3,7 +3,7 @@ name: allow
 description: Add or check a destination that meetproxy may post to. Run with a pattern such as github:owner/* or slack:C0123, or with no argument to list the current patterns.
 disable-model-invocation: true
 argument-hint: "<github:owner/* or slack:CHANNEL or a link>"
-allowed-tools: Bash(meetproxy *)
+allowed-tools: Bash(meetproxy allow *), Bash(meetproxy allowed), Bash(meetproxy allowed *), Bash(meetproxy dest *)
 ---
 
 # allow

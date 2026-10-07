@@ -3,7 +3,7 @@ name: handle
 description: Handle one request that meetproxy queued, given its 12 character id. The meetproxy mod runs it with --auto for requests it may finish alone and with --ask for requests that need the user.
 argument-hint: "<request id> [--auto | --ask]"
 disable-model-invocation: true
-allowed-tools: Read, Bash(meetproxy *), Bash(git log *), Bash(gh pr view *), Bash(gh pr diff *), Bash(gh pr checks *), Bash(gh pr review *), Bash(gh issue view *), Bash(gh api repos/*/pulls/*/comments), Bash(gh api repos/*/issues/*/comments), mcp__meetproxy__post, mcp__plugin_slack_slack__slack_read_thread, mcp__plugin_slack_slack__slack_read_channel, mcp__plugin_slack_slack__slack_search_public_and_private, mcp__plugin_slack_slack__slack_read_user_profile
+allowed-tools: Read, Bash(meetproxy inbox take *), Bash(meetproxy inbox list *), Bash(meetproxy inbox ask *), Bash(meetproxy inbox hold *), Bash(meetproxy inbox done *), Bash(meetproxy open *), Bash(meetproxy close *), Bash(meetproxy locate *), Bash(meetproxy map format *), Bash(git log *), Bash(gh pr view *), Bash(gh pr diff *), Bash(gh pr checks *), Bash(gh issue view *), Bash(gh api repos/*/pulls/*/comments), Bash(gh api repos/*/issues/*/comments), mcp__meetproxy__post, mcp__plugin_slack_slack__slack_read_thread, mcp__plugin_slack_slack__slack_read_channel, mcp__plugin_slack_slack__slack_search_public_and_private, mcp__plugin_slack_slack__slack_read_user_profile
 ---
 
 # handle
