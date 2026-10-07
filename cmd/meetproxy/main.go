@@ -18,7 +18,7 @@ var version = "dev"
 
 // The command set the plugin mod speaks
 // Raised whenever a command the mod calls changes so an older mod stops instead of misreading
-const protocol = 6
+const protocol = 7
 
 const (
 	exitFailed = 1
@@ -82,11 +82,68 @@ var families = []family{
 		{name: "version", noData: true, help: "print the binary version", run: printVersion},
 		{name: "protocol", noData: true, help: "print the command set the plugin mod expects", run: printProtocol},
 		{
-			name: "tick", flags: []string{"cwd"}, help: "print the protocol, the place of --cwd and the waiting requests as JSON",
-			run: func(c cli, _ []string, f flags) (int, error) { return exitCode(c.tick(f.cwd)) },
+			name: "tick", flags: []string{"cwd", "session", "busy"},
+			help: "print the protocol, the place of --cwd, the waiting requests and Slack as JSON, --busy renews the takes of --session",
+			run:  func(c cli, _ []string, f flags) (int, error) { return exitCode(c.tick(f.cwd, f.busy)) },
 		},
 		{name: "pause", help: "stop taking requests", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.pause(true)) }},
 		{name: "resume", help: "take requests again", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.pause(false)) }},
+		{name: "status", help: "print the state of every source, the inbox, Slack and the hooks as JSON", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.status()) }},
+		{name: "tidy", help: "expire old requests and prune relays, the map and markers", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.tidy(false)) }},
+		{name: "tidy daily", help: "tidy only once a day", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.tidy(true)) }},
+	}},
+	{"sources", []command{
+		{
+			name: "lease hold", args: "<source>", least: 1, most: 1, flags: []string{"session", "ttl"}, session: true,
+			help: "hold or renew the lease of a source, exit 1 while another session holds it",
+			run:  func(c cli, a []string, f flags) (int, error) { return c.leaseHold(a[0], f.ttl) },
+		},
+		{
+			name: "lease drop", args: "<source>", least: 1, most: 1, flags: []string{"session"}, session: true,
+			help: "give up the lease of a source",
+			run:  func(c cli, a []string, _ flags) (int, error) { return exitCode(c.leaseDrop(a[0])) },
+		},
+		{
+			name: "health", args: "<source>", least: 1, most: 1, help: "record what a check of a source found, {ok, error, found} on stdin",
+			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.recordHealth(a[0])) },
+		},
+	}},
+	{"slack", []command{
+		{
+			name: "slack token", help: "store the user token on stdin once Slack accepts it, print user, team, host and missing scopes",
+			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackToken()) },
+		},
+		{name: "slack whoami", help: "check the token with Slack", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackWhoami()) }},
+		{
+			name: "slack mentions", flags: []string{"after"}, help: "print messages that mention the user after --after oldest first",
+			run: func(c cli, _ []string, f flags) (int, error) { return exitCode(c.slackMentions(f.after)) },
+		},
+		{
+			name: "slack history", args: "<channel>", least: 1, most: 1, flags: []string{"oldest"}, help: "print the messages of a channel after --oldest",
+			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackHistory(a[0], f.oldest)) },
+		},
+		{
+			name: "slack answered", args: "<link>", least: 1, most: 1, flags: []string{"ts"}, help: "print whether the user replied in the thread after --ts",
+			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackAnswered(a[0], f.ts)) },
+		},
+		{
+			name: "slack read", args: "<link>", least: 1, most: 1, flags: []string{"limit"}, help: "print the text of the thread a link points at",
+			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackRead(a[0], f.limit)) },
+		},
+		{
+			name: "slack trusted", args: "<user id>", least: 1, most: 1, help: "print whether a user is a full member of the user's workspace",
+			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.slackTrusted(a[0])) },
+		},
+		{
+			name: "slack post", args: "<link>", least: 1, most: 1, flags: []string{"session"},
+			help: "post the text on stdin in the thread of a link after the can-post check",
+			run:  func(c cli, a []string, _ flags) (int, error) { return c.slackPost(a[0]) },
+		},
+		{name: "slack manifest", help: "print the app manifest and the link that creates the app", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackManifest()) }},
+		{
+			name: "slack setup", flags: []string{"answer"}, help: "record the answer to setting up a token, now, later or keep",
+			run: func(c cli, _ []string, f flags) (int, error) { return exitCode(c.slackSetup(f.answer)) },
+		},
 	}},
 	{"relay", []command{
 		{
@@ -274,8 +331,10 @@ type flags struct {
 	target, topic, from, ts, verdict     string
 	reason, name, place, key, delegation string
 	cwd, self, trusted, keywords, paths  string
-	skills, files                        string
+	skills, files, after, oldest, answer string
 	limit                                int
+	ttl                                  time.Duration
+	busy                                 bool
 }
 
 func (f *flags) set() *flag.FlagSet {
@@ -302,6 +361,11 @@ func (f *flags) set() *flag.FlagSet {
 	fs.StringVar(&f.self, "self", "", "yes when the user wrote the request")
 	fs.StringVar(&f.trusted, "trusted", "", "yes when the source vouches for the sender as a member of the user's team")
 	fs.StringVar(&f.cwd, "cwd", "", "directory of the session")
+	fs.StringVar(&f.after, "after", "", "unix seconds to read Slack mentions after")
+	fs.StringVar(&f.oldest, "oldest", "", "Slack ts to read a channel after")
+	fs.StringVar(&f.answer, "answer", "", "now, later or keep")
+	fs.DurationVar(&f.ttl, "ttl", defaultLeaseTTL, "how long a lease lasts")
+	fs.BoolVar(&f.busy, "busy", false, "a turn is running in the session")
 	return fs
 }
 
@@ -388,7 +452,7 @@ func exitCode(err error) (int, error) {
 	}
 }
 
-// Moves flags ahead of positional arguments since every flag takes a value
+// Moves flags ahead of positional arguments since every flag but the boolean ones takes a value
 // Words after `--` or after the command word of triage command stay positional as they are
 func reorder(cmd string, args []string) []string {
 	var flags, pos []string
@@ -402,7 +466,7 @@ func reorder(cmd string, args []string) []string {
 			return append(flags, args[i:]...)
 		case len(a) > 1 && a[0] == '-':
 			flags = append(flags, a)
-			if !strings.Contains(a, "=") && i+1 < len(args) {
+			if !strings.Contains(a, "=") && !boolFlags[strings.TrimLeft(a, "-")] && i+1 < len(args) {
 				flags = append(flags, args[i+1])
 				i++
 			}
@@ -412,6 +476,9 @@ func reorder(cmd string, args []string) []string {
 	}
 	return append(flags, pos...)
 }
+
+// Flags that take no value
+var boolFlags = map[string]bool{"busy": true}
 
 func split(s string) []string {
 	var out []string

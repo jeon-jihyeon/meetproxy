@@ -309,7 +309,7 @@ func writeCases(file string, cases []Case) error {
 		}
 		b = append(append(b, line...), '\n')
 	}
-	return fileio.WriteAtomic(file, b, 0o644)
+	return fileio.WriteAtomic(file, b, 0o600)
 }
 
 // At most n values with the most frequent first

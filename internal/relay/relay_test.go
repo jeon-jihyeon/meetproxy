@@ -1,6 +1,7 @@
 package relay_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -279,4 +280,39 @@ func TestStoreCurrent_Corrupt(t *testing.T) {
 	_, err := relay.New(dir).Current("s1")
 
 	assert.ErrorContains(t, err, "remove it to reset")
+}
+
+func TestStorePrune(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := relay.New(dir)
+	start := time.Now()
+	later := start.Add(31 * 24 * time.Hour)
+	p := locmap.Path{Root: "/w/svc", Rel: "a.go"}
+	done, err := s.Open("s1", "o1", "", start)
+	require.NoError(t, err)
+	require.NoError(t, s.Observe("s1", p))
+	_, err = s.Close("s1", start)
+	require.NoError(t, err)
+	open, err := s.Open("s2", "o2", "", start)
+	require.NoError(t, err)
+	require.NoError(t, s.Observe("s2", p))
+	// The open relay was written just now as far as the stale check goes
+	require.NoError(t, os.Chtimes(filepath.Join(dir, "relay", "open", "s2.json"), later, later))
+	closedFile := filepath.Join(dir, "relay", "closed.jsonl")
+	old := fmt.Sprintf(`{"id":"old","closed_at":%q}`, later.Add(-100*24*time.Hour).Format(time.RFC3339))
+	recent := fmt.Sprintf(`{"id":"recent","closed_at":%q}`, later.Add(-10*24*time.Hour).Format(time.RFC3339))
+	require.NoError(t, os.WriteFile(closedFile, []byte(old+"\n"+recent+"\nnot json\n"), 0o600))
+
+	require.NoError(t, s.Prune(later))
+
+	gone, err := s.Observed(done.Id)
+	require.NoError(t, err)
+	kept, err := s.Observed(open.Id)
+	require.NoError(t, err)
+	b, err := os.ReadFile(closedFile)
+	require.NoError(t, err)
+	assert.Empty(t, gone)
+	assert.Equal(t, []locmap.Path{p}, kept)
+	assert.Equal(t, recent+"\nnot json\n", string(b))
 }

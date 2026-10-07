@@ -7,18 +7,28 @@
 # 5. another meetproxy on PATH
 set -eu
 
+# The path and guard hooks run on every Read, Edit, Write, Grep, Bash and MCP call
+# A session with no scope gives neither hook anything to do so they end here before any program starts
+# The binary keeps one marker in scope/ per session with a scope and builds the directory with them before any skip
+any() { [ -e "$1" ]; }
+if [ "${1:-}" = hook ] && { [ "${2:-}" = path ] || [ "${2:-}" = guard ]; } &&
+  [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && [ -d "${CLAUDE_PLUGIN_DATA}/scope" ] && ! any "${CLAUDE_PLUGIN_DATA}"/scope/*; then
+  exit 0
+fi
+
 REPO="jeon-jihyeon/meetproxy"
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 MANIFEST="${ROOT}/.claude-plugin/plugin.json"
 SRC=$(dirname -- "$ROOT")
 
-# Without a binary the guard blocks the tool call with exit 2 only while a relay is open
+# Without a binary the guard blocks the tool call with exit 2 only while a session has a scope
+# State from before markers counts an open relay as one
 # The path hook exits 0 to stay quiet
 fail() {
   echo "meetproxy: $1" >&2
   case "${MODE}" in
     guard)
-      if [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && [ -z "$(ls -A "${CLAUDE_PLUGIN_DATA}/relay/open" 2>/dev/null)" ]; then
+      if [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && ! any "${CLAUDE_PLUGIN_DATA}"/scope/* && [ -z "$(ls -A "${CLAUDE_PLUGIN_DATA}/relay/open" 2>/dev/null)" ]; then
         exit 0
       fi
       exit 2
@@ -34,14 +44,12 @@ elif [ "${1:-}" = hook ]; then
   MODE=hook
 fi
 
-version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)
-[ -n "$version" ] || fail "no version in ${MANIFEST}"
-TAG="v${version}"
-
 # Rebuilds when sources are newer and renames into place so a partial file never runs
+# A hook runs the last build without searching the tree since it runs on every tool call
+# The next command line such as the tick of the mod within a minute rebuilds
 if [ -f "${SRC}/go.mod" ] && grep -q "^module github.com/${REPO}\$" "${SRC}/go.mod" && command -v go >/dev/null 2>&1; then
   DEV_BIN="${SRC}/bin/meetproxy"
-  if [ ! -x "$DEV_BIN" ] || [ -n "$(find "${SRC}/cmd" "${SRC}/internal" "${SRC}/go.mod" -newer "$DEV_BIN" 2>/dev/null | head -n 1)" ]; then
+  if [ ! -x "$DEV_BIN" ] || { [ "$MODE" = cli ] && [ -n "$(find "${SRC}/cmd" "${SRC}/internal" "${SRC}/go.mod" -newer "$DEV_BIN" 2>/dev/null | head -n 1)" ]; }; then
     mkdir -p "${SRC}/bin"
     tmp="${DEV_BIN}.$$"
     if (cd "$SRC" && go build -o "$tmp" ./cmd/meetproxy) >&2; then
@@ -53,6 +61,10 @@ if [ -f "${SRC}/go.mod" ] && grep -q "^module github.com/${REPO}\$" "${SRC}/go.m
   fi
   exec "$DEV_BIN" "$@"
 fi
+
+version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)
+[ -n "$version" ] || fail "no version in ${MANIFEST}"
+TAG="v${version}"
 
 BIN_DIR="${HOME}/.meetproxy/bin/${TAG}"
 BIN="${BIN_DIR}/meetproxy"
