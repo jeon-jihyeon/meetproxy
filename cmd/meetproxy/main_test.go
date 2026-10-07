@@ -43,7 +43,7 @@ func TestRun(t *testing.T) {
 	link := "https://w.slack.com/archives/C1/p1"
 	id := inbox.IdOf(link)
 	allowed := step{"allow", []string{"slack:C1"}, ""}
-	queued := step{"inbox", []string{"add", link, "--verdict", "handle"}, ""}
+	queued := step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes"}, ""}
 	prDelegation := `{"id":"pr","when":"mention","link":"github-pr","do":"review","post":"auto"}`
 	builtIn := `{"id":"default-review","when":"mention","link":"github-pr","do":"review","post":"auto","approve":"self"},` +
 		`{"id":"default-review-request","when":"review-request","do":"review","post":"ask","approve":"self"},` +
@@ -120,7 +120,7 @@ func TestRun(t *testing.T) {
 		{"can-post allows an allowed place with no relay", "s1", false, []step{allowed}, step{"can-post", []string{"slack:C1"}, ""}, want{0, "allowed", false}},
 		{
 			"inbox add keeps the place it is given and ignores the location map", "s1", false, append([]step{allowed}, recorded...),
-			step{"inbox", []string{"add", link, "--verdict", "handle", "--keywords", "할당,지연", "--ts", "1800000000.0001", "--name", "web"}, ""},
+			step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--keywords", "할당,지연", "--ts", "1800000000.0001", "--name", "web"}, ""},
 			want{0, id + "\tnew\tweb\tnew", false},
 		},
 		{
@@ -135,24 +135,24 @@ func TestRun(t *testing.T) {
 		},
 		{
 			"inbox cursor moves with the newest request", "s1", false,
-			[]step{allowed, {"inbox", []string{"add", link, "--verdict", "handle", "--ts", "1800000000.0001"}, ""}},
+			[]step{allowed, {"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--ts", "1800000000.0001"}, ""}},
 			step{"inbox", []string{"cursor"}, ""}, want{0, "1800000000.0001", false},
 		},
 		{
 			"inbox add moves the cursor for a link seen before", "s1", false,
 			[]step{
-				{"inbox", []string{"add", link, "--verdict", "handle", "--ts", "1800000000.0001"}, ""},
-				{"inbox", []string{"add", link, "--verdict", "handle", "--ts", "1800000000.0002"}, ""},
+				{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--ts", "1800000000.0001"}, ""},
+				{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--ts", "1800000000.0002"}, ""},
 			},
 			step{"inbox", []string{"cursor"}, ""}, want{0, "1800000000.0002", false},
 		},
 		{
 			"inbox add asks again for a done request with a new timestamp", "s1", false,
 			[]step{
-				{"inbox", []string{"add", link, "--verdict", "handle", "--ts", "1800000000.0001"}, ""},
+				{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--ts", "1800000000.0001"}, ""},
 				{"inbox", []string{"done", id}, ""},
 			},
-			step{"inbox", []string{"add", link, "--verdict", "handle", "--ts", "1800000000.0002"}, ""}, want{0, id + "\tnew\t-\tnew", false},
+			step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--ts", "1800000000.0002"}, ""}, want{0, id + "\tnew\t-\tnew", false},
 		},
 		{
 			"inbox advance moves the cursor without a request", "s1", false,
@@ -162,7 +162,7 @@ func TestRun(t *testing.T) {
 		{"inbox claim takes a request and prints its link", "s1", false, []step{allowed, queued}, step{"inbox", []string{"claim", id}, ""}, want{0, link, false}},
 		{
 			"inbox claim takes nothing while the session works on another request", "s1", false,
-			[]step{allowed, queued, {"inbox", []string{"add", "https://w.slack.com/archives/C1/p2", "--verdict", "handle"}, ""},
+			[]step{allowed, queued, {"inbox", []string{"add", "https://w.slack.com/archives/C1/p2", "--verdict", "handle", "--trusted", "yes"}, ""},
 				{"inbox", []string{"claim", inbox.IdOf("https://w.slack.com/archives/C1/p2")}, ""}},
 			step{"inbox", []string{"claim", id}, ""}, want{0, "", false},
 		},
@@ -180,7 +180,7 @@ func TestRun(t *testing.T) {
 		},
 		{
 			"inbox claim takes nothing while a relay is open", "s1", false,
-			[]step{allowed, {"inbox", []string{"add", link, "--verdict", "handle"}, ""}, {"open", []string{"o"}, ""}},
+			[]step{allowed, {"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes"}, ""}, {"open", []string{"o"}, ""}},
 			step{"inbox", []string{"claim", id}, ""}, want{0, "", false},
 		},
 		{
@@ -189,13 +189,13 @@ func TestRun(t *testing.T) {
 		},
 		{
 			"inbox take prints the place, skills and files of the work map", "s1", false,
-			[]step{{"inbox", []string{"add", link, "--verdict", "handle", "--place", "/w/svc", "--skills", "incident-triage,review", "--files", "/w/svc/a.go"}, ""}},
+			[]step{{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--place", "/w/svc", "--skills", "incident-triage,review", "--files", "/w/svc/a.go"}, ""}},
 			step{"inbox", []string{"take", id}, ""}, want{0, link + "\tanswer\t-\tno\t/w/svc\tincident-triage,review\t/w/svc/a.go", false},
 		},
 		{
 			"inbox add keeps the task of a delegation and lets a review approve the user's request", "s1", false,
 			[]step{allowed, {"delegation", []string{"put"}, prDelegation}, {"inbox", []string{
-				"add", link, "--verdict", "handle", "--delegation", "pr",
+				"add", link, "--verdict", "handle", "--trusted", "yes", "--delegation", "pr",
 				"--target", "https://github.com/o/r/pull/1", "--self", "yes", "--name", "r",
 			}, ""}},
 			step{"inbox", []string{"take", id}, ""}, want{0, link + "\treview\thttps://github.com/o/r/pull/1\tyes\t-\t-\t-", false},
@@ -217,7 +217,7 @@ func TestRun(t *testing.T) {
 		},
 		{
 			"delegation match picks a review for a pull request link", "s1", false, []step{{"delegation", []string{"put"}, prDelegation}},
-			step{"delegation", []string{"match", "mention"}, `{"text":"<@U1> review https://github.com/o/svc/pull/7 please","from":"U2"}`},
+			step{"delegation", []string{"match", "mention"}, `{"text":"<@U1> review https://github.com/o/svc/pull/7 please","from":"U2","trusted":true}`},
 			want{0, `{"delegation":"pr","task":"review","post":"auto","triage":false,"target":"https://github.com/o/svc/pull/7","workspace":"svc"}`, false},
 		},
 		{
@@ -227,8 +227,38 @@ func TestRun(t *testing.T) {
 		},
 		{
 			"delegation match falls back to the default for a question", "s1", false, []step{{"delegation", []string{"put"}, prDelegation}},
-			step{"delegation", []string{"match", "mention"}, `{"text":"where is alloc","from":"U2"}`},
+			step{"delegation", []string{"match", "mention"}, `{"text":"where is alloc","from":"U2","trusted":true}`},
 			want{0, `{"delegation":"default","task":"answer","post":"auto","triage":true}`, false},
+		},
+		{
+			"delegation match asks first for a sender outside the trust set", "s1", false, nil,
+			step{"delegation", []string{"match", "mention"}, `{"text":"where is alloc","from":"U2"}`},
+			want{0, `{"delegation":"default","task":"answer","post":"ask","triage":true}`, false},
+		},
+		{
+			"inbox add asks about a handle from outside the trust set", "s1", false, nil,
+			step{"inbox", []string{"add", link, "--verdict", "handle", "--from", "U2"}, ""}, want{0, id + "\task\t-\tnew", false},
+		},
+		{
+			"inbox add asks about a handle the sender is not trusted for", "s1", false, nil,
+			step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "no"}, ""}, want{0, id + "\task\t-\tnew", false},
+		},
+		{
+			"inbox add keeps the user's own request a handle", "s1", false, nil,
+			step{"inbox", []string{"add", link, "--verdict", "handle", "--self", "yes"}, ""}, want{0, id + "\tnew\t-\tnew", false},
+		},
+		{
+			"inbox add keeps a handle from an id the delegation names", "s1", false,
+			[]step{{"delegation", []string{"put"}, `{"id":"alerts","when":"channel","channel":"C1","host":"w.slack.com","from":["U9"],"do":"investigate","post":"auto"}`}},
+			step{"inbox", []string{"add", link, "--verdict", "handle", "--from", "U9", "--delegation", "alerts"}, ""}, want{0, id + "\tnew\t-\tnew", false},
+		},
+		{
+			"inbox add says why it asks", "s1", false, []step{{"inbox", []string{"add", link, "--verdict", "handle"}, ""}},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\task\t-\t" + link + "\tsender outside the trust set", false},
+		},
+		{
+			"usage error for inbox add with an unknown trust", "s1", false, nil,
+			step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "maybe"}, ""}, want{exitUsage, "", true},
 		},
 		{
 			"delegation match prints nothing when the author of a channel delegation differs", "s1", false,
@@ -304,15 +334,15 @@ func TestRun(t *testing.T) {
 		{"can-post fails on a link that names no place", "s1", false, nil, step{"can-post", []string{"notalink"}, ""}, want{1, "", true}},
 		{
 			"inbox add fails on a link that names no place", "s1", false, nil,
-			step{"inbox", []string{"add", "notalink", "--verdict", "handle"}, ""}, want{1, "", true},
+			step{"inbox", []string{"add", "notalink", "--verdict", "handle", "--trusted", "yes"}, ""}, want{1, "", true},
 		},
 		{
 			"inbox add fails on a timestamp the cursor refuses", "s1", false, nil,
-			step{"inbox", []string{"add", link, "--verdict", "handle", "--ts", "abc"}, ""}, want{1, "", true},
+			step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--ts", "abc"}, ""}, want{1, "", true},
 		},
 		{
 			"inbox add fails on an unknown delegation", "s1", false, nil,
-			step{"inbox", []string{"add", link, "--verdict", "handle", "--delegation", "nope"}, ""}, want{1, "", true},
+			step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--delegation", "nope"}, ""}, want{1, "", true},
 		},
 		{
 			"inbox hold puts a taken request off", "s1", false,
@@ -397,7 +427,7 @@ func TestRun_Retry(t *testing.T) {
 	id := inbox.IdOf(link)
 	evidence := gitRepo(t, "svc", "a.go")
 	taken := []step{
-		{"inbox", []string{"add", link, "--verdict", "handle"}, ""},
+		{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes"}, ""},
 		{"inbox", []string{"take", id}, ""},
 		{"open", []string{link}, ""},
 	}
@@ -462,7 +492,7 @@ func TestRun_Tick(t *testing.T) {
 	older, newer := "https://w.slack.com/archives/C1/p1", "https://w.slack.com/archives/C1/p2"
 	data := []string{"--data", t.TempDir()}
 	adds := [][]string{
-		{"add", older, "--verdict", "handle", "--name", "svc", "--place", repo},
+		{"add", older, "--verdict", "handle", "--trusted", "yes", "--name", "svc", "--place", repo},
 		{"add", newer, "--verdict", "ask", "--name", "web"},
 	}
 	for i, a := range adds {
@@ -523,7 +553,7 @@ func TestRun_InboxListLimit(t *testing.T) {
 			data := []string{"--data", t.TempDir()}
 			for i, link := range []string{older, newer} {
 				at := now.Add(time.Duration(i) * time.Second)
-				code, err := run("inbox", slices.Concat(data, []string{"add", link, "--verdict", "handle"}), "s1", at, nil, &bytes.Buffer{})
+				code, err := run("inbox", slices.Concat(data, []string{"add", link, "--verdict", "handle", "--trusted", "yes"}), "s1", at, nil, &bytes.Buffer{})
 				require.NoError(t, err)
 				require.Equal(t, 0, code)
 			}

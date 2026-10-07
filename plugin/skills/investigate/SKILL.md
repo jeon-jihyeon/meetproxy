@@ -3,7 +3,7 @@ name: investigate
 description: Investigate an alert or an incident report posted in Slack and reply in its thread with a verdict, the first action and the evidence. Run with the Slack link of the alert.
 argument-hint: "<Slack link>"
 disable-model-invocation: true
-allowed-tools: Bash(meetproxy *), Bash(git log *), mcp__meetproxy__post, mcp__plugin_slack_slack__slack_read_thread, mcp__plugin_slack_slack__slack_read_channel, mcp__plugin_slack_slack__slack_search_public_and_private, mcp__plugin_slack_slack__slack_read_user_profile
+allowed-tools: Bash(meetproxy open *), Bash(meetproxy close *), Bash(meetproxy locate *), Bash(meetproxy map format *), Bash(git log *), mcp__meetproxy__post, mcp__plugin_slack_slack__slack_read_thread, mcp__plugin_slack_slack__slack_read_channel, mcp__plugin_slack_slack__slack_search_public_and_private, mcp__plugin_slack_slack__slack_read_user_profile
 ---
 
 # investigate

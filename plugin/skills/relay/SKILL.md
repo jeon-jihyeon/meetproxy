@@ -3,7 +3,7 @@ name: relay
 description: Relay a request from a Slack thread or a GitHub pull request or issue to this session and post the refined answer back without the user carrying it by hand. Run with the request link as the argument.
 disable-model-invocation: true
 argument-hint: "<Slack or GitHub link>"
-allowed-tools: Read, Bash(meetproxy *), Bash(gh pr view *), Bash(gh issue view *), Bash(gh api repos/*/pulls/*/comments), Bash(gh api repos/*/issues/*/comments), mcp__meetproxy__post, mcp__plugin_slack_slack__slack_read_thread, mcp__plugin_slack_slack__slack_read_channel, mcp__plugin_slack_slack__slack_search_public_and_private, mcp__plugin_slack_slack__slack_read_user_profile
+allowed-tools: Read, Bash(meetproxy open *), Bash(meetproxy close *), Bash(meetproxy locate *), Bash(meetproxy map format *), Bash(gh pr view *), Bash(gh issue view *), Bash(gh api repos/*/pulls/*/comments), Bash(gh api repos/*/issues/*/comments), mcp__meetproxy__post, mcp__plugin_slack_slack__slack_read_thread, mcp__plugin_slack_slack__slack_read_channel, mcp__plugin_slack_slack__slack_search_public_and_private, mcp__plugin_slack_slack__slack_read_user_profile
 ---
 
 # relay

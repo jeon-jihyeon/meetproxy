@@ -3,7 +3,7 @@ name: triage
 description: Show or choose what sorts messages from every connected source into ignore, handle and ask. Run with claude, codex or command followed by a command line, or with no argument to show the current one.
 argument-hint: "[claude | codex | command <command line>]"
 disable-model-invocation: true
-allowed-tools: Bash(meetproxy *)
+allowed-tools: Bash(meetproxy triage), Bash(meetproxy triage *)
 ---
 
 # triage

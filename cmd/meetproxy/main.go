@@ -18,7 +18,7 @@ var version = "dev"
 
 // The command set the plugin mod speaks
 // Raised whenever a command the mod calls changes so an older mod stops instead of misreading
-const protocol = 5
+const protocol = 6
 
 const (
 	exitFailed = 1
@@ -125,8 +125,8 @@ var families = []family{
 	{"inbox", []command{
 		{
 			name: "inbox add", args: "<link>", least: 1, most: 1,
-			flags: []string{"verdict", "reason", "keywords", "from", "ts", "key", "delegation", "target", "self", "name", "place", "skills", "files"},
-			help:  "queue a request, --verdict is handle or ask", run: addRequest,
+			flags: []string{"verdict", "reason", "keywords", "from", "ts", "key", "delegation", "target", "self", "trusted", "name", "place", "skills", "files"},
+			help:  "queue a request, --verdict is handle or ask, a handle from outside the trust set is asked about", run: addRequest,
 		},
 		{
 			name: "inbox claim", args: "<id>", least: 1, most: 1, flags: []string{"session"}, session: true,
@@ -240,7 +240,8 @@ var families = []family{
 const hookUsage = `hooks
   hook start                      SessionStart notice of waiting requests
   hook path                       PostToolUse path collection
-  hook guard                      PreToolUse posting guard`
+  hook guard                      PreToolUse posting guard
+  hook stop                       Stop end of the scope a close kept for the turn`
 
 func usage() string {
 	var b strings.Builder
@@ -272,7 +273,7 @@ type flags struct {
 	data, root, session                  string
 	target, topic, from, ts, verdict     string
 	reason, name, place, key, delegation string
-	cwd, self, keywords, paths           string
+	cwd, self, trusted, keywords, paths  string
 	skills, files                        string
 	limit                                int
 }
@@ -299,6 +300,7 @@ func (f *flags) set() *flag.FlagSet {
 	fs.StringVar(&f.key, "key", "mention", "cursor key, a delegation id for channel delegations")
 	fs.StringVar(&f.delegation, "delegation", "", "delegation that caught the message, the default one when empty")
 	fs.StringVar(&f.self, "self", "", "yes when the user wrote the request")
+	fs.StringVar(&f.trusted, "trusted", "", "yes when the source vouches for the sender as a member of the user's team")
 	fs.StringVar(&f.cwd, "cwd", "", "directory of the session")
 	return fs
 }

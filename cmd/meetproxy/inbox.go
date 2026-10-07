@@ -27,14 +27,23 @@ func addRequest(c cli, args []string, f flags) (int, error) {
 }
 
 // The request the flags describe as the delegation d caught it
+// A sender outside the trust set is asked about whatever triage said since the request text may steer the session
+// The user's own request is always trusted
 func (f flags) request(link string, d delegation.Delegation) (inbox.Item, error) {
 	status, ok := map[string]inbox.Status{triage.Handle: inbox.StatusNew, triage.Ask: inbox.StatusAsk}[f.verdict]
 	if !ok {
 		return inbox.Item{}, fmt.Errorf("%w: inbox add needs --verdict handle or ask, not %q", errUsage, f.verdict)
 	}
+	if !slices.Contains([]string{"", "yes", "no"}, f.trusted) {
+		return inbox.Item{}, fmt.Errorf("%w: --trusted is yes or no, not %q", errUsage, f.trusted)
+	}
+	reason := f.reason
+	if status == inbox.StatusNew && f.self != "yes" && !d.Trusts(f.from, f.trusted == "yes") {
+		status, reason = inbox.StatusAsk, "sender outside the trust set"
+	}
 	return inbox.Item{
 		Link: link, From: f.from, Ts: f.ts, Keywords: split(f.keywords), Name: f.name, Place: f.place,
-		Skills: split(f.skills), Files: split(f.files), Status: status, Reason: f.reason,
+		Skills: split(f.skills), Files: split(f.files), Status: status, Reason: reason,
 		Delegation: d.Id, Task: d.Do, Target: f.target, MayApprove: d.MayApprove(f.self == "yes"),
 	}, nil
 }
@@ -142,6 +151,7 @@ func (c cli) done(id string) error {
 }
 
 // Keeps a relay open for another request
+// A request this session took without a relay keeps its scope until the turn ends as a closed relay does
 func (c cli) closeRelayOf(id string) error {
 	it, err := inbox.New(c.data).Get(id)
 	if err != nil {
@@ -149,13 +159,14 @@ func (c cli) closeRelayOf(id string) error {
 	}
 	relays := relay.New(c.data)
 	r, err := relays.Current(c.session)
-	if errors.Is(err, relay.ErrNoOpen) {
+	switch {
+	case errors.Is(err, relay.ErrNoOpen) && it.Status == inbox.StatusTaken && it.SessionId == c.session:
+		return relays.Linger(c.session, it.Link, it.Target, c.now)
+	case errors.Is(err, relay.ErrNoOpen):
 		return nil
-	}
-	if err != nil {
+	case err != nil:
 		return err
-	}
-	if r.Origin == it.Link {
+	case r.Origin == it.Link:
 		_, err = relays.Close(c.session, c.now)
 	}
 	return err
@@ -303,7 +314,7 @@ func (c cli) delegationMatch(key string) error {
 	if !ok {
 		return nil
 	}
-	out := matched{Delegation: d.Id, Task: d.Do, Post: d.Post, Triage: d.Triaged(), Workspace: d.Workspace}
+	out := matched{Delegation: d.Id, Task: d.Do, Post: d.PostFor(m), Triage: d.Triaged(), Workspace: d.Workspace}
 	var repo string
 	out.Target, repo = d.Target(m)
 	if out.Workspace == "" {

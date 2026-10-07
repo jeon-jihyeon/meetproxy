@@ -116,10 +116,11 @@ func (a Allow) Add(pattern string) error {
 	return fileio.WriteJSON(a.file, config{Allow: append(ps, pattern)})
 }
 
+// A pattern that covers a whole source such as slack:* would let a request text post anywhere so it is refused
 func validPattern(p string) bool {
 	for _, s := range sources {
 		if name, ok := strings.CutPrefix(p, s.name+":"); ok {
-			return s.pattern.MatchString(name)
+			return s.pattern.MatchString(name) && strings.Trim(name, "*/") != ""
 		}
 	}
 	return false

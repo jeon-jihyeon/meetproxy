@@ -3,7 +3,7 @@ name: delegate
 description: Hand meetproxy a kind of request from any connected source to take over, from a sentence such as "when Datadog posts a Triggered alert in #devops-emergency, investigate it". Checks and helps set up what that request needs before saving it. Run with the sentence, with remove and an id, or with nothing to list what is delegated.
 argument-hint: "[what to take over | remove <id>]"
 disable-model-invocation: true
-allowed-tools: Bash(meetproxy *), Bash(gh auth status*), Bash(command -v *)
+allowed-tools: Bash(meetproxy delegation), Bash(meetproxy delegation *), Bash(gh auth status*), Bash(command -v *)
 ---
 
 # delegate
@@ -19,7 +19,7 @@ Each delegation says when a message becomes a request, what the session does and
 | `words` | words that must all appear, such as `["Triggered"]` |
 | `link` | `github-pr` when the message must link a pull request |
 | `do` | `answer`, `review`, `investigate` or the name of another skill such as `incident-triage` |
-| `post` | `auto` to post alone, `ask` to ask the user first |
+| `post` | `auto` to post alone, `ask` to ask the user first. `auto` holds only for senders the source vouches for, members of the user's Slack workspace or of the repository's GitHub organization, and for author ids `from` names. Display names never count, so name a bot by its id |
 | `approve` | for `review` only: `self` approves only the user's own requests and is the default, `never` comments only, `any` approves anyone's |
 | `workspace` | the place to run in, the absolute path of a repository or directory or the name of a place, empty to let the work map or triage pick it |
 | `note` | the user's sentence |

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -179,6 +180,68 @@ func TestRunHookGuard(t *testing.T) {
 	}
 }
 
+// A take before the relay opens and a close before the turn ends keep the scope of the request
+func TestRunHookGuard_Scope(t *testing.T) {
+	t.Parallel()
+	link := "https://w.slack.com/archives/C7/p1"
+	target := "https://github.com/t/r/pull/3"
+	id := inbox.IdOf(link)
+	bash := func(cmd string) map[string]any {
+		return map[string]any{"session_id": "s1", "tool_name": "Bash", "tool_input": map[string]any{"command": cmd}}
+	}
+	elsewhere := map[string]any{
+		"session_id": "s1", "tool_name": "mcp__plugin_slack_slack__slack_send_message",
+		"tool_input": map[string]any{"channel_id": "C9", "message": "m"},
+	}
+	queued := step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--target", target}, ""}
+	taken := []step{queued, {"inbox", []string{"take", id}, ""}}
+	closed := append(slices.Clone(taken), step{"open", []string{link}, ""}, step{"close", []string{"--topic", "t"}, ""})
+
+	type args struct {
+		setup []step
+		stop  bool
+		input map[string]any
+	}
+	tcs := []struct {
+		name string
+		args args
+		want string
+	}{
+		{"lets a post go anywhere when nothing is handled", args{nil, false, elsewhere}, ""},
+		{"denies a post elsewhere after a take before the relay opens", args{taken, false, elsewhere}, "slack:C9 is not allowed"},
+		{"allows a post to the target after a take", args{taken, false, bash("gh pr comment 3 -R t/r -b hi")}, ""},
+		{"denies an approval the delegation does not allow", args{taken, false, bash("gh pr review 3 -R t/r --approve -b ok")}, "is not delegated"},
+		{"denies meetproxy allow while a take is open", args{taken, false, bash("meetproxy allow slack:C9")}, "changes meetproxy settings"},
+		{"denies opening another request while a take is open", args{taken, false, bash("meetproxy open https://w.slack.com/archives/C9/p2")}, "slack:C9 is not allowed"},
+		{"denies a post elsewhere after a close in the same turn", args{closed, false, elsewhere}, "slack:C9 is not allowed"},
+		{"lets a post go anywhere once the turn of the close ended", args{closed, true, elsewhere}, ""},
+		{
+			"denies a post elsewhere after a settle in the same turn",
+			args{append(slices.Clone(taken), step{"inbox", []string{"done", id}, ""}), false, elsewhere}, "slack:C9 is not allowed",
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			data := t.TempDir()
+			for _, s := range tc.args.setup {
+				code, err := run(s.cmd, append([]string{"--data", data}, s.args...), "s1", time.Now(), strings.NewReader(s.stdin), &bytes.Buffer{})
+				require.NoError(t, err)
+				require.Equal(t, 0, code)
+			}
+			if tc.args.stop {
+				require.NoError(t, runHook(data, []string{"stop"}, time.Now(), strings.NewReader(`{"session_id":"s1"}`), &bytes.Buffer{}))
+			}
+			var out bytes.Buffer
+			require.NoError(t, runHook(data, []string{"guard"}, time.Now(), strings.NewReader(hookJSON(t, tc.args.input)), &out))
+			reason := denyReason(t, out.Bytes())
+			assert.Contains(t, reason, tc.want)
+			assert.Equal(t, tc.want == "", reason == "")
+			assert.NotContains(t, reason, "meetproxy close", "the denial names no way around it")
+		})
+	}
+}
+
 // Returns the lines of the SessionStart notice or nil when nothing was printed
 func startNotice(t *testing.T, out []byte) []string {
 	t.Helper()
@@ -275,6 +338,8 @@ func TestRunHook_BadInput(t *testing.T) {
 			want{false, "posting check failed"},
 		},
 		{"guard denies broken input", args{true, "guard", "{"}, want{false, "posting check failed"}},
+		{"stop hook errors without a data dir", args{false, "stop", "{}"}, want{true, ""}},
+		{"stop hook passes input without a session", args{true, "stop", "{}"}, want{false, ""}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
