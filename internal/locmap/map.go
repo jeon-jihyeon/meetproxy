@@ -95,37 +95,6 @@ func (m Map) Locate(terms []string, limit int) ([]Candidate, error) {
 	return out, nil
 }
 
-// Root of the place where most similar answers were found
-// 1. Each answer counts once per place however many files it rests on
-// 2. Ties go to the root that sorts first and no match returns an empty root
-func (m Map) Route(terms []string) (string, error) {
-	entries, err := m.entries()
-	if err != nil {
-		return "", err
-	}
-	scores := map[string]float64{}
-	for _, e := range entries {
-		hits := float64(matchCount(e, terms)) * e.weight()
-		if hits == 0 {
-			continue
-		}
-		seen := map[string]bool{}
-		for _, p := range e.Paths {
-			if !seen[p.Root] {
-				seen[p.Root] = true
-				scores[p.Root] += hits
-			}
-		}
-	}
-	best := ""
-	for root, score := range scores {
-		if best == "" || score > scores[best] || (score == scores[best] && root < best) {
-			best = root
-		}
-	}
-	return best, nil
-}
-
 // Halves the weight of the record of a relay whose answer the requester said was wrong
 // The record is appended again since the last record of a relay wins
 func (m Map) Correct(relayId string, now time.Time) (Entry, error) {

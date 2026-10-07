@@ -116,7 +116,7 @@ func recordHookFailure(data, hook string, failure error, now time.Time) error {
 }
 
 type inboxCounts struct {
-	Waiting  int `json:"waiting"`
+	Open     int `json:"open"`
 	Taken    int `json:"taken"`
 	Held     int `json:"held"`
 	Question int `json:"question"`
@@ -125,9 +125,9 @@ type inboxCounts struct {
 
 // A held request and when it is asked about again
 type heldRow struct {
-	Id   string `json:"id"`
-	Name string `json:"name,omitempty"`
-	Link string `json:"link"`
+	Id      string `json:"id"`
+	Summary string `json:"summary,omitempty"`
+	Link    string `json:"link"`
 	// Zero waits for the user
 	Until time.Time `json:"until,omitzero"`
 }
@@ -175,13 +175,13 @@ func (c cli) status() error {
 	held := []heldRow{}
 	for _, it := range items {
 		switch {
-		case it.Waiting(c.now) && it.Status == inbox.StatusHeld:
+		case it.Open(c.now):
+			counts.Open++
+		case it.Status == inbox.StatusHeld:
 			counts.Held++
-			held = append(held, heldRow{it.Id, it.Name, it.Link, it.HeldUntil})
-		case it.Status == inbox.StatusQuestion && !it.Unanswered(c.now):
+			held = append(held, heldRow{it.Id, it.Summary, it.Link, it.HeldUntil})
+		case it.Status == inbox.StatusQuestion:
 			counts.Question++
-		case it.Waiting(c.now):
-			counts.Waiting++
 		case it.Status == inbox.StatusTaken:
 			counts.Taken++
 		}

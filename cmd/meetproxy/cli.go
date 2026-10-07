@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -151,7 +152,7 @@ func (c cli) close(topic string, keywords, paths []string) error {
 	// Each step repeats without harm so a close that failed part way runs again
 	// 1. a done request may be marked done again
 	// 2. the location map keeps the last record of a relay
-	if err := inbox.New(c.data).DoneByLink(r.Origin, c.session, c.now); err != nil {
+	if err := c.settleOrigin(r.Origin); err != nil {
 		return err
 	}
 	e := locmap.Entry{RelayId: r.Id, Topic: topic, Keywords: keywords, Paths: ps, RecordedAt: c.now.UTC()}
@@ -165,13 +166,24 @@ func (c cli) close(topic string, keywords, paths []string) error {
 	return nil
 }
 
+// Marks done the request a relay was opened for
+// A relay opened by hand for a link no request came from settles nothing
+func (c cli) settleOrigin(origin string) error {
+	store := inbox.New(c.data)
+	it, err := store.ByOrigin(origin)
+	if errors.Is(err, inbox.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return store.DoneById(it.Id, c.session, c.now)
+}
+
 // What the plugin mod reads once per tick
 type tick struct {
 	Protocol int `json:"protocol"`
-	// Root and name of the place of the session directory
-	Place string `json:"place"`
-	Name  string `json:"name"`
-	// Every waiting request oldest first
+	// Every request no session works on oldest first
 	Waiting []waitingRow `json:"waiting"`
 	// Whether Slack is read with a token and the user's answer to setting one up
 	Slack slackState `json:"slack"`
@@ -190,38 +202,26 @@ type ackRow struct {
 type waitingRow struct {
 	Id     string       `json:"id"`
 	Status inbox.Status `json:"status"`
-	Place  string       `json:"place"`
-	Name   string       `json:"name"`
+	// The list offers it now
+	// A held request before its time or a question the requester may still answer waits
+	Open   bool   `json:"open"`
+	Link   string `json:"link"`
+	Source string `json:"source,omitempty"`
+	Author string `json:"author,omitempty"`
+	// Untrusted text
+	Summary string `json:"summary,omitempty"`
+	Task    string `json:"task,omitempty"`
 	// Unix seconds
-	Added int64  `json:"added"`
-	Link  string `json:"link"`
-	// The request belongs to the place of the session
-	Here       bool   `json:"here"`
-	Delegation string `json:"delegation,omitempty"`
-	Priority   int    `json:"priority,omitempty"`
-	// A held request whose time came
-	Due bool `json:"due,omitempty"`
-	// Unix seconds a held request is asked about again, zero when it waits for the user
+	Added int64 `json:"added"`
+	// Unix seconds a held request opens again, zero when it waits for the user
 	Until int64 `json:"until,omitempty"`
 }
 
 // Requests older than this get no reaction since one so late reads as noise
 const ackWithin = 24 * time.Hour
 
-// With busy the takes of the session get a heartbeat so a long turn never loses them
-// The heartbeat runs under the scope so a take it keeps always has a marker the launcher sees
-func (c cli) tick(cwd string, busy bool) error {
-	if cwd == "" {
-		return fmt.Errorf("%w: tick needs --cwd", errUsage)
-	}
-	root, name := locmap.Place(cwd)
+func (c cli) tick() error {
 	store := inbox.New(c.data)
-	if busy && c.session != "" {
-		touch := func() error { return store.Touch(c.session, c.now) }
-		if err := withScope(c.data, c.session, c.now, touch); err != nil {
-			return err
-		}
-	}
 	items, err := store.Waiting(c.now)
 	if err != nil {
 		return err
@@ -229,8 +229,8 @@ func (c cli) tick(cwd string, busy bool) error {
 	rows := make([]waitingRow, 0, len(items))
 	for _, it := range items {
 		row := waitingRow{
-			Id: it.Id, Status: it.Status, Place: it.Place, Name: it.Name, Added: it.AddedAt.Unix(), Link: it.Link,
-			Here: it.At(root, name), Delegation: it.Delegation, Priority: it.Priority, Due: it.Due(c.now),
+			Id: it.Id, Status: it.Status, Open: it.Open(c.now), Link: it.Link, Source: it.Source, Author: it.Author,
+			Summary: it.Summary, Task: it.Task, Added: it.AddedAt.Unix(),
 		}
 		if !it.HeldUntil.IsZero() {
 			row.Until = it.HeldUntil.Unix()
@@ -249,14 +249,13 @@ func (c cli) tick(cwd string, busy bool) error {
 		watch = []posts.Watch{}
 	}
 	return json.NewEncoder(c.out).Encode(tick{
-		Protocol: protocol, Place: root, Name: name, Waiting: rows, Slack: readSlackState(c.data, false), Watch: watch, Acks: acks,
+		Protocol: protocol, Waiting: rows, Slack: readSlackState(c.data, false), Watch: watch, Acks: acks,
 	})
 }
 
 // Reactions still owed on request links
 // 1. eyes on a request queued within ackWithin
 // 2. done on a request answered with a post
-// 3. handoff on a request the automatic attempt gave back when its delegation asks for a note
 func (c cli) acks(store inbox.Store) ([]ackRow, error) {
 	all, err := store.List()
 	if err != nil {
@@ -282,9 +281,6 @@ func (c cli) acks(store inbox.Store) ([]ackRow, error) {
 			if posted {
 				owed(inbox.AckDone)
 			}
-		case it.Status == inbox.StatusAsk && it.Mode == inbox.ModeAuto && it.Handoff:
-			owed(inbox.AckSeen)
-			owed(inbox.AckHandoff)
 		case it.Status != inbox.StatusDone:
 			owed(inbox.AckSeen)
 		}

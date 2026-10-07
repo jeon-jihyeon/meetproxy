@@ -60,11 +60,6 @@ func TestMap(t *testing.T) {
 			"a daily refresh after a refresh the same day does nothing", []step{refreshed},
 			step{"map", []string{"refresh", "daily"}, ""}, want{0, "", false},
 		},
-		{
-			"plan names the place a request names", []step{refreshed},
-			step{"map", []string{"plan"}, "svc 에러 봐줘"}, want{0, `{"place":"` + repo + `","name":"svc"}`, false},
-		},
-		{"plan of an empty request is empty", []step{refreshed}, step{"map", []string{"plan"}, ""}, want{0, `{}`, false}},
 		{"show prints the places, the count of methods and the formats", []step{refreshed}, step{"map", []string{"show"}, ""}, want{0, shown, false}},
 		{"show before any refresh knows nothing", nil, step{"map", []string{"show"}, ""}, want{0, "0 skills and commands", false}},
 	}

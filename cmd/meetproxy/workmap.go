@@ -1,26 +1,12 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"time"
 
 	"github.com/jeon-jihyeon/meetproxy/internal/workmap"
 )
-
-func (c cli) mapPlan() error {
-	b, err := io.ReadAll(c.in)
-	if err != nil {
-		return err
-	}
-	p, err := workmap.New(c.data).Plan(string(b))
-	if err != nil {
-		return err
-	}
-	return json.NewEncoder(c.out).Encode(p)
-}
 
 // With daily every session start can ask for a refresh and only the first of the day runs it
 // A refresh another session is running already covers this one

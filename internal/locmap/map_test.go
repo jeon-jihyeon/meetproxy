@@ -91,46 +91,6 @@ func TestMapLocate_CorruptLine(t *testing.T) {
 	assert.ErrorContains(t, err, "line 2 is corrupt")
 }
 
-func TestMapRoute(t *testing.T) {
-	t.Parallel()
-	base := t.TempDir()
-	m := locmap.New(t.TempDir())
-	path := func(name, rel string) locmap.Path {
-		return locmap.Path{Name: name, Root: filepath.Join(base, name), Rel: rel}
-	}
-	entries := []locmap.Entry{
-		{RelayId: "r1", Topic: "할당 지연", Keywords: []string{"할당"}, Paths: []locmap.Path{path("svc", "alloc.go")}},
-		{RelayId: "r2", Topic: "할당 오류", Keywords: []string{"할당"}, Paths: []locmap.Path{path("svc", "pipeline.go")}},
-		{RelayId: "r3", Topic: "할당 화면", Keywords: []string{"화면"}, Paths: []locmap.Path{path("web", "page.tsx")}},
-		{RelayId: "r4", Topic: "캐시 만료", Keywords: []string{"캐시"}, Paths: []locmap.Path{path("web", "page.tsx")}},
-		{RelayId: "r5", Topic: "캐시 갱신", Keywords: []string{"캐시"}, Paths: []locmap.Path{
-			path("worker", "alloc.go"), path("worker", "pipeline.go"),
-		}},
-	}
-	for _, e := range entries {
-		require.NoError(t, m.Add(e))
-	}
-
-	tcs := []struct {
-		name  string
-		terms []string
-		want  string
-	}{
-		{"picks the place with more matching answers", []string{"할당"}, filepath.Join(base, "svc")},
-		{"matches a keyword", []string{"화면"}, filepath.Join(base, "web")},
-		{"counts an answer once however many files it has", []string{"캐시"}, filepath.Join(base, "web")},
-		{"returns nothing without a match", []string{"배포"}, ""},
-	}
-	for _, tc := range tcs {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := m.Route(tc.terms)
-			require.NoError(t, err)
-			assert.Equal(t, tc.want, got)
-		})
-	}
-}
-
 func TestMapCompact(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()

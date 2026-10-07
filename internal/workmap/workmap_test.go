@@ -95,14 +95,12 @@ func transcript(t *testing.T, config, name string, truncate bool, lines ...strin
 type got struct {
 	prompt string
 	root   string
-	skills []string
-	files  []string
 }
 
 func view(cs []workmap.Case) []got {
 	var out []got
 	for _, c := range cs {
-		out = append(out, got{c.Prompt, c.Root, c.Skills, c.Files})
+		out = append(out, got{c.Prompt, c.Root})
 	}
 	return out
 }
@@ -130,26 +128,13 @@ func TestRefresh(t *testing.T) {
 		want  []got
 	}{
 		{
-			"a typed prompt keeps its skills, tools and files",
+			"a typed prompt keeps its place whatever tools answered it",
 			[]string{
 				line(t, prompt(m.svc, "할당 우선순위 로직 설명", map[string]any{"promptSource": "typed"})),
 				line(t, uses(m.svc, tool("Read", map[string]any{"file_path": alloc}),
 					tool("Skill", map[string]any{"skill": "go-review"}), tool(slack, map[string]any{}))),
 			},
-			[]got{{"할당 우선순위 로직 설명", m.svc, []string{"go-review"}, []string{alloc}}},
-		},
-		{
-			"a path input counts as a file",
-			[]string{line(t, prompt(m.svc, "검색 범위 확인", nil)), line(t, uses(m.svc, tool("Grep", map[string]any{"path": m.svc})))},
-			[]got{{"검색 범위 확인", m.svc, nil, []string{m.svc}}},
-		},
-		{
-			"the skill an answer is attributed to counts",
-			[]string{
-				line(t, prompt(m.svc, "배포 절차 확인", nil)),
-				line(t, map[string]any{"type": "assistant", "attributionSkill": "deploy", "message": map[string]any{"content": []any{}}}),
-			},
-			[]got{{"배포 절차 확인", m.svc, []string{"deploy"}, nil}},
+			[]got{{"할당 우선순위 로직 설명", m.svc}},
 		},
 		{
 			"prompts the user did not type are skipped",
@@ -166,9 +151,9 @@ func TestRefresh(t *testing.T) {
 			nil,
 		},
 		{
-			"a slash command is its arguments with its name as the skill",
+			"a slash command is its arguments",
 			[]string{command("incident-triage", "5xx 급증 원인")},
-			[]got{{"5xx 급증 원인", m.svc, []string{"incident-triage"}, nil}},
+			[]got{{"5xx 급증 원인", m.svc}},
 		},
 		{
 			"markup and short prompts are skipped",
@@ -182,7 +167,7 @@ func TestRefresh(t *testing.T) {
 		{
 			"a scratch folder belongs to the place the transcript started in",
 			[]string{line(t, prompt(m.svc, "첫 질문 정리", nil)), line(t, prompt(scratch, "스크래치에서 이어간 질문", nil))},
-			[]got{{"첫 질문 정리", m.svc, nil, nil}, {"스크래치에서 이어간 질문", m.svc, nil, nil}},
+			[]got{{"첫 질문 정리", m.svc}, {"스크래치에서 이어간 질문", m.svc}},
 		},
 		{
 			"a transcript only in a scratch folder has no place",
@@ -192,7 +177,7 @@ func TestRefresh(t *testing.T) {
 		{
 			"a line still being written waits",
 			[]string{line(t, prompt(m.wiki, "완성된 질문 하나", nil)), `{"type":"user","cwd":"`},
-			[]got{{"완성된 질문 하나", m.wiki, nil, nil}},
+			[]got{{"완성된 질문 하나", m.wiki}},
 		},
 	}
 	for _, tc := range tcs {
@@ -291,8 +276,8 @@ func TestRefreshRetry(t *testing.T) {
 	cases, err := s.Cases()
 	require.NoError(t, err)
 	assert.Equal(t, []got{
-		{"할당 우선순위 로직 설명", m.svc, nil, nil},
-		{"스크래치 질문", m.svc, nil, nil},
+		{"할당 우선순위 로직 설명", m.svc},
+		{"스크래치 질문", m.svc},
 	}, view(cases))
 }
 
@@ -508,75 +493,6 @@ func TestMethods(t *testing.T) {
 		{Name: "slack:digest", Description: "Channel digest per day"},
 		{Name: "slack:standup", Description: "Daily standup from activity"},
 	}, methods)
-}
-
-func TestPlan(t *testing.T) {
-	t.Parallel()
-	m := newMachine(t)
-	docs := filepath.Join(filepath.Dir(m.svc), "docs")
-	require.NoError(t, os.MkdirAll(docs, 0o755))
-	transcript(t, m.config, "a", false,
-		line(t, prompt(m.svc, "할당 우선순위 로직 설명", nil)),
-		line(t, uses(m.svc, tool("Read", map[string]any{"file_path": filepath.Join(m.svc, "alloc.go")}))),
-		line(t, prompt(m.svc, "할당 실패 원인", nil)),
-		line(t, prompt(m.svc, "우선순위 계산 위치", nil)),
-		line(t, prompt(m.svc, "할당 우선순위 변경 이력", nil)),
-		line(t, prompt(m.wiki, "온콜 런북 정리", nil)),
-		line(t, prompt(m.wiki, "할당 런북 링크", nil)),
-		line(t, prompt(docs, "문서 목차 정리", nil)),
-	)
-	data := t.TempDir()
-	// An answer the location map recorded in the wiki
-	writeFile(t, filepath.Join(data, "map.jsonl"), line(t, map[string]any{
-		"relay_id": "r1", "topic": "정산 리포트 위치", "keywords": []string{"정산"},
-		"paths": []any{map[string]any{"repo": "wiki", "root": m.wiki, "rel": "."}},
-	}))
-	s := workmap.New(data)
-	_, err := s.Refresh(m.config, false, time.Now())
-	require.NoError(t, err)
-
-	type want struct {
-		name       string
-		root       string
-		candidates []string
-		skills     []string
-		files      []string
-	}
-	alloc := []string{filepath.Join(m.svc, "alloc.go")}
-	tcs := []struct {
-		name string
-		text string
-		want want
-	}{
-		{"a place named by its module wins", "adserver 에러 봐줘", want{"svc", m.svc, nil, nil, nil}},
-		{"a name followed by a Korean particle names the place", "svc에서 에러 봐줘", want{"svc", m.svc, nil, nil, nil}},
-		{"a name inside another word names nothing", "myadserver 에러 봐줘", want{"", "", nil, nil, nil}},
-		{"a named place wins over the location map", "svc 정산 봐줘", want{"svc", m.svc, nil, nil, nil}},
-		{"the location map picks the place its answers rest on", "정산 리포트 봐줘", want{"wiki", m.wiki, nil, nil, nil}},
-		{"two agreeing cases pick the place and its files", "할당 우선순위가 왜 바뀌나", want{"svc", m.svc, nil, nil, alloc}},
-		{"a common word names a place only when nothing else decides", "update the docs", want{"docs", docs, nil, nil, nil}},
-		{"agreeing cases win over a common word", "할당 우선순위 docs", want{"svc", m.svc, nil, nil, alloc}},
-		{"the location map wins over a common word", "정산 docs", want{"wiki", m.wiki, nil, nil, nil}},
-		{"a single case leaves candidates", "온콜 담당 누구", want{"", "", []string{"wiki"}, nil, nil}},
-		{"a skill matches by its description", "지연 원인 파악 부탁", want{"", "", []string{"svc"}, []string{"incident-triage"}, nil}},
-		{"nothing matches", "점심 메뉴", want{"", "", nil, nil, nil}},
-		{"a known place given as place= routes there", "[place=wiki] 할당 우선순위가 왜 바뀌나", want{"wiki", m.wiki, nil, nil, nil}},
-		{"a known place given as repo= routes there", "[repo=svc] 온콜 담당 누구", want{"svc", m.svc, nil, nil, nil}},
-		{"an unknown place given is ignored", "[place=elsewhere] 할당 우선순위가 왜 바뀌나", want{"svc", m.svc, nil, nil, alloc}},
-		{"a request without words plans nothing", "?? !!", want{"", "", nil, nil, nil}},
-	}
-	for _, tc := range tcs {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			p, err := s.Plan(tc.text)
-			require.NoError(t, err)
-			var names []string
-			for _, c := range p.Candidates {
-				names = append(names, c.Name)
-			}
-			assert.Equal(t, tc.want, want{p.Name, p.Root, names, p.Skills, p.Files})
-		})
-	}
 }
 
 // A map from before formats is read again from the start to find examples

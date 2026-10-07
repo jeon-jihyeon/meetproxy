@@ -42,20 +42,26 @@ func TestRun(t *testing.T) {
 	repo := gitRepo(t, "svc", "pkg/alloc.go")
 	inRepo := filepath.Join(repo, "pkg", "alloc.go")
 	link := "https://w.slack.com/archives/C1/p1"
+	later := "https://w.slack.com/archives/C1/p2"
 	id := inbox.IdOf(link)
+	thread := inbox.IdOf("w.slack.com/C1/1")
 	allowed := step{"allow", []string{"slack:C1"}, ""}
-	queued := step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes"}, ""}
-	prDelegation := `{"id":"pr","when":"mention","link":"github-pr","do":"review","post":"auto"}`
-	builtIn := `{"id":"default-review","when":"mention","link":"github-pr","do":"review","post":"auto","approve":"self"},` +
-		`{"id":"default-review-request","when":"review-request","do":"review","post":"ask","approve":"self"},` +
-		`{"id":"default-dm","when":"dm","do":"answer","post":"auto"},` +
-		`{"id":"default-own-pr","when":"own-pr","do":"answer","post":"ask"},` +
-		`{"id":"default","when":"mention","do":"answer","post":"auto"}]`
-	added := strconv.FormatInt(now.Unix(), 10)
+	queued := step{"inbox", []string{"add", link}, ""}
+	taken := step{"inbox", []string{"take", id}, ""}
+	inThread := func(link, ts, text string) step {
+		return step{"inbox", []string{"add", link, "--thread", "w.slack.com/C1/1", "--ts", ts, "--summary", text}, ""}
+	}
+	prDelegation := `{"id":"pr","when":"mention","link":"github-pr","do":"review"}`
+	builtIn := `{"id":"default-review","when":"mention","link":"github-pr","do":"review","approve":"self"},` +
+		`{"id":"default-review-request","when":"review-request","do":"review","approve":"self"},` +
+		`{"id":"default-dm","when":"dm","do":"answer"},` +
+		`{"id":"default-own-pr","when":"own-pr","do":"answer"},` +
+		`{"id":"default","when":"mention","do":"answer"}]`
 	recorded := []step{
 		{"open", []string{"o"}, ""},
 		{"close", []string{"--topic", "할당 원인", "--keywords", "할당", "--paths", inRepo}, ""},
 	}
+	long := strings.Repeat("가", 250)
 
 	type want struct {
 		code   int
@@ -80,7 +86,10 @@ func TestRun(t *testing.T) {
 			step{"dest", []string{"https://w.slack.com/archives/C1/p1"}, ""},
 			want{0, "allowed", false},
 		},
-		{"allow rejects a pattern without a normal form", "s1", false, nil, step{"allow", []string{"https://example.com"}, ""}, want{1, "", true}},
+		{
+			"allow rejects a pattern without a normal form", "s1", false, nil,
+			step{"allow", []string{"https://example.com"}, ""}, want{1, "", true},
+		},
 		{
 			"usage error for close without --topic", "s1", false,
 			[]step{{"open", []string{"o"}, ""}}, step{"close", nil, ""}, want{exitUsage, "", true},
@@ -98,110 +107,162 @@ func TestRun(t *testing.T) {
 			step{"locate", []string{"할당이"}, ""},
 			want{0, "1\tsvc\t" + inRepo + "\t할당 원인", false},
 		},
-		{"route is gone since map plan places a request", "s1", false, recorded, step{"route", []string{"할당이"}, ""}, want{exitUsage, "", true}},
+		{"route is gone", "s1", false, recorded, step{"route", []string{"할당이"}, ""}, want{exitUsage, "", true}},
 		{"usage error for open with two origins", "s1", false, nil, step{"open", []string{"o", "p"}, ""}, want{exitUsage, "", true}},
-		{"usage error for close with an argument", "s1", false, []step{{"open", []string{"o"}, ""}}, step{"close", []string{"foo", "--topic", "t"}, ""}, want{exitUsage, "", true}},
-		{"usage error for allowed with an argument", "s1", false, nil, step{"allowed", []string{"x"}, ""}, want{exitUsage, "", true}},
-		{"usage error for a flag that does not parse", "s1", false, nil, step{"locate", []string{"x", "--limit", "many"}, ""}, want{exitUsage, "", true}},
-		{"usage error for an unknown flag", "s1", false, nil, step{"locate", []string{"x", "--nope", "1"}, ""}, want{exitUsage, "", true}},
-		{"usage error for a flag the command does not read", "s1", false, nil, step{"allowed", []string{"--topic", "t"}, ""}, want{exitUsage, "", true}},
-		{"protocol needs no data directory", "s1", true, nil, step{"protocol", nil, ""}, want{0, strconv.Itoa(protocol), false}},
-		{"usage error for tick without --cwd", "s1", false, nil, step{"tick", nil, ""}, want{exitUsage, "", true}},
 		{
-			"tick prints an empty list when nothing waits", "s1", false, nil, step{"tick", []string{"--cwd", "/tmp/notes"}, ""},
-			want{0, `{"protocol":` + strconv.Itoa(protocol) + `,"place":"/tmp/notes","name":"notes","waiting":[],"slack":{"token":false},"watch":[],"acks":[]}`, false},
+			"usage error for close with an argument", "s1", false, []step{{"open", []string{"o"}, ""}},
+			step{"close", []string{"foo", "--topic", "t"}, ""}, want{exitUsage, "", true},
+		},
+		{"usage error for allowed with an argument", "s1", false, nil, step{"allowed", []string{"x"}, ""}, want{exitUsage, "", true}},
+		{
+			"usage error for a flag that does not parse", "s1", false, nil,
+			step{"locate", []string{"x", "--limit", "many"}, ""}, want{exitUsage, "", true},
+		},
+		{"usage error for an unknown flag", "s1", false, nil, step{"locate", []string{"x", "--nope", "1"}, ""}, want{exitUsage, "", true}},
+		{
+			"usage error for a flag the command does not read", "s1", false, nil,
+			step{"allowed", []string{"--topic", "t"}, ""}, want{exitUsage, "", true},
+		},
+		{"protocol needs no data directory", "s1", true, nil, step{"protocol", nil, ""}, want{0, strconv.Itoa(protocol), false}},
+		{"usage error for tick with --cwd", "s1", false, nil, step{"tick", []string{"--cwd", "/tmp"}, ""}, want{exitUsage, "", true}},
+		{
+			"tick prints an empty list when nothing waits", "s1", false, nil, step{"tick", nil, ""},
+			want{0, `{"protocol":` + strconv.Itoa(protocol) + `,"waiting":[],"slack":{"token":false},"watch":[],"acks":[]}`, false},
 		},
 		{"allowed lists the patterns", "s1", false, []step{allowed}, step{"allowed", nil, ""}, want{0, "slack:C1", false}},
 		{
-			"can-post allows where the open relay came from", "s1", false, []step{{"open", []string{"https://w.slack.com/archives/C7/p1"}, ""}},
+			"can-post allows where the open relay came from", "s1", false,
+			[]step{{"open", []string{"https://w.slack.com/archives/C7/p1"}, ""}},
 			step{"can-post", []string{"https://w.slack.com/archives/C7/p2"}, ""}, want{0, "allowed", false},
 		},
 		{
-			"can-post denies another place without an allow list entry", "s1", false, []step{{"open", []string{"https://w.slack.com/archives/C7/p1"}, ""}},
+			"can-post denies another place without an allow list entry", "s1", false,
+			[]step{{"open", []string{"https://w.slack.com/archives/C7/p1"}, ""}},
 			step{"can-post", []string{"https://w.slack.com/archives/C8/p2"}, ""}, want{1, "denied", false},
 		},
-		{"can-post allows an allowed place with no relay", "s1", false, []step{allowed}, step{"can-post", []string{"slack:C1"}, ""}, want{0, "allowed", false}},
 		{
-			"inbox add keeps the place it is given and ignores the location map", "s1", false, append([]step{allowed}, recorded...),
-			step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--keywords", "할당,지연", "--ts", "1800000000.0001", "--name", "web"}, ""},
-			want{0, id + "\tnew\tweb\tnew", false},
+			"can-post allows an allowed place with no relay", "s1", false, []step{allowed},
+			step{"can-post", []string{"slack:C1"}, ""}, want{0, "allowed", false},
+		},
+		{"inbox add queues an open request", "s1", false, []step{allowed}, queued, want{0, id + "\topen\tnew", false}},
+		{"inbox add reports a link seen before", "s1", false, []step{allowed, queued}, queued, want{0, id + "\topen\tseen", false}},
+		{"inbox add takes a channel outside the allow list", "s1", false, nil, queued, want{0, id + "\topen\tnew", false}},
+		{
+			"usage error for inbox add with a verdict", "s1", false, nil,
+			step{"inbox", []string{"add", link, "--verdict", "handle"}, ""}, want{exitUsage, "", true},
 		},
 		{
-			"inbox add keeps an ask request", "s1", false, []step{allowed},
-			step{"inbox", []string{"add", link, "--verdict", "ask", "--reason", "deploy"}, ""}, want{0, id + "\task\t-\tnew", false},
+			"usage error for inbox add with a place", "s1", false, nil,
+			step{"inbox", []string{"add", link, "--place", "/w/svc"}, ""}, want{exitUsage, "", true},
 		},
-		{"inbox add reports a link seen before", "s1", false, []step{allowed, queued}, queued, want{0, id + "\tnew\t-\tseen", false}},
-		{"inbox add takes a channel outside the allow list", "s1", false, nil, queued, want{0, id + "\tnew\t-\tnew", false}},
 		{
-			"usage error for inbox add without a verdict", "s1", false, []step{allowed},
-			step{"inbox", []string{"add", link}, ""}, want{exitUsage, "", true},
+			"inbox add groups the messages of a thread into one request", "s1", false,
+			[]step{inThread(link, "1800000000.0001", "first")},
+			inThread(later, "1800000000.0002", "second"), want{0, thread + "\topen\tseen", false},
+		},
+		{
+			"inbox list shows the first link and the newest summary of a thread", "s1", false,
+			[]step{inThread(link, "1800000000.0001", "first"), inThread(later, "1800000000.0002", "second")},
+			step{"inbox", []string{"list"}, ""}, want{0, thread + "\topen\t-\t-\t" + link + "\tsecond", false},
+		},
+		{
+			"inbox list keeps the summary of a newer message over an older one", "s1", false,
+			[]step{inThread(later, "1800000000.0002", "second"), inThread(link, "1800000000.0001", "first")},
+			step{"inbox", []string{"list"}, ""}, want{0, thread + "\topen\t-\t-\t" + later + "\tsecond", false},
+		},
+		{
+			"inbox add keeps the first non empty line of the summary with spaces collapsed", "s1", false,
+			[]step{{"inbox", []string{"add", link, "--summary", "\n  where   is\talloc \nsecond line"}, ""}},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\topen\t-\t-\t" + link + "\twhere is alloc", false},
+		},
+		{
+			"inbox add cuts a long summary", "s1", false,
+			[]step{{"inbox", []string{"add", link, "--summary", long}, ""}},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\topen\t-\t-\t" + link + "\t" + long[:199*3] + "…", false},
+		},
+		{
+			"inbox list prints the source and the author", "s1", false,
+			[]step{{"inbox", []string{"add", link, "--source", "slack", "--author", "Kai", "--summary", "hi"}, ""}},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\topen\tslack\tKai\t" + link + "\thi", false},
+		},
+		{
+			"inbox add marks a taken request asked again", "s1", false,
+			[]step{inThread(link, "1800000000.0001", "first"), {"inbox", []string{"take", thread}, ""}},
+			inThread(later, "1800000000.0002", "second"), want{0, thread + "\ttaken\tseen", false},
+		},
+		{
+			"inbox done opens a request asked again during the take", "s1", false,
+			[]step{
+				inThread(link, "1800000000.0001", "first"), {"inbox", []string{"take", thread}, ""},
+				inThread(later, "1800000000.0002", "second"), {"inbox", []string{"done", thread}, ""},
+			},
+			step{"inbox", []string{"list"}, ""}, want{0, thread + "\topen\t-\t-\t" + link + "\tsecond", false},
 		},
 		{
 			"inbox cursor moves with the newest request", "s1", false,
-			[]step{allowed, {"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--ts", "1800000000.0001"}, ""}},
+			[]step{allowed, {"inbox", []string{"add", link, "--ts", "1800000000.0001"}, ""}},
 			step{"inbox", []string{"cursor"}, ""}, want{0, "1800000000.0001", false},
 		},
 		{
 			"inbox add moves the cursor for a link seen before", "s1", false,
 			[]step{
-				{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--ts", "1800000000.0001"}, ""},
-				{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--ts", "1800000000.0002"}, ""},
+				{"inbox", []string{"add", link, "--ts", "1800000000.0001"}, ""},
+				{"inbox", []string{"add", link, "--ts", "1800000000.0002"}, ""},
 			},
 			step{"inbox", []string{"cursor"}, ""}, want{0, "1800000000.0002", false},
 		},
 		{
-			"inbox add asks again for a done request with a new timestamp", "s1", false,
-			[]step{
-				{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--ts", "1800000000.0001"}, ""},
-				{"inbox", []string{"done", id}, ""},
-			},
-			step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--ts", "1800000000.0002"}, ""}, want{0, id + "\tnew\t-\tnew", false},
+			"inbox add opens a done request again with a new timestamp", "s1", false,
+			[]step{{"inbox", []string{"add", link, "--ts", "1800000000.0001"}, ""}, {"inbox", []string{"done", id}, ""}},
+			step{"inbox", []string{"add", link, "--ts", "1800000000.0002"}, ""}, want{0, id + "\topen\tnew", false},
 		},
 		{
 			"inbox advance moves the cursor without a request", "s1", false,
 			[]step{{"inbox", []string{"advance", "1800000000.0002"}, ""}},
 			step{"inbox", []string{"cursor"}, ""}, want{0, "1800000000.0002", false},
 		},
-		{"inbox claim takes a request and prints its link", "s1", false, []step{allowed, queued}, step{"inbox", []string{"claim", id}, ""}, want{0, link, false}},
+		{"inbox claim is gone", "s1", false, []step{queued}, step{"inbox", []string{"claim", id}, ""}, want{exitUsage, "", true}},
+		{"inbox ask is gone", "s1", false, []step{queued}, step{"inbox", []string{"ask", id}, ""}, want{exitUsage, "", true}},
+		{"inbox waiting is gone", "s1", false, []step{queued}, step{"inbox", []string{"waiting"}, ""}, want{exitUsage, "", true}},
+		{"map plan is gone", "s1", false, nil, step{"map", []string{"plan"}, "svc"}, want{exitUsage, "", true}},
+		{"slack shared is gone", "s1", false, nil, step{"slack", []string{"shared", "C1"}, ""}, want{exitUsage, "", true}},
 		{
-			"inbox claim takes nothing while the session works on another request", "s1", false,
-			[]step{allowed, queued, {"inbox", []string{"add", "https://w.slack.com/archives/C1/p2", "--verdict", "handle", "--trusted", "yes"}, ""},
-				{"inbox", []string{"claim", inbox.IdOf("https://w.slack.com/archives/C1/p2")}, ""}},
-			step{"inbox", []string{"claim", id}, ""}, want{0, "", false},
+			"inbox list hides a done request", "s1", false,
+			[]step{queued, {"inbox", []string{"add", later}, ""}, {"inbox", []string{"done", id}, ""}},
+			step{"inbox", []string{"list"}, ""}, want{0, inbox.IdOf(later) + "\topen\t-\t-\t" + later + "\t-", false},
 		},
 		{
-			"inbox waiting lists unclaimed requests with name and added time", "s1", false,
-			[]step{allowed, queued, {"inbox", []string{"add", "https://w.slack.com/archives/C1/p2", "--verdict", "ask", "--name", "wiki"}, ""},
-				{"inbox", []string{"take", id}, ""}},
-			step{"inbox", []string{"waiting"}, ""},
-			want{0, inbox.IdOf("https://w.slack.com/archives/C1/p2") + "\task\twiki\t" + added + "\thttps://w.slack.com/archives/C1/p2", false},
+			"inbox list shows a take as taken", "s1", false, []step{queued, taken},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\ttaken\t-\t-\t" + link + "\t-", false},
 		},
 		{
-			"inbox done drops a request", "s1", false,
-			[]step{allowed, queued, {"inbox", []string{"done", id}, ""}},
-			step{"inbox", []string{"list"}, ""}, want{0, id + "\tdone\t-\t" + link, false},
+			"inbox list shows a held request whose time came as open", "s1", false,
+			[]step{queued, {"inbox", []string{"hold", id, "--until", "2000-01-01T00:00:00Z"}, ""}},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\topen\t-\t-\t" + link + "\t-", false},
 		},
 		{
-			"inbox claim takes nothing while a relay is open", "s1", false,
-			[]step{allowed, {"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes"}, ""}, {"open", []string{"o"}, ""}},
-			step{"inbox", []string{"claim", id}, ""}, want{0, "", false},
+			"inbox take prints link, task, target, approve, depth and flags", "s1", false, []step{allowed, queued},
+			taken, want{0, link + "\tanswer\t-\tno\tquick\t-", false},
 		},
 		{
-			"inbox take prints link, task, target and approve", "s1", false, []step{allowed, queued},
-			step{"inbox", []string{"take", id}, ""}, want{0, link + "\tanswer\t-\tno\t-\t-\t-\tquick\t-", false},
+			"inbox take prints the depth and the flags of a follow-up", "s1", false,
+			[]step{{"inbox", []string{"add", link, "--depth", "deep", "--followup", "yes", "--correction", "yes"}, ""}},
+			taken, want{0, link + "\tanswer\t-\tno\tdeep\tfollowup,correction", false},
 		},
 		{
-			"inbox take prints the place, skills and files of the work map", "s1", false,
-			[]step{{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--place", "/w/svc", "--skills", "incident-triage,review", "--files", "/w/svc/a.go"}, ""}},
-			step{"inbox", []string{"take", id}, ""}, want{0, link + "\tanswer\t-\tno\t/w/svc\tincident-triage,review\t/w/svc/a.go\tquick\t-", false},
+			"inbox take fails while another session holds the request", "s2", false,
+			[]step{queued, {"inbox", []string{"take", id, "--session", "s1"}, ""}}, taken, want{1, "", true},
+		},
+		{
+			"inbox take fails on a done request", "s1", false,
+			[]step{queued, {"inbox", []string{"done", id}, ""}}, taken, want{1, "", true},
 		},
 		{
 			"inbox add keeps the task of a delegation and lets a review approve the user's request", "s1", false,
 			[]step{allowed, {"delegation", []string{"put"}, prDelegation}, {"inbox", []string{
-				"add", link, "--verdict", "handle", "--trusted", "yes", "--delegation", "pr",
-				"--target", "https://github.com/o/r/pull/1", "--self", "yes", "--name", "r",
+				"add", link, "--delegation", "pr", "--target", "https://github.com/o/r/pull/1", "--self", "yes",
 			}, ""}},
-			step{"inbox", []string{"take", id}, ""}, want{0, link + "\treview\thttps://github.com/o/r/pull/1\tyes\t-\t-\t-\tquick\t-", false},
+			taken, want{0, link + "\treview\thttps://github.com/o/r/pull/1\tyes\tquick\t-", false},
 		},
 		{
 			"inbox cursor keeps one per key", "s1", false,
@@ -214,68 +275,43 @@ func TestRun(t *testing.T) {
 		},
 		{
 			"delegation put adds a channel delegation", "s1", false,
-			[]step{{"delegation", []string{"put"}, `{"id":"alerts","when":"channel","channel":"C1","host":"w.slack.com","do":"investigate","post":"auto"}`}},
+			[]step{{"delegation", []string{"put"}, `{"id":"alerts","when":"channel","channel":"C1","host":"w.slack.com","do":"investigate"}`}},
 			step{"delegation", nil, ""},
-			want{0, `[{"id":"alerts","when":"channel","channel":"C1","host":"w.slack.com","do":"investigate","post":"auto"},` + builtIn, false},
+			want{0, `[{"id":"alerts","when":"channel","channel":"C1","host":"w.slack.com","do":"investigate"},` + builtIn, false},
 		},
 		{
 			"delegation match picks a review for a pull request link", "s1", false, []step{{"delegation", []string{"put"}, prDelegation}},
-			step{"delegation", []string{"match", "mention"}, `{"text":"<@U1> review https://github.com/o/svc/pull/7 please","from":"U2","trusted":true}`},
-			want{0, `{"delegation":"pr","task":"review","post":"auto","triage":false,"target":"https://github.com/o/svc/pull/7","workspace":"svc","depth":"quick","digest":"d4893200715e"}`, false},
+			step{"delegation", []string{"match", "mention"}, `{"text":"<@U1> review https://github.com/o/svc/pull/7 please","from":"U2"}`},
+			want{0, `{"delegation":"pr","task":"review","triage":false,"target":"https://github.com/o/svc/pull/7",` +
+				`"depth":"quick","digest":"d4893200715e"}`, false},
 		},
 		{
-			"delegation match reviews a requested pull request after asking", "s1", false, nil,
+			"delegation match reviews a requested pull request", "s1", false, nil,
 			step{"delegation", []string{"match", "review-request"}, `{"link":"https://github.com/o/svc/pull/9","text":"Review requested: fix","from":"a"}`},
-			want{0, `{"delegation":"default-review-request","task":"review","post":"ask","triage":false,"target":"https://github.com/o/svc/pull/9","workspace":"svc","depth":"quick","digest":"a7387bdfe8ee"}`, false},
+			want{0, `{"delegation":"default-review-request","task":"review","triage":false,"target":"https://github.com/o/svc/pull/9",` +
+				`"depth":"quick","digest":"a7387bdfe8ee"}`, false},
 		},
 		{
 			"delegation match falls back to the default for a question", "s1", false, []step{{"delegation", []string{"put"}, prDelegation}},
-			step{"delegation", []string{"match", "mention"}, `{"text":"where is alloc","from":"U2","trusted":true}`},
-			want{0, `{"delegation":"default","task":"answer","post":"auto","triage":true,"depth":"quick","digest":"f6c5abd79fc4"}`, false},
+			step{"delegation", []string{"match", "mention"}, `{"text":"where is alloc","from":"U2"}`},
+			want{0, `{"delegation":"default","task":"answer","triage":true,"depth":"quick","digest":"f6c5abd79fc4"}`, false},
 		},
 		{
 			"delegation match reads a deep request", "s1", false, nil,
-			step{"delegation", []string{"match", "dm"}, `{"text":"[deep] why is alloc slow","from":"U2","trusted":true}`},
-			want{0, `{"delegation":"default-dm","task":"answer","post":"auto","triage":true,"depth":"deep","digest":"` + delegation.Digest("[deep] why is alloc slow") + `"}`, false},
+			step{"delegation", []string{"match", "dm"}, `{"text":"[deep] why is alloc slow","from":"U2"}`},
+			want{0, `{"delegation":"default-dm","task":"answer","triage":true,"depth":"deep","digest":"` +
+				delegation.Digest("[deep] why is alloc slow") + `"}`, false},
 		},
 		{
-			"delegation match of a follow-up picks the delegation by id and triages it", "s1", false, []step{{"delegation", []string{"put"}, prDelegation}},
-			step{"delegation", []string{"match", "pr", "--followup", "yes"}, `{"text":"thanks","from":"U2","trusted":true}`},
-			want{0, `{"delegation":"pr","task":"review","post":"auto","triage":true,"depth":"quick","digest":"` + delegation.Digest("thanks") + `"}`, false},
-		},
-		{
-			"delegation match asks first for a sender outside the trust set", "s1", false, nil,
-			step{"delegation", []string{"match", "mention"}, `{"text":"where is alloc","from":"U2"}`},
-			want{0, `{"delegation":"default","task":"answer","post":"ask","triage":true,"depth":"quick","digest":"f6c5abd79fc4"}`, false},
-		},
-		{
-			"inbox add asks about a handle from outside the trust set", "s1", false, nil,
-			step{"inbox", []string{"add", link, "--verdict", "handle", "--from", "U2"}, ""}, want{0, id + "\task\t-\tnew", false},
-		},
-		{
-			"inbox add asks about a handle the sender is not trusted for", "s1", false, nil,
-			step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "no"}, ""}, want{0, id + "\task\t-\tnew", false},
-		},
-		{
-			"inbox add keeps the user's own request a handle", "s1", false, nil,
-			step{"inbox", []string{"add", link, "--verdict", "handle", "--self", "yes"}, ""}, want{0, id + "\tnew\t-\tnew", false},
-		},
-		{
-			"inbox add keeps a handle from an id the delegation names", "s1", false,
-			[]step{{"delegation", []string{"put"}, `{"id":"alerts","when":"channel","channel":"C1","host":"w.slack.com","from":["U9"],"do":"investigate","post":"auto"}`}},
-			step{"inbox", []string{"add", link, "--verdict", "handle", "--from", "U9", "--delegation", "alerts"}, ""}, want{0, id + "\tnew\t-\tnew", false},
-		},
-		{
-			"inbox add says why it asks", "s1", false, []step{{"inbox", []string{"add", link, "--verdict", "handle"}, ""}},
-			step{"inbox", []string{"list"}, ""}, want{0, id + "\task\t-\t" + link + "\tsender outside the trust set", false},
-		},
-		{
-			"usage error for inbox add with an unknown trust", "s1", false, nil,
-			step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "maybe"}, ""}, want{exitUsage, "", true},
+			"delegation match of a follow-up picks the delegation by id and triages it", "s1", false,
+			[]step{{"delegation", []string{"put"}, prDelegation}},
+			step{"delegation", []string{"match", "pr", "--followup", "yes"}, `{"text":"thanks","from":"U2"}`},
+			want{0, `{"delegation":"pr","task":"review","triage":true,"depth":"quick","digest":"` + delegation.Digest("thanks") + `"}`, false},
 		},
 		{
 			"delegation match prints nothing when the author of a channel delegation differs", "s1", false,
-			[]step{{"delegation", []string{"put"}, `{"id":"alerts","when":"channel","channel":"C1","host":"w.slack.com","from":["datadog"],"words":["Triggered"],"do":"investigate","post":"auto"}`}},
+			[]step{{"delegation", []string{"put"}, `{"id":"alerts","when":"channel","channel":"C1","host":"w.slack.com",` +
+				`"from":["datadog"],"words":["Triggered"],"do":"investigate"}`}},
 			step{"delegation", []string{"match", "alerts"}, `{"text":"Recovered: cpu","from":"U9","author":"Datadog"}`},
 			want{0, "", false},
 		},
@@ -285,27 +321,43 @@ func TestRun(t *testing.T) {
 			step{"delegation", nil, ""}, want{0, `[` + builtIn, false},
 		},
 		{
-			"inbox ask hands a taken request back and closes its relay", "s1", false,
-			[]step{allowed, queued, {"inbox", []string{"take", id}, ""}, {"open", []string{link}, ""},
-				{"inbox", []string{"ask", id, "--reason", "needs a decision"}, ""}},
+			"inbox question settles a taken request and closes its relay", "s1", false,
+			[]step{allowed, queued, taken, {"open", []string{link}, ""}, {"inbox", []string{"question", id}, ""}},
 			step{"close", []string{"--topic", "t"}, ""}, want{1, "", true},
 		},
 		{
+			"inbox question lists the request as waiting for the requester", "s1", false,
+			[]step{queued, taken, {"inbox", []string{"question", id}, ""}},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\tquestion\t-\t-\t" + link + "\t-", false},
+		},
+		{
 			"usage error for inbox take without a session", "", false, []step{allowed, queued},
-			step{"inbox", []string{"take", id}, ""}, want{exitUsage, "", true},
+			taken, want{exitUsage, "", true},
 		},
 		{"usage error for inbox without a command", "s1", false, nil, step{"inbox", nil, ""}, want{exitUsage, "", true}},
 		{"usage error for an unknown inbox command", "s1", false, nil, step{"inbox", []string{"drop"}, ""}, want{exitUsage, "", true}},
 		{"inbox add fails while paused", "s1", false, []step{allowed, {"pause", nil, ""}}, queued, want{1, "", true}},
 		{
 			"inbox add works after resume", "s1", false, []step{allowed, {"pause", nil, ""}, {"resume", nil, ""}},
-			queued, want{0, id + "\tnew\t-\tnew", false},
+			queued, want{0, id + "\topen\tnew", false},
 		},
 		{
 			"close marks the request it relayed done", "s1", false,
-			[]step{allowed, queued, {"inbox", []string{"take", id}, ""},
-				{"open", []string{link}, ""}, {"close", []string{"--topic", "t", "--paths", inRepo}, ""}},
-			step{"inbox", []string{"list"}, ""}, want{0, id + "\tdone\t-\t" + link, false},
+			[]step{allowed, queued, taken, {"open", []string{link}, ""}, {"close", []string{"--topic", "t", "--paths", inRepo}, ""}},
+			step{"inbox", []string{"list"}, ""}, want{0, "", false},
+		},
+		{
+			"close settles the request of a thread found by its first link", "s1", false,
+			[]step{
+				inThread(link, "1800000000.0001", "first"), inThread(later, "1800000000.0002", "second"),
+				{"inbox", []string{"take", thread}, ""}, {"open", []string{link}, ""}, {"close", []string{"--topic", "t"}, ""},
+			},
+			step{"inbox", []string{"list"}, ""}, want{0, "", false},
+		},
+		{
+			"close of a relay opened by hand for an unknown link settles nothing", "s1", false,
+			[]step{queued, {"open", []string{"https://w.slack.com/archives/C1/p9"}, ""}, {"close", []string{"--topic", "t"}, ""}},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\topen\t-\t-\t" + link + "\t-", false},
 		},
 		{"triage defaults to claude", "s1", false, nil, step{"triage", nil, ""}, want{0, "claude", false}},
 		{
@@ -314,13 +366,27 @@ func TestRun(t *testing.T) {
 		},
 		{"triage refuses an unknown engine", "s1", false, nil, step{"triage", []string{"gemini"}, ""}, want{1, "", true}},
 		{"usage error for a second engine", "s1", false, nil, step{"triage", []string{"claude", "extra"}, ""}, want{exitUsage, "", true}},
-		{"usage error for triage command without a command line", "s1", false, nil, step{"triage", []string{"command"}, ""}, want{exitUsage, "", true}},
-		{"usage error for triage run on input that is no JSON", "s1", false, nil, step{"triage", []string{"run"}, "text"}, want{exitUsage, "", true}},
-		{"usage error for triage prompt on input that is no JSON", "s1", false, nil, step{"triage", []string{"prompt"}, "text"}, want{exitUsage, "", true}},
+		{
+			"usage error for triage command without a command line", "s1", false, nil,
+			step{"triage", []string{"command"}, ""}, want{exitUsage, "", true},
+		},
+		{
+			"usage error for triage run on input that is no JSON", "s1", false, nil,
+			step{"triage", []string{"run"}, "text"}, want{exitUsage, "", true},
+		},
+		{
+			"usage error for triage prompt on input that is no JSON", "s1", false, nil,
+			step{"triage", []string{"prompt"}, "text"}, want{exitUsage, "", true},
+		},
 		{
 			"triage parse reads a verdict from a reply", "s1", false, nil,
-			step{"triage", []string{"parse"}, "sure {\"verdict\":\"handle\",\"reason\":\"code question\"}"},
-			want{0, `{"verdict":"handle","reason":"code question"}`, false},
+			step{"triage", []string{"parse"}, "sure {\"verdict\":\"keep\",\"reason\":\"code question\"}"},
+			want{0, `{"verdict":"keep","reason":"code question"}`, false},
+		},
+		{
+			"triage parse keeps a verdict that is gone", "s1", false, nil,
+			step{"triage", []string{"parse"}, `{"verdict":"handle","reason":"r"}`},
+			want{0, `{"verdict":"keep","reason":"triage failed: unknown verdict \"handle\""}`, false},
 		},
 		{
 			"triage run uses a command engine", "s1", false,
@@ -328,11 +394,12 @@ func TestRun(t *testing.T) {
 			step{"triage", []string{"run"}, `{"text":"fyi"}`}, want{0, `{"verdict":"ignore","reason":"fyi"}`, false},
 		},
 		{
-			"triage run asks when the engine fails", "s1", false, []step{{"triage", []string{"command", "exit 3"}, ""}},
-			step{"triage", []string{"run"}, `{"text":"x"}`}, want{0, `{"verdict":"ask","reason":"triage failed: exit 3: exit status 3 "}`, false},
+			"triage run keeps the message when the engine fails", "s1", false, []step{{"triage", []string{"command", "exit 3"}, ""}},
+			step{"triage", []string{"run"}, `{"text":"x"}`}, want{0, `{"verdict":"keep","reason":"triage failed: exit 3: exit status 3 "}`, false},
 		},
 		{
-			"triage keeps a long flag inside a command line", "s1", false, []step{{"triage", []string{"command", "laya", "--limit", "5"}, ""}},
+			"triage keeps a long flag inside a command line", "s1", false,
+			[]step{{"triage", []string{"command", "laya", "--limit", "5"}, ""}},
 			step{"triage", nil, ""}, want{0, "command laya --limit 5", false},
 		},
 		{
@@ -345,22 +412,32 @@ func TestRun(t *testing.T) {
 			step{"can-post", []string{"https://github.com/o/r/pull/1"}, ""}, want{0, "allowed", false},
 		},
 		{"can-post fails on a link that names no place", "s1", false, nil, step{"can-post", []string{"notalink"}, ""}, want{1, "", true}},
-		{
-			"inbox add fails on a link that names no place", "s1", false, nil,
-			step{"inbox", []string{"add", "notalink", "--verdict", "handle", "--trusted", "yes"}, ""}, want{1, "", true},
-		},
+		{"inbox add fails on a link that names no place", "s1", false, nil, step{"inbox", []string{"add", "notalink"}, ""}, want{1, "", true}},
 		{
 			"inbox add fails on a timestamp the cursor refuses", "s1", false, nil,
-			step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--ts", "abc"}, ""}, want{1, "", true},
+			step{"inbox", []string{"add", link, "--ts", "abc"}, ""}, want{1, "", true},
 		},
 		{
 			"inbox add fails on an unknown delegation", "s1", false, nil,
-			step{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes", "--delegation", "nope"}, ""}, want{1, "", true},
+			step{"inbox", []string{"add", link, "--delegation", "nope"}, ""}, want{1, "", true},
+		},
+		{
+			"usage error for inbox add with an unknown follow-up", "s1", false, nil,
+			step{"inbox", []string{"add", link, "--followup", "maybe"}, ""}, want{exitUsage, "", true},
+		},
+		{
+			"usage error for inbox add with an unknown depth", "s1", false, nil,
+			step{"inbox", []string{"add", link, "--depth", "wide"}, ""}, want{exitUsage, "", true},
 		},
 		{
 			"inbox hold puts a taken request off", "s1", false,
-			[]step{queued, {"inbox", []string{"take", id}, ""}, {"inbox", []string{"hold", id}, ""}},
-			step{"inbox", []string{"list"}, ""}, want{0, id + "\theld\t-\t" + link, false},
+			[]step{queued, taken, {"inbox", []string{"hold", id}, ""}},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\theld\t-\t-\t" + link + "\t-", false},
+		},
+		{
+			"inbox hold puts an open request off", "s1", false,
+			[]step{queued, {"inbox", []string{"hold", id, "--until", "1h"}, ""}},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\theld\t-\t-\t" + link + "\t-", false},
 		},
 		{
 			"inbox done keeps the relay of another request open", "s1", false,
@@ -440,7 +517,7 @@ func TestRun_Retry(t *testing.T) {
 	id := inbox.IdOf(link)
 	evidence := gitRepo(t, "svc", "a.go")
 	taken := []step{
-		{"inbox", []string{"add", link, "--verdict", "handle", "--trusted", "yes"}, ""},
+		{"inbox", []string{"add", link}, ""},
 		{"inbox", []string{"take", id}, ""},
 		{"open", []string{link}, ""},
 	}
@@ -460,9 +537,12 @@ func TestRun_Retry(t *testing.T) {
 		{"close after the request failed to settle", filepath.Join("inbox", id+".json"), closing, listed, ""},
 		{"close after the location map failed", "map.jsonl", closing, located, "1\tsvc\t" + evidence + "\tt"},
 		{"close after the relay failed to close", closedRelays, closing, located, "1\tsvc\t" + evidence + "\tt"},
-		{"ask after the relay failed to close", closedRelays, step{"inbox", []string{"ask", id, "--reason", "r"}, ""}, listed, id + "\task\t-\t" + link + "\tr"},
-		{"hold after the relay failed to close", closedRelays, step{"inbox", []string{"hold", id}, ""}, listed, id + "\theld\t-\t" + link},
-		{"done after the relay failed to close", closedRelays, step{"inbox", []string{"done", id}, ""}, listed, id + "\tdone\t-\t" + link},
+		{
+			"question after the relay failed to close", closedRelays, step{"inbox", []string{"question", id}, ""}, listed,
+			id + "\tquestion\t-\t-\t" + link + "\t-",
+		},
+		{"hold after the relay failed to close", closedRelays, step{"inbox", []string{"hold", id}, ""}, listed, id + "\theld\t-\t-\t" + link + "\t-"},
+		{"done after the relay failed to close", closedRelays, step{"inbox", []string{"done", id}, ""}, listed, ""},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -499,49 +579,56 @@ func TestRun_Retry(t *testing.T) {
 
 func TestRun_Tick(t *testing.T) {
 	t.Parallel()
-	now := time.Now()
-	repo := gitRepo(t, "svc", "a.go")
-	web := filepath.Join(t.TempDir(), "web")
-	older, newer := "https://w.slack.com/archives/C1/p1", "https://w.slack.com/archives/C1/p2"
+	now := time.Unix(1893456000, 0)
+	opened, held := "https://w.slack.com/archives/C1/p1", "https://w.slack.com/archives/C1/p2"
+	taken, done := "https://w.slack.com/archives/C1/p3", "https://w.slack.com/archives/C1/p4"
+	until := now.Add(time.Hour)
 	data := []string{"--data", t.TempDir()}
-	adds := [][]string{
-		{"add", older, "--verdict", "handle", "--trusted", "yes", "--name", "svc", "--place", repo},
-		{"add", newer, "--verdict", "ask", "--name", "web"},
+	steps := []step{
+		{"inbox", []string{"add", opened, "--source", "slack", "--author", "Kai", "--summary", "where is alloc\nmore"}, ""},
+		{"inbox", []string{"add", held}, ""},
+		{"inbox", []string{"add", taken}, ""},
+		{"inbox", []string{"add", done}, ""},
+		{"inbox", []string{"hold", inbox.IdOf(held), "--until", until.Format(time.RFC3339)}, ""},
+		{"inbox", []string{"take", inbox.IdOf(taken)}, ""},
+		{"inbox", []string{"done", inbox.IdOf(done)}, ""},
 	}
-	for i, a := range adds {
-		code, err := run("inbox", slices.Concat(data, a), "s1", now.Add(time.Duration(i)*time.Second), nil, &bytes.Buffer{})
+	for i, s := range steps {
+		code, err := run(s.cmd, slices.Concat(data, s.args), "s1", now.Add(time.Duration(i)*time.Second), nil, &bytes.Buffer{})
 		require.NoError(t, err)
 		require.Equal(t, 0, code)
 	}
-	row := func(link, status, place, name string, added time.Time, here bool) string {
-		return fmt.Sprintf(`{"id":%q,"status":%q,"place":%q,"name":%q,"added":%d,"link":%q,"here":%t,"delegation":"default"}`,
-			inbox.IdOf(link), status, place, name, added.Unix(), link, here)
+	at := func(i int) int64 { return now.Add(time.Duration(i) * time.Second).Unix() }
+	openRow := fmt.Sprintf(`{"id":%q,"status":"open","open":true,"link":%q,"source":"slack","author":"Kai",`+
+		`"summary":"where is alloc","task":"answer","added":%d}`, inbox.IdOf(opened), opened, at(0))
+	heldRow := func(open bool) string {
+		return fmt.Sprintf(`{"id":%q,"status":"held","open":%t,"link":%q,"task":"answer","added":%d,"until":%d}`,
+			inbox.IdOf(held), open, held, at(1), until.Unix())
 	}
-	// Both were queued now so each still owes the eyes reaction, newest first
-	acks := fmt.Sprintf(`"watch":[],"acks":[{"id":%q,"link":%q,"react":"eyes"},{"id":%q,"link":%q,"react":"eyes"}]`,
-		inbox.IdOf(newer), newer, inbox.IdOf(older), older)
+	releasedRow := fmt.Sprintf(`{"id":%q,"status":"open","open":true,"link":%q,"task":"answer","added":%d}`,
+		inbox.IdOf(taken), taken, at(2))
+	// Every request not done owes eyes newest first and the done one has no post
+	acks := fmt.Sprintf(`[{"id":%q,"link":%q,"react":"eyes"},{"id":%q,"link":%q,"react":"eyes"},{"id":%q,"link":%q,"react":"eyes"}]`,
+		inbox.IdOf(taken), taken, inbox.IdOf(held), held, inbox.IdOf(opened), opened)
+	body := func(waiting []string, acks string) string {
+		return fmt.Sprintf(`{"protocol":%d,"waiting":[%s],"slack":{"token":false},"watch":[],"acks":%s}`,
+			protocol, strings.Join(waiting, ","), acks)
+	}
 
 	tcs := []struct {
-		name string
-		cwd  string
-		want string
+		name  string
+		after time.Duration
+		want  string
 	}{
-		{
-			"a request of the repository belongs here by its root", filepath.Join(repo, "a.go"),
-			fmt.Sprintf(`{"protocol":%d,"place":%q,"name":"svc","waiting":[%s,%s],"slack":{"token":false},%s}`, protocol, repo,
-				row(older, "new", repo, "svc", now, true), row(newer, "ask", "", "web", now.Add(time.Second), false), acks),
-		},
-		{
-			"a request stored without a root belongs here by its name", web,
-			fmt.Sprintf(`{"protocol":%d,"place":%q,"name":"web","waiting":[%s,%s],"slack":{"token":false},%s}`, protocol, web,
-				row(older, "new", repo, "svc", now, false), row(newer, "ask", "", "web", now.Add(time.Second), true), acks),
-		},
+		{"a held request waits closed and a take is left out", time.Minute, body([]string{openRow, heldRow(false)}, acks)},
+		{"a held request whose time came is open", 2 * time.Hour, body([]string{openRow, heldRow(true)}, acks)},
+		{"a take kept past a day opens again and no reaction is owed", 25 * time.Hour, body([]string{openRow, heldRow(true), releasedRow}, "[]")},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var out bytes.Buffer
-			code, err := run("tick", slices.Concat(data, []string{"--cwd", tc.cwd}), "s1", now, nil, &out)
+			code, err := run("tick", data, "s1", now.Add(tc.after), nil, &out)
 			require.NoError(t, err)
 			require.Equal(t, 0, code)
 			assert.JSONEq(t, tc.want, out.String())
@@ -553,7 +640,7 @@ func TestRun_InboxListLimit(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	older, newer := "https://w.slack.com/archives/C1/p1", "https://w.slack.com/archives/C1/p2"
-	line := func(link string) string { return inbox.IdOf(link) + "\tnew\t-\t" + link + "\t" }
+	line := func(link string) string { return inbox.IdOf(link) + "\topen\t-\t-\t" + link + "\t-" }
 	tcs := []struct {
 		name  string
 		limit string
@@ -569,7 +656,7 @@ func TestRun_InboxListLimit(t *testing.T) {
 			data := []string{"--data", t.TempDir()}
 			for i, link := range []string{older, newer} {
 				at := now.Add(time.Duration(i) * time.Second)
-				code, err := run("inbox", slices.Concat(data, []string{"add", link, "--verdict", "handle", "--trusted", "yes"}), "s1", at, nil, &bytes.Buffer{})
+				code, err := run("inbox", slices.Concat(data, []string{"add", link}), "s1", at, nil, &bytes.Buffer{})
 				require.NoError(t, err)
 				require.Equal(t, 0, code)
 			}
@@ -649,6 +736,29 @@ func TestReorder(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.want, reorder(tc.args.cmd, tc.args.args))
+		})
+	}
+}
+
+func TestSummary(t *testing.T) {
+	t.Parallel()
+	exact := strings.Repeat("가", summaryRunes)
+	tcs := []struct {
+		name string
+		text string
+		want string
+	}{
+		{"keeps a short line", "where is alloc", "where is alloc"},
+		{"keeps the first line that is not empty", "\n \t\nfirst\nsecond", "first"},
+		{"collapses whitespace", "  a \t b   c  ", "a b c"},
+		{"keeps a line of exactly the limit", exact, exact},
+		{"cuts a longer line with an ellipsis", exact + "나", strings.Repeat("가", summaryRunes-1) + "…"},
+		{"is empty for blank text", " \n\t", ""},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, summary(tc.text))
 		})
 	}
 }

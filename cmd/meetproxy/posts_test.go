@@ -21,31 +21,35 @@ func TestRun_Posts(t *testing.T) {
 	origin := "https://w.slack.com/archives/C1/p1893456100000001"
 	reply := "https://w.slack.com/archives/C1/p1893456150000001?thread_ts=1893456100.000001&cid=C1"
 	id := inbox.IdOf(origin)
-	ops := `{"id":"ops","when":"channel","channel":"C9","host":"w.slack.com","do":"investigate","post":"auto","max_per_hour":1}`
+	ops := `{"id":"ops","when":"channel","channel":"C9","host":"w.slack.com","do":"investigate","max_per_hour":1}`
+	alertLink := func(n string) string { return "https://w.slack.com/archives/C9/p189345600000000" + n }
 	alert := func(n string) step {
-		return step{"inbox", []string{"add", "https://w.slack.com/archives/C9/p189345600000000" + n, "--verdict", "handle", "--trusted", "yes", "--delegation", "ops", "--ts", "1893456000.00000" + n, "--key", "ops"}, ""}
+		return step{"inbox", []string{"add", alertLink(n), "--delegation", "ops", "--ts", "1893456000.00000" + n, "--key", "ops"}, ""}
 	}
 	steps := []struct {
 		name string
 		run  step
 		want slackWant
 	}{
-		{"the protocol is 8", step{"protocol", nil, ""}, slackWant{0, "8", false}},
+		{"the protocol is 9", step{"protocol", nil, ""}, slackWant{0, "9", false}},
 		{"a channel delegation with a limit", step{"delegation", []string{"put"}, ops}, slackWant{0, "", false}},
-		{"the first alert is queued", alert("1"), slackWant{0, inbox.IdOf("https://w.slack.com/archives/C9/p1893456000000001") + "\tnew\t-\tnew", false}},
+		{"the first alert is queued", alert("1"), slackWant{0, inbox.IdOf(alertLink("1")) + "\topen\tnew", false}},
 		{
 			"one past the limit is ignored and moves the cursor", alert("2"),
-			slackWant{0, inbox.IdOf("https://w.slack.com/archives/C9/p1893456000000002") + "\tignored\t-\t" + inbox.ErrLimited.Error(), false},
+			slackWant{0, alertLink("2") + "\tignored\t" + inbox.ErrLimited.Error(), false},
 		},
 		{"the cursor moved past it", step{"inbox", []string{"cursor", "--key", "ops"}, ""}, slackWant{0, "1893456000.000002", false}},
 		{"a post outside a scope is not recorded", step{"posts", []string{"add"}, `{"reply":"` + reply + `","body":"x"}`}, slackWant{1, "", true}},
-		{"the request is queued", step{"inbox", []string{"add", origin, "--verdict", "handle", "--trusted", "yes", "--ts", "1893456100.000001"}, ""}, slackWant{0, id + "\tnew\t-\tnew", false}},
-		{"the session takes it", step{"inbox", []string{"claim", id}, ""}, slackWant{0, origin, false}},
+		{
+			"the request is queued", step{"inbox", []string{"add", origin, "--ts", "1893456100.000001"}, ""},
+			slackWant{0, id + "\topen\tnew", false},
+		},
+		{"the session takes it", step{"inbox", []string{"take", id}, ""}, slackWant{0, origin + "\tanswer\t-\tno\tquick\t-", false}},
 		{"usage error for another kind", step{"posts", []string{"add"}, `{"reply":"` + reply + `","kind":"poem"}`}, slackWant{exitUsage, "", true}},
 		{"a post in the scope is recorded", step{"posts", []string{"add"}, `{"reply":"` + reply + `","body":"in config.go","kind":"question"}`}, slackWant{0, "recorded " + id, false}},
 		{
 			"the ledger lists it", step{"posts", []string{"list", "--limit", "1"}, ""},
-			slackWant{0, `[{"request":"` + id + `","origin":"` + origin + `","reply":"` + reply + `","body":"in config.go","delegation":"default","mode":"auto","kind":"question","session":"s1","at":"2030-01-01T00:06:40Z"}]`, false},
+			slackWant{0, `[{"request":"` + id + `","origin":"` + origin + `","reply":"` + reply + `","body":"in config.go","delegation":"default","mode":"inbox","kind":"question","session":"s1","at":"2030-01-01T00:06:40Z"}]`, false},
 		},
 		{"the session asks the requester back", step{"inbox", []string{"question", id}, ""}, slackWant{0, "", false}},
 		{"the watch moves past a reply", step{"watch", []string{"seen", id, "1893456200.000001"}, ""}, slackWant{0, "", false}},
@@ -55,6 +59,7 @@ func TestRun_Posts(t *testing.T) {
 		{"an ignored message is recorded", step{"inbox", []string{"ignore", "https://w.slack.com/archives/C1/p3", "--reason", "thanks", "--ts", "1893456300", "--key", "mention"}, ""}, slackWant{0, "", false}},
 		{"the request is acknowledged", step{"inbox", []string{"acked", id, "--react", "eyes"}, ""}, slackWant{0, "", false}},
 		{"usage of an unknown reaction fails", step{"inbox", []string{"acked", id, "--react", "wave"}, ""}, slackWant{1, "", true}},
+		{"handoff is no reaction any more", step{"inbox", []string{"acked", id, "--react", "handoff"}, ""}, slackWant{1, "", true}},
 	}
 	for _, s := range steps {
 		t.Run(s.name, func(t *testing.T) {
@@ -68,7 +73,7 @@ func TestRun_Posts(t *testing.T) {
 
 	t.Run("tick names the watch and the reactions owed", func(t *testing.T) {
 		var out bytes.Buffer
-		_, err := run("tick", []string{"--data", data, "--cwd", "/tmp/notes"}, "s1", now, nil, &out)
+		_, err := run("tick", []string{"--data", data}, "s1", now, nil, &out)
 		require.NoError(t, err)
 		var got tick
 		require.NoError(t, json.Unmarshal(out.Bytes(), &got))
