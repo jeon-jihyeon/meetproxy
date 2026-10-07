@@ -31,7 +31,7 @@ A meat proxy is a person who sits between a coworker and an AI and only carries 
 /plugin install meetproxy@meetproxy
 ```
 
-That is all for GitHub once `gh` is logged in. For Slack, install the Slack plugin and optionally set up a personal token, both covered under [Requirements](#requirements).
+That is all for GitHub once `gh` is logged in. For Slack, install the Slack plugin, and set up a personal token so Slack is read in the background, both covered under [Requirements](#requirements).
 
 ## Requirements
 
@@ -40,9 +40,6 @@ That is all for GitHub once `gh` is logged in. For Slack, install the Slack plug
 | macOS or Linux on amd64 or arm64 | the platforms releases are built for | `uname -sm` |
 | `curl`, `tar` and `sha256sum` or `shasum` | the launcher downloads the release and checks it against `checksums.txt`. With Go installed it falls back to `go install` | `command -v curl tar shasum` |
 | `gh` logged in | GitHub mentions, review requests, comments on your pull requests, and posting there. The default scopes of `gh auth login`, `repo` and `read:org`, cover it, since `repo` reads notifications and writes comments | `gh auth status` |
-| The official Slack plugin `slack@claude-plugins-official` | a session reads the Slack thread through it while it answers, and without a token the minute check reads mentions through it too | `/mcp` lists the Slack server |
-
-- **No busy session** — the minute check makes no connector call, so terminal multiplexers such as cmux stop showing the session as running every minute
 
 ## How it works
 
@@ -50,7 +47,7 @@ That is all for GitHub once `gh` is logged in. For Slack, install the Slack plug
 |---|---|---|---|
 | GitHub | mentions in comments, review requests, and comments of others on your own pull requests | a comment, or a reply in the review thread | a logged in `gh` |
 
-A person in the middle makes three calls before pasting anything. meetproxy makes them in the session instead.
+A person in the middle makes three calls before pasting anything. meetproxy makes them in the session with you.
 
 ## What's inside
 
@@ -117,10 +114,10 @@ The launcher looks for a dev build, then `~/.meetproxy/bin/v<version>/meetproxy`
 
 ## Verifying releases
 
-From 0.1.8 on, each release carries a build provenance attestation for its archives and `checksums.txt`, made by the release workflow of this repository.
+From 0.1.9 on, each release carries a build provenance attestation for its archives and `checksums.txt`, made by the release workflow of this repository.
 
 ```sh
-gh release download v0.1.8 -R jeon-jihyeon/meetproxy -p 'meetproxy_darwin_arm64.tar.gz' -p checksums.txt
+gh release download v0.1.9 -R jeon-jihyeon/meetproxy -p 'meetproxy_darwin_arm64.tar.gz' -p checksums.txt
 gh attestation verify meetproxy_darwin_arm64.tar.gz -R jeon-jihyeon/meetproxy
 gh attestation verify checksums.txt -R jeon-jihyeon/meetproxy
 ```

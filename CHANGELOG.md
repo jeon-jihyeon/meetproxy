@@ -2,7 +2,11 @@
 
 All notable changes to meetproxy are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/).
 
-## [0.1.8] - Unreleased
+## [0.1.9] - 2026-10-07
+
+Protocol 9. Sessions need `/reload-plugins`.
+
+## [0.1.8] - not released, part of 0.1.9
 
 ### Added
 
@@ -19,13 +23,13 @@ All notable changes to meetproxy are listed here. The format follows [Keep a Cha
 - Releases are created as drafts and published once their attestation exists
 - Release notes are grouped into Features, Fixes and Others, without merge commits
 
-## [0.1.7] - Unreleased
+## [0.1.7] - not released, part of 0.1.9
 
-Protocol 8. Sessions need `/reload-plugins`.
+Protocol 8.
 
-## [0.1.6] - Unreleased
+## [0.1.6] - not released, part of 0.1.9
 
-Protocol 7. Sessions need `/reload-plugins`.
+Protocol 7.
 
 ### Changed
 
@@ -39,9 +43,9 @@ Protocol 7. Sessions need `/reload-plugins`.
 
 - The data directory is private to the user, 0700 for directories and 0600 for files, and the first tidy fixes files written before
 
-## [0.1.5] - Unreleased
+## [0.1.5] - not released, part of 0.1.9
 
-Protocol 6. Sessions need `/reload-plugins`.
+Protocol 6.
 
 ## [0.1.4] - 2026-10-06
 
