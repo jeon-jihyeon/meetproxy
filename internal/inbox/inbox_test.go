@@ -459,7 +459,7 @@ func TestStoreHold(t *testing.T) {
 			_, _, err := s.Add(inbox.Item{Link: link, Status: tc.status, SessionId: "s1"}, now)
 			require.NoError(t, err)
 
-			_, err = s.Hold(inbox.IdOf(link), tc.session, now)
+			_, err = s.Hold(inbox.IdOf(link), tc.session, time.Time{}, now)
 
 			it, gerr := s.Get(inbox.IdOf(link))
 			require.NoError(t, gerr)

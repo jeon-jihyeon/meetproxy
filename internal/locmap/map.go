@@ -23,11 +23,21 @@ type Entry struct {
 	Keywords   []string  `json:"keywords"`
 	Paths      []Path    `json:"paths"`
 	RecordedAt time.Time `json:"recorded_at"`
+	// How much the record counts
+	// A stored 0 counts as 1 and a correction halves it
+	Weight float64 `json:"weight,omitempty"`
+}
+
+func (e Entry) weight() float64 {
+	if e.Weight <= 0 {
+		return 1
+	}
+	return e.Weight
 }
 
 type Candidate struct {
 	Path
-	Score  int
+	Score  float64
 	Topics []string
 }
 
@@ -51,7 +61,7 @@ func (m Map) Locate(terms []string, limit int) ([]Candidate, error) {
 	}
 	byAbs := map[string]*Candidate{}
 	for _, e := range entries {
-		hits := matchCount(e, terms)
+		hits := float64(matchCount(e, terms)) * e.weight()
 		if hits == 0 {
 			continue
 		}
@@ -93,9 +103,9 @@ func (m Map) Route(terms []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	scores := map[string]int{}
+	scores := map[string]float64{}
 	for _, e := range entries {
-		hits := matchCount(e, terms)
+		hits := float64(matchCount(e, terms)) * e.weight()
 		if hits == 0 {
 			continue
 		}
@@ -114,6 +124,22 @@ func (m Map) Route(terms []string) (string, error) {
 		}
 	}
 	return best, nil
+}
+
+// Halves the weight of the record of a relay whose answer the requester said was wrong
+// The record is appended again since the last record of a relay wins
+func (m Map) Correct(relayId string, now time.Time) (Entry, error) {
+	entries, err := m.entries()
+	if err != nil {
+		return Entry{}, err
+	}
+	i := slices.IndexFunc(entries, func(e Entry) bool { return e.RelayId == relayId })
+	if relayId == "" || i < 0 {
+		return Entry{}, fmt.Errorf("no record of relay %q", relayId)
+	}
+	e := entries[i]
+	e.Weight, e.RecordedAt = e.weight()/2, now.UTC()
+	return e, m.Add(e)
 }
 
 // The last record per relay id wins so a retried close does not duplicate

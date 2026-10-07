@@ -135,6 +135,13 @@ func TestCheck(t *testing.T) {
 		{"allows python without an inline program", bash(t, "python3 -m json.tool a.json"), ""},
 		{"allows a shell running a file", bash(t, "bash ./build.sh"), ""},
 		{"allows a test and a brace group", bash(t, "[ -f a ] && { ls; }"), ""},
+		{"allows a redirection target without a substitution", bash(t, "gh pr view 1 -R x/r > out.txt 2>&1"), ""},
+		{"allows a comment with -R on github.com", bash(t, "gh pr comment 1 -R github.com/o/r -b hi"), ""},
+		{"allows GH_HOST of github.com", bash(t, "GH_HOST=github.com gh pr comment 1 -R o/r -b hi"), ""},
+		{"allows a read on another host", bash(t, "GH_HOST=ghe.acme.io gh pr view 1 -R o/r"), ""},
+		{"allows reading a file in the data directory", bash(t, "cat "+dataDir+"/relay/open/s1.json"), ""},
+		{"allows meetproxy commands naming the data directory", bash(t, "meetproxy close --data "+dataDir+" --topic t"), ""},
+		{"allows rm outside the data directory", bash(t, "rm -rf "+dataDir+"-old /tmp/x"), ""},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -151,6 +158,9 @@ func TestCheck(t *testing.T) {
 // b. gh behind a wrapper the guard did not know or a wrapper option with a value
 // c. gh alias and unknown subcommands
 // d. a target repository given as OWNER/REPO
+// j. gh inside a redirection target
+// k. a repository on another host
+// l. a hook run or a file edit that ends the scope by hand
 func TestCheck_Bypass(t *testing.T) {
 	t.Parallel()
 	allow := dest.New(t.TempDir())
@@ -211,6 +221,30 @@ func TestCheck_Bypass(t *testing.T) {
 		{"i. meetproxy slack token behind a boolean flag", "meetproxy --busy slack token", "changes meetproxy settings"},
 		{"i. meetproxy slack post elsewhere", "echo hi | meetproxy slack post https://w.slack.com/archives/C9/p1 --session s", "slack:C9 is not allowed"},
 		{"i. meetproxy slack post of no link", "echo hi | meetproxy slack post nowhere", "unknown destination"},
+		{"j. a process substitution read as stdin", "cat < <(gh pr comment 1 -R x/r -b hi)", "github:x/r#1"},
+		{"j. a substitution as the output file", `echo x > "$(gh pr comment 1 -R x/r -b hi)"`, "github:x/r#1"},
+		{"j. a substitution as the error file", "ls 2>$(gh pr comment 1 -R x/r -b hi)", "github:x/r#1"},
+		{"j. a process substitution behind exec", "exec 3> >(gh pr comment 1 -R x/r -b hi)", "github:x/r#1"},
+		{"j. backticks as the output file of redirections only", "> `gh pr comment 1 -R x/r -b hi`", "github:x/r#1"},
+		{"j. a substitution in the target of a here-string", "cat <<< x > $(gh pr comment 1 -R x/r -b hi)", "github:x/r#1"},
+		{"k. -R with another host", "gh pr comment 1 -R ghe.acme.io/o/r -b hi", "a repository on host ghe.acme.io"},
+		{"k. --repo with a link to another host", "gh pr comment 1 --repo https://ghe.acme.io/o/r -b hi", "a repository on host ghe.acme.io"},
+		{"k. GH_REPO with another host", "GH_REPO=ghe.acme.io/o/r gh pr comment 1 -b hi", "a repository on host ghe.acme.io"},
+		{"k. GH_HOST", "GH_HOST=ghe.acme.io gh pr comment 1 -R o/r -b hi", "gh on host ghe.acme.io"},
+		{"k. GH_HOST given to env", "env GH_HOST=ghe.acme.io gh issue comment 1 -R o/r -b hi", "gh on host ghe.acme.io"},
+		{"k. gh api with --hostname", "gh api --hostname ghe.acme.io repos/o/r/issues/1/comments -f body=hi", "gh on host ghe.acme.io"},
+		{"k. gh api with GH_HOST", "GH_HOST=ghe.acme.io gh api repos/o/r/issues/1/comments -f body=hi", "gh on host ghe.acme.io"},
+		{"k. an issue transferred to another host", "gh issue transfer 1 ghe.acme.io/o/r -R o/r", "a repository on host ghe.acme.io"},
+		{"l. meetproxy hook stop", `echo '{"session_id":"s1"}' | meetproxy hook stop`, "meetproxy hook stop changes meetproxy settings"},
+		{"l. meetproxy hook by path with data", `"/p/bin/meetproxy" --data d hook guard`, "meetproxy hook guard changes meetproxy settings"},
+		{"l. rm of a scope marker", "rm " + dataDir + "/scope/s1", "a file edit in the meetproxy data directory"},
+		{"l. rm of the data directory", "rm -rf " + dataDir, "a file edit in the meetproxy data directory"},
+		{"l. mv of an ended relay", "mv " + dataDir + "/relay/ended/s1.json /tmp/x", "a file edit in the meetproxy data directory"},
+		{"l. truncate of a request", "truncate -s 0 " + dataDir + "/inbox/abc.json", "a file edit in the meetproxy data directory"},
+		{"l. rm behind sudo through a dot path", "sudo rm " + dataDir + "/x/../relay/open/s1.json", "a file edit in the meetproxy data directory"},
+		{"l. rm through the data variable", `rm -f "$CLAUDE_PLUGIN_DATA"/scope/*`, "a file edit in the meetproxy data directory"},
+		{"l. a redirection into the allow list", `echo '{"allow":["github:*"]}' > ` + dataDir + "/dest.json", "a file edit in the meetproxy data directory"},
+		{"l. rm inside bash -c", `bash -c "rm ` + dataDir + `/scope/s1"`, "a file edit in the meetproxy data directory"},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -278,10 +312,13 @@ func TestCheck_Acts(t *testing.T) {
 	}
 }
 
+// Plugin data directory the hook names to the guard
+const dataDir = "/plugins/data/meetproxy"
+
 // The reason the hook gives or an empty string when the call passes
 func check(t *testing.T, c call, origin, target dest.Location, mayApprove bool, allow dest.Allow) string {
 	t.Helper()
-	posts, err := guard.Destinations(c.tool, json.RawMessage(c.input))
+	posts, err := guard.Destinations(c.tool, json.RawMessage(c.input), dataDir)
 	if err != nil {
 		return err.Error()
 	}
@@ -297,4 +334,40 @@ func TestDecide_AllowListError(t *testing.T) {
 	_, err := guard.Decide([]guard.Post{{At: dest.Location{Source: dest.Slack, Name: "C9"}}}, dest.Location{}, dest.Location{}, false, failing)
 
 	assert.ErrorIs(t, err, assert.AnError)
+}
+
+// File tools that write in the data directory change meetproxy settings and any other path passes at once
+func TestDestinations_FileEdits(t *testing.T) {
+	t.Parallel()
+	data := "/home/u/.claude/plugins/data/meetproxy-meetproxy"
+	tcs := []struct {
+		name  string
+		tool  string
+		input map[string]string
+		data  string
+		want  error
+	}{
+		{"a write of the allow list", "Write", map[string]string{"file_path": data + "/allow.json"}, data, guard.ErrSettings},
+		{"an edit of a relay", "Edit", map[string]string{"file_path": data + "/relay/open/s1.json"}, data, guard.ErrSettings},
+		{"a notebook in the data directory", "NotebookEdit", map[string]string{"notebook_path": data + "/x.ipynb"}, data, guard.ErrSettings},
+		{"a path that only shares the prefix", "Write", map[string]string{"file_path": data + "-old/allow.json"}, data, nil},
+		{"code elsewhere", "Edit", map[string]string{"file_path": "/home/u/svc/main.go"}, data, nil},
+		{"an unknown data directory", "Write", map[string]string{"file_path": data + "/allow.json"}, "", nil},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b, err := json.Marshal(tc.input)
+			require.NoError(t, err)
+
+			posts, err := guard.Destinations(tc.tool, b, tc.data)
+
+			assert.Empty(t, posts)
+			if tc.want == nil {
+				assert.NoError(t, err)
+				return
+			}
+			assert.ErrorIs(t, err, tc.want)
+		})
+	}
 }

@@ -18,7 +18,7 @@ var version = "dev"
 
 // The command set the plugin mod speaks
 // Raised whenever a command the mod calls changes so an older mod stops instead of misreading
-const protocol = 7
+const protocol = 8
 
 const (
 	exitFailed = 1
@@ -123,8 +123,34 @@ var families = []family{
 			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackHistory(a[0], f.oldest)) },
 		},
 		{
-			name: "slack answered", args: "<link>", least: 1, most: 1, flags: []string{"ts"}, help: "print whether the user replied in the thread after --ts",
-			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackAnswered(a[0], f.ts)) },
+			name: "slack covered", args: "<link>", least: 1, most: 1, flags: []string{"ts"},
+			help: "print whether the user or meetproxy replied in the thread after --ts",
+			run:  func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackCovered(a[0], f.ts)) },
+		},
+		{
+			name: "slack replies", args: "<link>", least: 1, most: 1, flags: []string{"after"},
+			help: "print the replies in the thread of a link after --after that others wrote",
+			run:  func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackReplies(a[0], f.after)) },
+		},
+		{
+			name: "slack dms", flags: []string{"after"}, help: "print direct messages to the user after --after that do not mention them",
+			run: func(c cli, _ []string, f flags) (int, error) { return exitCode(c.slackDMs(f.after)) },
+		},
+		{
+			name: "slack shared", args: "<channel>", least: 1, most: 1, help: "print whether people outside the workspace read the channel",
+			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.slackShared(a[0])) },
+		},
+		{
+			name: "slack react", args: "<link>", least: 1, most: 1, flags: []string{"react"}, help: "add the reaction --react to the message of a link",
+			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackReact(a[0], f.react)) },
+		},
+		{
+			name: "slack update", args: "<reply link>", least: 1, most: 1, help: "replace a reply of the ledger with the text on stdin",
+			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.slackEdit(a[0], true)) },
+		},
+		{
+			name: "slack delete", args: "<reply link>", least: 1, most: 1, help: "delete a reply of the ledger",
+			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.slackEdit(a[0], false)) },
 		},
 		{
 			name: "slack read", args: "<link>", least: 1, most: 1, flags: []string{"limit"}, help: "print the text of the thread a link points at",
@@ -136,7 +162,7 @@ var families = []family{
 		},
 		{
 			name: "slack post", args: "<link>", least: 1, most: 1, flags: []string{"session"},
-			help: "post the text on stdin in the thread of a link after the can-post check",
+			help: "post the text on stdin in the thread of a link after the can-post check and print its permalink",
 			run:  func(c cli, a []string, _ flags) (int, error) { return c.slackPost(a[0]) },
 		},
 		{name: "slack manifest", help: "print the app manifest and the link that creates the app", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackManifest()) }},
@@ -182,8 +208,11 @@ var families = []family{
 	{"inbox", []command{
 		{
 			name: "inbox add", args: "<link>", least: 1, most: 1,
-			flags: []string{"verdict", "reason", "keywords", "from", "ts", "key", "delegation", "target", "self", "trusted", "name", "place", "skills", "files"},
-			help:  "queue a request, --verdict is handle or ask, a handle from outside the trust set is asked about", run: addRequest,
+			flags: []string{
+				"verdict", "reason", "keywords", "from", "ts", "key", "delegation", "target", "self", "trusted", "name", "place", "skills", "files",
+				"depth", "digest", "followup", "correction",
+			},
+			help: "queue a request, --verdict is handle or ask, a handle from outside the trust set is asked about", run: addRequest,
 		},
 		{
 			name: "inbox claim", args: "<id>", least: 1, most: 1, flags: []string{"session"}, session: true,
@@ -201,9 +230,24 @@ var families = []family{
 			run:  func(c cli, a []string, f flags) (int, error) { return exitCode(c.ask(a[0], f.reason)) },
 		},
 		{
-			name: "inbox hold", args: "<id>", least: 1, most: 1, flags: []string{"session"}, session: true,
-			help: "put a request off until the user runs handle",
-			run:  func(c cli, a []string, _ flags) (int, error) { return exitCode(c.hold(a[0])) },
+			name: "inbox hold", args: "<id>", least: 1, most: 1, flags: []string{"session", "until"}, session: true,
+			help: "put a request off until the user runs handle or until --until, a time, a duration or tomorrow",
+			run:  func(c cli, a []string, f flags) (int, error) { return exitCode(c.hold(a[0], f.until)) },
+		},
+		{
+			name: "inbox question", args: "<id>", least: 1, most: 1, flags: []string{"session"}, session: true,
+			help: "wait for the requester to answer a question asked back",
+			run:  func(c cli, a []string, _ flags) (int, error) { return exitCode(c.question(a[0])) },
+		},
+		{
+			name: "inbox ignore", args: "<link>", least: 1, most: 1, flags: []string{"from", "delegation", "reason", "ts", "key"},
+			help: "record a message that was not queued and move the cursor past --ts",
+			run:  func(c cli, a []string, f flags) (int, error) { return exitCode(c.inboxIgnore(a[0], f)) },
+		},
+		{
+			name: "inbox acked", args: "<id>", least: 1, most: 1, flags: []string{"react"},
+			help: "record that --react eyes, done or handoff was added to the request link",
+			run:  func(c cli, a []string, f flags) (int, error) { return exitCode(c.inboxAcked(a[0], f.react)) },
 		},
 		{
 			name: "inbox done", args: "<id>", least: 1, most: 1, flags: []string{"session"}, session: true,
@@ -241,9 +285,38 @@ var families = []family{
 			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.delegationRemove(a[0])) },
 		},
 		{
-			name: "delegation match", args: "<mention | review-request | id>", least: 1, most: 1,
-			help: "print what the matching delegation does with a message on stdin, nothing when none matches",
-			run:  func(c cli, a []string, _ flags) (int, error) { return exitCode(c.delegationMatch(a[0])) },
+			name: "delegation match", args: "<mention | review-request | dm | own-pr | id>", least: 1, most: 1, flags: []string{"followup"},
+			help: "print what the matching delegation does with a message on stdin, nothing when none matches, --followup yes picks by id",
+			run: func(c cli, a []string, f flags) (int, error) {
+				return exitCode(c.delegationMatch(a[0], f.followup == "yes"))
+			},
+		},
+	}},
+	{"posts", []command{
+		{
+			name: "posts add", flags: []string{"session"}, session: true,
+			help: "record a reply posted in the scope of the session, {reply, body, kind} on stdin",
+			run:  func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.postsAdd()) },
+		},
+		{
+			name: "posts list", flags: []string{"limit"}, help: "list the replies meetproxy posted as JSON, newest first",
+			run: func(c cli, _ []string, f flags) (int, error) { return exitCode(c.postsList(f.limit)) },
+		},
+		{
+			name: "posts find", args: "<reply link>", least: 1, most: 1, help: "print the ledger record of a reply, exit 1 when there is none",
+			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.postsFind(a[0])) },
+		},
+		{
+			name: "posts retract", args: "<reply link>", least: 1, most: 1, help: "mark a reply of the ledger as retracted",
+			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.postsRetract(a[0])) },
+		},
+		{
+			name: "watch seen", args: "<id> <ts>", least: 2, most: 2, help: "move the watch of a request past the reply at ts",
+			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.watchSeen(a[0], a[1])) },
+		},
+		{
+			name: "correct", args: "<relay id>", least: 1, most: 1, help: "halve how much the answer of a relay counts in the location map",
+			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.correct(a[0])) },
 		},
 	}},
 	{"triage", []command{
@@ -332,6 +405,8 @@ type flags struct {
 	reason, name, place, key, delegation string
 	cwd, self, trusted, keywords, paths  string
 	skills, files, after, oldest, answer string
+	until, react, depth, digest          string
+	followup, correction                 string
 	limit                                int
 	ttl                                  time.Duration
 	busy                                 bool
@@ -364,6 +439,12 @@ func (f *flags) set() *flag.FlagSet {
 	fs.StringVar(&f.after, "after", "", "unix seconds to read Slack mentions after")
 	fs.StringVar(&f.oldest, "oldest", "", "Slack ts to read a channel after")
 	fs.StringVar(&f.answer, "answer", "", "now, later or keep")
+	fs.StringVar(&f.until, "until", "", "RFC 3339 time, duration such as 1h, or tomorrow")
+	fs.StringVar(&f.react, "react", "", "reaction name")
+	fs.StringVar(&f.depth, "depth", "", "quick or deep")
+	fs.StringVar(&f.digest, "digest", "", "digest duplicates of the request share")
+	fs.StringVar(&f.followup, "followup", "", "yes for a reply in a thread meetproxy answered")
+	fs.StringVar(&f.correction, "correction", "", "yes when the reply says the earlier answer was wrong")
 	fs.DurationVar(&f.ttl, "ttl", defaultLeaseTTL, "how long a lease lasts")
 	fs.BoolVar(&f.busy, "busy", false, "a turn is running in the session")
 	return fs

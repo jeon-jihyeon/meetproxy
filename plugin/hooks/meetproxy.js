@@ -11,6 +11,9 @@
 // 7. Slack is read through the binary with the user's own token when one is set
 //    A connector call fires the PreToolUse hooks and terminal multiplexers then show the session as running
 //    So without a token only the session holding the Slack lease calls the connector
+// 8. Every post is kept in a ledger and its thread is read for follow-ups for three days
+//    A reply there goes back to the same request through triage
+// 9. The lease holder reacts on request links when a request is queued and when it is answered
 
 const TICK_MS = 60_000
 const FIRST_MS = 15_000
@@ -27,7 +30,7 @@ const OVERLAP_MS = 5 * 60_000
 const SORTED_MS = 2 * OVERLAP_MS
 // What the binary must speak
 // A session still running an older watcher stops instead of misreading a newer binary
-const PROTOCOL = 7
+const PROTOCOL = 8
 // Characters of nodloop notes given to triage
 const KNOWLEDGE_CHARS = 2000
 // Enough for the one line verdict triage answers with
@@ -70,6 +73,24 @@ const GHSEEN_MS = 24 * 60 * 60_000
 const GHSEEN_RENEW_MS = 60 * 60_000
 // GitHub associations of members of the repository's own organization or its collaborators
 const TRUSTED_ASSOCIATIONS = ['OWNER', 'MEMBER', 'COLLABORATOR']
+// How long a busy session leaves a request of its place to an idle session of the same place
+const BUSY_WAIT_MS = 10 * 60_000
+// Rows one question offers at most since the dialog holds four options
+const BATCH = 4
+// How long requests the user did not pick from a batch wait before they are asked again
+const BATCH_HOLD = '2h'
+// How long a source problem is left alone after the user was asked about it
+const NAG_MS = 24 * 60 * 60_000
+// How long whether a Slack channel is shared outside the workspace is remembered
+const SHARED_MS = 24 * 60 * 60_000
+// Reactions per check so a backlog never holds the lease up
+const MAX_ACKS = 10
+// Slack and GitHub reaction names of each acknowledgement
+const SLACK_REACTION = { eyes: 'eyes', done: 'white_check_mark' }
+const GITHUB_REACTION = { eyes: 'eyes', done: 'hooray' }
+const HANDOFF = 'I could not finish this on my own, so I passed it to the person you asked. They will follow up.\n\n' + MARK
+const DONE = 'Done'
+const REMIND = 'Remind tomorrow'
 
 let stop
 // What keeps the watcher from working
@@ -94,6 +115,10 @@ const troubled = {}
 let lastTick
 // Whether the Slack user the connector acts for was checked since this session took the lease
 let verified = false
+// Sources whose last check failed for a reason the user can fix
+const failing = {}
+// Whether a question of this mod waits for the user so two never stack
+let prompting = false
 
 export function register(on) {
   on('session.start', async ($, e, next) => {
@@ -104,8 +129,23 @@ export function register(on) {
         'Only where the open request came from, what it works on and the allow list are accepted.',
       inputSchema: {
         type: 'object',
-        properties: { link: { type: 'string' }, text: { type: 'string' } },
+        properties: {
+          link: { type: 'string' },
+          text: { type: 'string' },
+          kind: { type: 'string', enum: ['answer', 'question'], description: 'question for a question back to the requester' },
+        },
         required: ['link', 'text'],
+      },
+    })
+    await $.tool.register({
+      name: 'retract',
+      description:
+        'Correct or remove a reply meetproxy posted, given its link from the post ledger. ' +
+        'With text the reply is replaced by it, without text it is deleted. Replies outside the ledger are refused.',
+      inputSchema: {
+        type: 'object',
+        properties: { reply: { type: 'string' }, text: { type: 'string' } },
+        required: ['reply'],
       },
     })
     await $.tool.register({
@@ -147,6 +187,7 @@ export function register(on) {
         lastTick = t
         await check($, t)
         await pickUp($, t)
+        await nag($, t)
       } catch (err) {
         $.ui.log('meetproxy: ' + message(err))
       } finally {
@@ -157,22 +198,40 @@ export function register(on) {
     return next(e)
   })
 
+  // Every session says when the user last typed and whether a turn runs so requests go to an idle session first
+  // A failure only costs that preference so the prompt always goes on
+  on('prompt.submit', async ($, e, next) => {
+    await active($, { prompt_at: await $.clock.now() })
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   // A subagent's run raises no turn.start so only the main loop's turns count
-  on('turn.start', ($, e, next) => {
+  on('turn.start', async ($, e, next) => {
     turning = true
+    await active($, { in_turn: true }).catch(() => {})
     return next(e)
   })
-  on('turn.complete', ($, e, next) => {
-    if (!e.agentId) turning = false
+  on('turn.complete', async ($, e, next) => {
+    if (!e.agentId) {
+      turning = false
+      await active($, { in_turn: false }).catch(() => {})
+    }
     return next(e)
   })
 
   // A post whose check fails or runs out of time is denied rather than sent
   on('tool.call', { tool: 'mcp__meetproxy__post' }, async ($, e) => {
-    return post($, e.link, e.text)
+    return post($, e.link, e.text, e.kind)
       .then(r => ({ result: r }))
       .catch(err => ({ result: 'denied: post check failed ' + message(err) }))
   }).catch(($, e, next) => (next.called ? next(e) : { result: 'denied: post check failed ' + (next.error?.message ?? next.error?.kind ?? '') }))
+
+  // A retract the ledger does not vouch for or that fails part way is refused rather than guessed
+  on('tool.call', { tool: 'mcp__meetproxy__retract' }, async ($, e) => {
+    return retract($, e.reply, e.text)
+      .then(r => ({ result: r }))
+      .catch(err => ({ result: 'denied: retract failed ' + message(err) }))
+  }).catch(($, e, next) => (next.called ? next(e) : { result: 'denied: retract failed ' + (next.error?.message ?? next.error?.kind ?? '') }))
 
   // The token goes from the dialog to the binary and only what it acts for comes back
   on('tool.call', { tool: 'mcp__meetproxy__slack_token' }, async $ => ({ result: await askToken($) })).catch(($, e, next) => (next.called ? next(e) : { result: 'no token was stored: ' + (next.error?.message ?? next.error?.kind ?? '') }))
@@ -180,16 +239,19 @@ export function register(on) {
 
 // Sources
 
-// Each source is one case in each of these five dispatchers
+// Each source is one case in each of these dispatchers
 // 1. owner(link): the source a link belongs to
 // 2. ready($, source, t): whether its connection works now
 // 3. receive($, source, t): messages from a little before its cursors on
 //    Each names its source and the kind its delegation is matched by
-//    The kind is mention, review-request or a channel delegation id
+//    The kind is mention, review-request, dm, own-pr or a channel delegation id
 //    Each also names the cursor key its position is kept under
 //    Beside them the newest position seen per cursor key and what to remember once every message is settled
-// 4. answered($, m): whether the user already replied after the message, undefined when that cannot be told
-// 5. send($, source, link, reply): a reply in the thread of the link
+// 4. covered($, m): whether the user or a meetproxy post already replied after the message, undefined when that cannot be told
+// 5. send($, source, link, reply): a reply in the thread of the link, resolving to the link of the reply
+// 6. replies($, source, w): replies others wrote in a watched thread after what was seen
+// 7. react($, source, link, ack): a reaction on the message of the link
+// 8. unsay($, source, post, text): the reply of a ledger post replaced by text or removed
 // The mod validator rejects passing $ through object methods so sources dispatch by switch instead of a table
 const SOURCES = ['slack', 'github']
 
@@ -202,6 +264,7 @@ function owner(link) {
 // Slack is ready when a token is set or the connector lists its tools
 // Neither costs a connector call
 async function ready($, source, t) {
+  if (await $.store.get('muted:' + source)) return false
   switch (source) {
     case 'slack':
       return Boolean(await slackRoute($, t))
@@ -228,15 +291,15 @@ async function receive($, source, t) {
   return { messages: [], newest: {}, marks: [] }
 }
 
-// Whether the user already replied after the message
-// Replies by hand and through meetproxy both count
-async function answered($, m) {
+// Whether the message already has an answer after it
+// Replies of the user by hand and posts of any meetproxy both count
+async function covered($, m) {
   try {
     switch (m.source) {
       case 'slack':
-        return await slackAnswered($, m)
+        return await slackCovered($, m)
       case 'github':
-        return await githubAnswered($, m)
+        return await githubCovered($, m)
     }
   } catch (err) {
     await trouble($, m.source, err)
@@ -252,6 +315,36 @@ async function send($, source, link, reply) {
     case 'github':
       return githubSend($, link, reply)
   }
+  return ''
+}
+
+async function replies($, source, w) {
+  switch (source) {
+    case 'slack':
+      return slackReplies($, w)
+    case 'github':
+      return githubReplies($, w)
+  }
+  return []
+}
+
+async function react($, source, link, ack) {
+  switch (source) {
+    case 'slack':
+      return slackReact($, link, ack)
+    case 'github':
+      return githubReact($, link, ack)
+  }
+}
+
+async function unsay($, source, p, text) {
+  switch (source) {
+    case 'slack':
+      return slackUnsay($, p, text)
+    case 'github':
+      return githubUnsay($, p, text)
+  }
+  throw new Error('meetproxy cannot retract ' + p.reply)
 }
 
 // Slack
@@ -312,6 +405,16 @@ async function slackReceive($, t) {
   for (const m of await slackMentions($, me, after, via)) {
     newest.mention = later(newest.mention, m.ts)
     if (Number(m.ts) > after) messages.push({ ...m, source: 'slack', kind: 'mention', cursor: 'mention', self: m.from === me })
+  }
+  // The connector lists no direct messages so they are read with a token alone
+  // The binary leaves out those that mention the user since the mention search finds them
+  if (via !== 'token') return { messages, newest, marks: [] }
+  const dm = await meetproxy($, ['inbox', 'cursor', '--key', 'dm'])
+  if (!dm.ok) return { messages, newest, marks: [] }
+  const since = overlapped(dm.out)
+  for (const m of fromBinary($, await meetproxy($, ['slack', 'dms', '--after', String(since)]))) {
+    newest.dm = later(newest.dm, m.ts)
+    messages.push({ ...m, source: 'slack', kind: 'dm', cursor: 'dm', self: false })
   }
   return { messages, newest, marks: [] }
 }
@@ -376,12 +479,12 @@ function recognized(result, field, messages) {
 
 // The concise thread lists each reply on a line that starts with > and names its author by email
 // oldest is just past the message so a request the user wrote in the thread does not count as a reply
-async function slackAnswered($, m) {
+async function slackCovered($, m) {
   if ((await slackRoute($)) === 'token') {
-    const r = await meetproxy($, ['slack', 'answered', m.link, '--ts', m.ts])
+    const r = await meetproxy($, ['slack', 'covered', m.link, '--ts', m.ts])
     const got = parseJSON(r.out)
-    if (!r.ok || typeof got?.answered !== 'boolean') throw new Error('could not read the thread: ' + firstLine(r.err))
-    return got.answered
+    if (!r.ok || typeof got?.covered !== 'boolean') throw new Error('could not read the thread: ' + firstLine(r.err))
+    return got.covered
   }
   // A profile that shows no email leaves nothing to match replies by, as before tokens
   const email = await $.store.get('slackEmail')
@@ -395,19 +498,69 @@ async function slackAnswered($, m) {
     response_format: 'concise',
   })
   const thread = parseJSON(text(r))?.messages ?? text(r)
-  return thread.split('\n').some(l => l.startsWith('> ') && l.includes('<' + email + '>:'))
+  return thread.includes(MARK) || thread.split('\n').some(l => l.startsWith('> ') && l.includes('<' + email + '>:'))
 }
 
+// Resolves to the permalink of the reply, or empty when the connector named none
 async function slackSend($, link, reply) {
   const at = slackLink(link)
   if (!at) throw new Error('not a Slack message link ' + link)
   if ((await slackRoute($)) === 'token') {
     const r = await meetproxy($, ['slack', 'post', link, '--session', await $.session.id()], reply)
     if (!r.ok) throw new Error(r.out === 'denied' ? 'denied' : firstLine(r.err))
-    return
+    return r.out
   }
   const r = await $.mcp.call(SLACK, 'slack_send_message', { channel_id: at.channel, thread_ts: at.thread, message: reply })
   if (r?.isError) throw new Error(text(r))
+  return new RegExp(SLACK_LINK.source + '[^\\s)>|]*').exec(text(r))?.[0] ?? ''
+}
+
+// Replies in a watched thread are read with a token alone
+// The connector's thread answer names no ts per reply so what was seen could not move past them
+async function slackReplies($, w) {
+  if ((await slackRoute($)) !== 'token') return []
+  return fromBinary($, await meetproxy($, ['slack', 'replies', w.thread, '--after', w.seen]))
+}
+
+async function slackReact($, link, ack) {
+  const at = slackLink(link)
+  if ((await slackRoute($)) === 'token') {
+    const r = await meetproxy($, ['slack', 'react', link, '--react', SLACK_REACTION[ack]])
+    if (!r.ok) throw new Error(firstLine(r.err))
+    return
+  }
+  const r = await $.mcp.call(SLACK, 'slack_add_reaction', { channel_id: at.channel, message_ts: at.ts, emoji: SLACK_REACTION[ack] })
+  if (r?.isError) throw new Error(text(r))
+}
+
+// With a token the reply is edited or deleted
+// The connector edits nothing so a correction goes in the thread instead
+async function slackUnsay($, p, replacement) {
+  if ((await slackRoute($)) === 'token') {
+    const r = await meetproxy($, ['slack', replacement ? 'update' : 'delete', p.reply], replacement ? withMark(replacement) : undefined)
+    if (!r.ok) throw new Error(firstLine(r.err))
+    return replacement ? 'corrected' : 'deleted'
+  }
+  const at = slackLink(p.reply)
+  const note = 'Correction: ' + (replacement || 'please disregard my earlier reply in this thread.')
+  const r = await $.mcp.call(SLACK, 'slack_send_message', { channel_id: at.channel, thread_ts: at.thread, message: withMark(note) })
+  if (r?.isError) throw new Error(text(r))
+  return 'posted a correction under'
+}
+
+// Whether people outside the workspace read the channel
+// Only a token can tell so without one a channel counts as internal
+async function slackShared($, channel) {
+  if (!channel || (await slackRoute($)) !== 'token') return false
+  const key = 'slackShared:' + channel
+  const now = await $.clock.now()
+  const cached = await $.store.get(key)
+  if (cached && now - cached.at < SHARED_MS) return cached.shared
+  const r = await meetproxy($, ['slack', 'shared', channel])
+  const got = parseJSON(r.out)
+  if (!r.ok || typeof got?.shared !== 'boolean') throw new Error('could not read the channel ' + channel + ': ' + firstLine(r.err))
+  await $.store.set(key, { shared: got.shared, at: now })
+  return got.shared
 }
 
 // The token is typed under Other in the dialog
@@ -633,7 +786,30 @@ async function githubMessages($, n, me, after) {
       out.push({ ...base, kind: 'mention', self: c.user?.login === me, trusted: associated(c), link: c.html_url, text: (c.body ?? '').slice(0, TEXT_CHARS), from: c.user?.login ?? '', author: c.user?.login ?? '', ts: seconds(c.created_at) })
     }
   }
+  if ((n.reason === 'author' || n.reason === 'comment') && n.subject?.type === 'PullRequest') {
+    for (const c of await ownPullComments($, n, me, after)) {
+      out.push({ ...base, kind: 'own-pr', self: false, trusted: associated(c), link: c.html_url, text: (c.body ?? '').slice(0, TEXT_CHARS), from: c.user.login, author: c.user.login, ts: seconds(c.created_at) })
+    }
+  }
   return out
+}
+
+// Comments others wrote after the cursor on a pull request the user opened
+// A comment naming the user comes as a mention instead so it is left out here
+async function ownPullComments($, n, me, after) {
+  const at = /repos\/([\w.-]+)\/([\w.-]+)\/pulls\/(\d+)$/.exec(n.subject.url ?? '')
+  if (!at) return []
+  const pr = parseJSON(await gh($, ['api', n.subject.url]))
+  if (pr?.user?.login !== me) return []
+  const since = new Date(Number(after) * 1000).toISOString()
+  const base = `repos/${at[1]}/${at[2]}`
+  const comments = [...(await githubList($, `${base}/issues/${at[3]}/comments`, since)), ...(await githubList($, `${base}/pulls/${at[3]}/comments`, since))]
+  const names = new RegExp('@' + me.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i')
+  return comments.filter(c => c.user?.login && c.user.login !== me && !bot(c.user) && !names.test(c.body ?? '') && Number(seconds(c.created_at)) > Number(after))
+}
+
+function bot(user) {
+  return user?.type === 'Bot' || /\[bot\]$/.test(user?.login ?? '')
 }
 
 // Notifications no read found for a day are forgotten so the store does not grow
@@ -689,15 +865,15 @@ async function githubList($, path, since) {
   return (parseJSON(await gh($, args)) ?? []).flat()
 }
 
-// Comments the user wrote after the message
+// Comments after the message that the user wrote or any meetproxy posted
 // 1. A review thread link only counts replies in that thread
 // 2. A review the user submitted on the pull request after the message counts too
-async function githubAnswered($, m) {
+async function githubCovered($, m) {
   const me = await githubUser($)
   const at = githubLink(m.link)
   if (!at) return false
   const since = new Date(Number(m.ts) * 1000).toISOString()
-  const after = c => c.user?.login === me && Number(seconds(c.created_at)) > Number(m.ts)
+  const after = c => (c.user?.login === me || (c.body ?? '').trim().endsWith(MARK)) && Number(seconds(c.created_at)) > Number(m.ts)
   const base = `repos/${at.owner}/${at.repo}`
   if (at.discussion) {
     const replies = await githubList($, `${base}/pulls/${at.number}/comments`, since)
@@ -715,7 +891,51 @@ async function githubSend($, link, reply) {
   if (!at) throw new Error('not a GitHub issue or pull request link ' + link)
   const base = `repos/${at.owner}/${at.repo}`
   const path = at.discussion ? `${base}/pulls/${at.number}/comments/${at.discussion}/replies` : `${base}/issues/${at.number}/comments`
-  await gh($, ['api', '-X', 'POST', path, '--input', '-'], JSON.stringify({ body: reply }))
+  return parseJSON(await gh($, ['api', '-X', 'POST', path, '--input', '-'], JSON.stringify({ body: reply })))?.html_url ?? ''
+}
+
+// Comments others wrote in the watched thread after what was seen
+// A review thread counts only replies in that thread
+async function githubReplies($, w) {
+  const me = await githubUser($)
+  const at = githubLink(w.thread)
+  if (!at) return []
+  const since = new Date(Number(w.seen) * 1000).toISOString()
+  const base = `repos/${at.owner}/${at.repo}`
+  const all = at.discussion
+    ? (await githubList($, `${base}/pulls/${at.number}/comments`, since)).filter(c => String(c.in_reply_to_id) === at.discussion)
+    : await githubList($, `${base}/issues/${at.number}/comments`, since)
+  return all
+    .filter(c => c.user?.login && c.user.login !== me && !bot(c.user) && !(c.body ?? '').trim().endsWith(MARK) && Number(seconds(c.created_at)) > Number(w.seen))
+    .map(c => ({ link: c.html_url, text: (c.body ?? '').slice(0, TEXT_CHARS), from: c.user.login, author: c.user.login, ts: seconds(c.created_at), trusted: associated(c), channel: `${at.owner}/${at.repo}` }))
+    .sort(byTs)
+}
+
+// The API path of the comment a link points at, or of the issue or pull request itself
+function githubItem(link) {
+  const at = githubLink(link)
+  if (!at) return undefined
+  const base = `repos/${at.owner}/${at.repo}`
+  const comment = /#issuecomment-(\d+)/.exec(link)?.[1]
+  if (at.discussion) return `${base}/pulls/comments/${at.discussion}`
+  if (comment) return `${base}/issues/comments/${comment}`
+  return `${base}/issues/${at.number}`
+}
+
+async function githubReact($, link, ack) {
+  await gh($, ['api', '-X', 'POST', githubItem(link) + '/reactions', '-f', 'content=' + GITHUB_REACTION[ack]])
+}
+
+// Only a comment can be edited or deleted so a link to the issue itself is refused
+async function githubUnsay($, p, replacement) {
+  const path = githubItem(p.reply)
+  if (!path || !/\/comments\/\d+$/.test(path)) throw new Error('not a comment link ' + p.reply)
+  if (replacement) {
+    await gh($, ['api', '-X', 'PATCH', path, '--input', '-'], JSON.stringify({ body: withMark(replacement) }))
+    return 'corrected'
+  }
+  await gh($, ['api', '-X', 'DELETE', path])
+  return 'deleted'
 }
 
 async function githubUser($, live) {
@@ -752,15 +972,46 @@ async function check($, t) {
       // Every message up to the newest one seen is settled so the cursors move there and the source is remembered
       for (const [key, ts] of Object.entries(got.newest)) await meetproxy($, ['inbox', 'advance', ts, '--key', key])
       for (const m of got.marks) await $.store.set(m.key, m.value)
-      await health($, source, { ok: true, found })
+      const more = await settle($, source, await followups($, source, t), engine, now)
+      if (more < 0) continue
+      await acknowledge($, source, t)
+      delete failing[source]
+      await health($, source, { ok: true, found: found + more })
     } catch (err) {
       // Let another session take the source and check again next time
       reached[source] = false
+      failing[source] = message(err)
       await dropLease($, source)
       await trouble($, source, err)
     }
   }
   problem = connected ? undefined : 'no source works in this session, /meetproxy:delegate checks Slack and GitHub'
+}
+
+// Replies others wrote in the threads this source answered, each as a message of the request it follows
+// The link stays the request's own so the reply reopens the same request
+async function followups($, source, t) {
+  const out = []
+  for (const w of (t.watch ?? []).filter(w => owner(w.thread) === source)) {
+    for (const r of await replies($, source, w)) {
+      out.push({ ...r, source, kind: 'followup', cursor: 'followup', watch: w.request, relay: w.relay, delegation: w.delegation, link: w.origin, reply: r.link, self: false })
+    }
+  }
+  return out.sort(byTs)
+}
+
+// Reactions the tick says are owed on links of this source
+// A failed reaction is tried again on the next check and never costs the source its lease
+async function acknowledge($, source, t) {
+  for (const a of (t.acks ?? []).filter(a => owner(a.link) === source).slice(0, MAX_ACKS)) {
+    try {
+      if (a.react === 'handoff') await send($, source, a.link, HANDOFF)
+      else await react($, source, a.link, a.react)
+      await meetproxy($, ['inbox', 'acked', a.id, '--react', a.react])
+    } catch (err) {
+      $.ui.log(`meetproxy: could not react ${a.react} on ${a.link}: ${message(err)}`, { to: 'debug' })
+    }
+  }
 }
 
 // Queues or skips each new message and renews the lease after each so a long check keeps the source
@@ -815,29 +1066,38 @@ async function leads($) {
 
 // Queues the message or only moves the cursor past it
 // 1. A message meetproxy posted only moves the cursor
-// 2. So does one no delegation matches or the user already answered or triage ignores
-// 3. One whose reply could not be checked asks the user rather than answer twice
+// 2. So does one no delegation matches or one the user or a meetproxy post already answered
+// 3. One triage ignores is recorded as ignored without its text
+// 4. One whose reply could not be checked asks the user rather than answer twice
+// 5. A follow-up moves what its watch has seen instead of a cursor
 // Returns false to stop the source here so the next check starts again from this message
 async function enqueue($, m, engine) {
-  const skip = async () => (await meetproxy($, ['inbox', 'advance', m.ts, '--key', m.cursor])).ok
+  const skip = async () => passed($, m, await meetproxy($, ['inbox', 'advance', m.ts, '--key', m.cursor]))
   if (m.text.trim().endsWith(MARK)) return skip()
   const trusted = await senderTrusted($, m)
   const msg = JSON.stringify({ link: m.link, text: m.text, from: m.from, author: m.author, trusted })
-  const matched = await meetproxy($, ['delegation', 'match', m.kind], msg)
+  const matched = m.watch
+    ? await meetproxy($, ['delegation', 'match', m.delegation || 'default', '--followup', 'yes'], msg)
+    : await meetproxy($, ['delegation', 'match', m.kind], msg)
   // A failed match says nothing about the message so it is retried and never skipped
   if (!matched.ok) {
     countFailure($, 'match', m, matched.err)
     return false
   }
   const d = parseJSON(matched.out)
-  const replied = d ? await answered($, m) : false
+  const replied = d ? await covered($, m) : false
   if (!d || replied) return settled(m, await skip())
   const linked = await linkedMessages($, m.text)
   const request = [m.text, ...linked].join('\n')
   const plan = parseJSON((await meetproxy($, ['map', 'plan'], request)).out) ?? {}
   let v = await classify($, { ...m, trusted }, d, plan, linked, engine)
-  if (v.verdict !== 'handle' && v.verdict !== 'ask') return settled(m, await skip())
+  if (v.verdict !== 'handle' && v.verdict !== 'ask') {
+    const ignored = ['inbox', 'ignore', m.link, '--from', m.from, '--delegation', d.delegation, '--reason', v.reason || 'ignored', '--ts', m.ts, '--key', m.cursor]
+    return settled(m, await passed($, m, await meetproxy($, ignored)))
+  }
   if (v.verdict === 'handle' && replied === undefined) v = { ...v, verdict: 'ask', reason: 'could not check whether you already replied' }
+  if (v.verdict === 'handle' && m.source === 'slack' && (await shared($, m.channel))) v = { ...v, verdict: 'ask', reason: 'shared channel with people outside the workspace' }
+  if (v.correction && m.relay) await meetproxy($, ['correct', m.relay])
   const at = placeOf(d.workspace, plan, v.place, githubLink(m.link)?.repo)
   const words = terms(request)
   const args = ['inbox', 'add', m.link, '--verdict', v.verdict, '--reason', v.reason ?? '', '--from', m.from]
@@ -848,11 +1108,31 @@ async function enqueue($, m, engine) {
   if (plan.files?.length) args.push('--files', plan.files.join(','))
   if (d.target) args.push('--target', d.target)
   if (words.length) args.push('--keywords', words.join(','))
+  if (d.depth) args.push('--depth', d.depth)
+  if (d.digest) args.push('--digest', d.digest)
+  if (m.watch) args.push('--followup', 'yes')
+  if (v.correction) args.push('--correction', 'yes')
   const added = await meetproxy($, args)
-  if (added.ok) return settled(m, true)
+  if (added.ok) return settled(m, await passed($, m, added))
   // A message that keeps failing to queue is skipped so it does not cost a triage every check
   if (countFailure($, 'add', m, added.err) < MAX_FAILURES) return false
   return settled(m, await skip())
+}
+
+// A follow-up settled moves its watch past it so it is read once
+async function passed($, m, r) {
+  if (!r.ok || !m.watch) return r.ok
+  return (await meetproxy($, ['watch', 'seen', m.watch, m.ts])).ok
+}
+
+// A channel that cannot be read counts as shared so the user is asked rather than answer outsiders
+async function shared($, channel) {
+  try {
+    return await slackShared($, channel)
+  } catch (err) {
+    await trouble($, 'slack', err)
+    return true
+  }
 }
 
 // Whether the source vouches for the sender as one of the user's own team
@@ -892,15 +1172,19 @@ function placeOf(fixed, plan, pickedName, repo) {
 // 2. Triage still runs to pick a place when the map left candidates
 // 3. A delegation that asks first, or a sender outside the trust set, asks whatever triage says
 // 4. A request found more than an hour late asks the user
+// 5. A follow-up always goes through triage and one that says the answer was wrong asks the user
 async function classify($, m, d, plan, linked, engine) {
   const candidates = plan.candidates ?? []
-  const decided = !d.triage || m.self
+  const decided = (!d.triage || m.self) && !m.watch
   let v = { verdict: d.post === 'ask' ? 'ask' : 'handle', reason: 'delegation ' + d.delegation, place: '' }
   if (!decided || (!plan.name && candidates.length > 1)) {
     const places = candidates.map(c => ({ name: c.name, examples: c.examples }))
-    const input = { text: m.text, channel: m.channel, from: m.from, workspace: plan.name ?? '', linked, knowledge: await knowledge($, plan.name), places }
+    const input = { text: m.text, channel: m.channel, from: m.from, workspace: plan.name ?? '', linked, knowledge: await knowledge($, plan.name), places, followup: Boolean(m.watch) }
     const t = await triage($, engine, input)
     v = decided ? { ...v, place: t.place } : t
+  }
+  if (v.correction && v.verdict !== 'ignore') {
+    return { ...v, verdict: 'ask', reason: 'the requester says the earlier answer was wrong' }
   }
   if (v.verdict === 'handle' && d.post === 'ask') {
     return { ...v, verdict: 'ask', reason: m.trusted ? 'delegation ' + d.delegation + ' asks first' : 'sender outside the trust set' }
@@ -963,55 +1247,171 @@ async function introduce($, me, place, name) {
   await $.store.set('session:' + me, { place, name, at: await $.clock.now() })
 }
 
-// The places of sessions that spoke within the lease time
+// What the session is doing as the prompt and turn hooks last saw it
+async function active($, change) {
+  const key = 'activity:' + (await $.session.id())
+  await $.store.set(key, { ...(await $.store.get(key)), ...change })
+}
+
+// Sessions that spoke within the lease time and the places they cover
 // 1. Each place counts by its root and by its name for requests stored with a name only
 // 2. A root is an absolute path and a name never holds a slash so the two never collide
-// 3. Older records are removed
-async function livePlaces($) {
+// 3. Older records and their activity are removed
+async function liveSessions($) {
   const now = await $.clock.now()
-  const live = new Set()
+  const places = new Set()
+  const sessions = []
   for (const k of await $.store.keys()) {
     if (!k.startsWith('session:')) continue
+    const id = k.slice('session:'.length)
     const s = await $.store.get(k)
     if (!s || now - s.at > LEASE_MS) {
       await $.store.delete(k)
+      await $.store.delete('activity:' + id)
       continue
     }
-    if (s.place) live.add(s.place)
-    if (s.name) live.add(s.name)
+    if (s.place) places.add(s.place)
+    if (s.name) places.add(s.name)
+    sessions.push({ id, place: s.place, name: s.name, busy: Boolean((await $.store.get('activity:' + id))?.in_turn) })
   }
-  return live
+  return { places, sessions }
 }
 
-// Which waiting request of the tick this session takes
-// 1. One the binary marks as of this session's place, at once
-// 2. For the lease holder one no open session covers, after two checks so a session of that place gets it first
+// Which waiting requests of the tick this session takes
+// 1. Those the binary marks as of this session's place
+// 2. For the lease holder those no open session covers, after two checks so a session of that place gets them first
 //    A request is covered by its root, or by its name when it has no root
+// 3. A session in a turn leaves a request to an idle session of the same place and takes it itself only after ten minutes with none
+// 4. Held requests whose time came are asked about again like ask
+// 5. Two or more that need the user are offered in one question, the rest one at a time
+// 6. Higher delegation priority first, then the oldest
 async function pickUp($, t) {
   const me = await $.session.id()
   await introduce($, me, t.place, t.name)
-  const covered = await livePlaces($)
+  const { places, sessions } = await liveSessions($)
   const leader = await leads($)
   const now = await $.clock.now()
   const rows = t.waiting ?? []
-  const held = rows.filter(r => r.status === 'held' && r.here)
+  const held = rows.filter(r => r.status === 'held' && !r.due && r.here)
   $.ui.status(problem ?? (held.length ? `${held.length} request(s) put off, run /meetproxy:handle ${held[0].id}` : undefined))
-  const open = rows.filter(r => r.status !== 'held')
-  const orphan = r => leader && !covered.has(r.place || r.name) && now - r.added * 1000 >= 2 * TICK_MS
-  const pick = open.find(r => r.here) ?? open.find(orphan)
+  const open = rows.filter(r => r.status === 'new' || r.status === 'ask' || r.due)
+  const orphan = r => leader && !places.has(r.place || r.name) && now - r.added * 1000 >= 2 * TICK_MS
+  const idlePeer = r => sessions.some(s => s.id !== me && !s.busy && (r.place ? s.place === r.place : s.name === r.name))
+  const waits = r => turning && (idlePeer(r) || now - r.added * 1000 < BUSY_WAIT_MS)
+  const mine = open.filter(r => (r.here || orphan(r)) && !waits(r)).sort(byTurn)
+  const asks = mine.filter(r => r.status !== 'new')
+  if (asks.length >= 2) {
+    if (prompting) return
+    // Not awaited since the question waits for the user and the tick goes on meanwhile
+    prompting = true
+    batch($, me, asks).catch(err => $.ui.log('meetproxy: ' + message(err))).finally(() => { prompting = false })
+    return
+  }
+  const pick = mine[0]
   if (!pick) return
   const link = (await meetproxy($, ['inbox', 'claim', pick.id, '--session', me])).out
   if (!link) return
-  // An ask request starts a turn that asks the user before anything is posted
+  const asking = pick.status !== 'new'
+  // A request for the user starts a turn that asks them before anything is posted
   // A take with no heartbeat for twenty minutes comes back from the tick as ask
-  if (pick.status === 'ask') $.ui.toast('meetproxy: a request needs you ' + link)
-  await $.command.run({ command: $.plugin.name + ':handle', args: pick.id + (pick.status === 'ask' ? ' --ask' : ' --auto') })
+  if (asking) $.ui.toast('meetproxy: a request needs you ' + link)
+  await $.command.run({ command: $.plugin.name + ':handle', args: pick.id + (asking ? ' --ask' : ' --auto') })
+}
+
+// The rows of the place first, then priority, then age
+function byTurn(a, b) {
+  return Number(b.here) - Number(a.here) || (b.priority ?? 0) - (a.priority ?? 0) || a.added - b.added
+}
+
+// One question for several requests that need the user
+// 1. Labels name only the id, the place and the delegation since request text is untrusted
+// 2. The chosen ones are handled in order and the others offered wait two hours
+// 3. A dismissed question holds all of them so it is not asked again every minute
+async function batch($, me, rows) {
+  const offered = rows.slice(0, BATCH)
+  const label = r => [r.id, r.name || r.place || '-', r.delegation || 'default'].join(' · ').replace(/,/g, ' ')
+  let answer = ''
+  try {
+    answer = await $.ui.ask(`${rows.length} requests need you. Which should meetproxy bring up now?`, {
+      header: 'meetproxy',
+      options: offered.map(label),
+      multiSelect: true,
+    })
+  } catch (err) {
+    $.ui.log('meetproxy: the request question was dismissed: ' + message(err), { to: 'debug' })
+  }
+  const picked = new Set(String(answer).split(',').map(a => a.trim()))
+  const chosen = offered.filter(r => picked.has(label(r)))
+  for (const r of offered.filter(r => !chosen.includes(r))) await meetproxy($, ['inbox', 'hold', r.id, '--until', BATCH_HOLD, '--session', me])
+  if (!chosen.length) return
+  if (!(await meetproxy($, ['inbox', 'claim', chosen[0].id, '--session', me])).out) return
+  for (const r of chosen) await $.command.run({ command: $.plugin.name + ':handle', args: r.id + ' --ask' })
+}
+
+// Source problems
+
+// Problems the user can fix on sources a delegation reads, each with the exact fix
+// 1. A source whose last check failed
+// 2. A source a delegation of the user needs that this session cannot reach
+async function problems($, t) {
+  const out = []
+  const mine = (parseJSON((await meetproxy($, ['delegation'])).out) ?? []).filter(d => !d.id.startsWith('default'))
+  const slackNeeded = mine.some(d => d.when === 'channel' || d.when === 'dm')
+  const githubNeeded = mine.some(d => d.when === 'review-request' || d.when === 'own-pr' || d.do === 'review')
+  if (failing.slack || (slackNeeded && !(await slackRoute($, t)))) {
+    const fix = t?.slack?.token
+      ? 'run /meetproxy:slack setup to check the token'
+      : 'run `/plugin install slack@claude-plugins-official` and `/reload-plugins`, or set up a token with /meetproxy:slack setup'
+    out.push({ source: 'slack', why: failing.slack ?? 'no Slack connection', fix })
+  }
+  if (failing.github || (githubNeeded && !reached.github)) {
+    out.push({ source: 'github', why: failing.github ?? 'gh is not logged in', fix: 'run `! gh auth login` in this session' })
+  }
+  return out
+}
+
+// An idle session asks about a source problem at most once a day per source
+// Not awaited since the question waits for the user and the tick goes on meanwhile
+async function nag($, t) {
+  if (turning || prompting) return
+  const now = await $.clock.now()
+  for (const p of await problems($, t)) {
+    if (await $.store.get('muted:' + p.source)) continue
+    const last = await $.store.get('nag:' + p.source)
+    if (last && now - last < NAG_MS) continue
+    await $.store.set('nag:' + p.source, now)
+    prompting = true
+    asked($, p).catch(err => $.ui.log('meetproxy: ' + message(err))).finally(() => { prompting = false })
+    return
+  }
+}
+
+async function asked($, p) {
+  const stop = 'Stop reading ' + p.source
+  let answer
+  try {
+    answer = await $.ui.ask(`meetproxy cannot read ${p.source}: ${p.why}. To fix it, ${p.fix}. What now?`, { header: p.source, options: [DONE, REMIND, stop] })
+  } catch {
+    return
+  }
+  if (answer === stop) {
+    await $.store.set('muted:' + p.source, true)
+    return
+  }
+  if (answer === DONE) {
+    // The next check tries the source again from scratch
+    delete failing[p.source]
+    delete troubled[p.source]
+    delete reached[p.source]
+    lastTick = undefined
+  }
 }
 
 // Sending
 
 // The same check as the posting guard runs before the source sends
-async function post($, link, body) {
+// A reply that went out is kept in the ledger and its thread is watched for follow-ups
+async function post($, link, body, kind) {
   if (typeof link !== 'string' || typeof body !== 'string' || !body.trim()) return 'post needs a link and a text'
   const source = owner(link)
   if (!source) return 'meetproxy cannot post to ' + link
@@ -1019,12 +1419,43 @@ async function post($, link, body) {
   if (!(await meetproxy($, ['can-post', link, '--session', me])).ok) {
     return `denied: ${link} is not the request's origin, its target or on the allow list`
   }
+  let reply
   try {
-    await send($, source, link, body)
-    return 'posted to ' + link
+    reply = await send($, source, link, body)
   } catch (err) {
     return 'failed to post: ' + message(err)
   }
+  if (!reply) {
+    $.ui.log('meetproxy: the post to ' + link + ' named no link of its own so it is not in the ledger', { to: 'debug' })
+    return 'posted to ' + link
+  }
+  const rec = { reply, body, kind: kind === 'question' ? 'question' : 'answer' }
+  const r = await meetproxy($, ['posts', 'add', '--session', me], JSON.stringify(rec))
+  if (!r.ok) $.ui.log('meetproxy: could not record the post: ' + firstLine(r.err))
+  return 'posted to ' + link
+}
+
+// Replaces or removes a reply only when the ledger holds it
+async function retract($, reply, replacement) {
+  if (typeof reply !== 'string' || !reply.trim()) return 'retract needs a reply link'
+  const found = await meetproxy($, ['posts', 'find', reply.trim()])
+  const p = parseJSON(found.out)
+  if (!found.ok || !p?.reply) return `denied: ${reply} is not a reply meetproxy posted`
+  if (p.retracted_at) return p.reply + ' was already retracted'
+  const source = owner(p.reply)
+  if (!source) return 'meetproxy cannot retract ' + p.reply
+  let done
+  try {
+    done = await unsay($, source, p, typeof replacement === 'string' ? replacement.trim() : '')
+  } catch (err) {
+    return 'failed to retract: ' + message(err)
+  }
+  await meetproxy($, ['posts', 'retract', p.reply])
+  return `${done} ${p.reply}`
+}
+
+function withMark(s) {
+  return s.trim().endsWith(MARK) ? s : s.trim() + '\n\n' + MARK
 }
 
 // Helpers
@@ -1140,11 +1571,16 @@ function terms(s) {
 
 // Pieces the tests reach without a session
 export const testing = {
-  slackLink, githubLink, searchMessages, channelMessages, terms, nextPage, check, pickUp, post, slackTrusted, reached, failures, sorted, holding,
+  slackLink, githubLink, searchMessages, channelMessages, terms, nextPage, check, pickUp, post, retract, nag, slackTrusted, reached, failures, sorted, holding,
+  busy(v) {
+    turning = v
+  },
   reset() {
     lastTick = undefined
     turning = false
     verified = false
+    prompting = false
+    for (const k of Object.keys(failing)) delete failing[k]
     for (const k of Object.keys(holding)) delete holding[k]
     for (const k of Object.keys(troubled)) delete troubled[k]
   },

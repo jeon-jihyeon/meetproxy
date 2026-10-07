@@ -42,7 +42,8 @@ var (
 		"pr merge": ActMerge, "pr close": ActClose, "issue close": ActClose, "repo archive": ActClose,
 		"repo delete": ActDelete, "release delete": ActDelete, "label delete": ActDelete, "issue delete": ActDelete,
 	}
-	ownerRepo = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
+	// OWNER/REPO or HOST/OWNER/REPO
+	ownerRepo = regexp.MustCompile(`^(?:[\w.-]+/)?[\w.-]+/[\w.-]+$`)
 	number    = regexp.MustCompile(`^#?(\d+)$`)
 	apiPath   = regexp.MustCompile(`^/?repos/([\w.-]+/[\w.-]+)(?:/(?:issues|pulls)/(\d+))?`)
 )
@@ -55,6 +56,8 @@ type ghArgs struct {
 	repos []string
 	// Flags that take no text such as --approve
 	flags []string
+	// Values of --hostname and GH_HOST
+	hosts []string
 }
 
 func splitGh(args []string) ghArgs {
@@ -74,6 +77,13 @@ func splitGh(args []string) ghArgs {
 			g.repos = append(g.repos, strings.TrimPrefix(w, "--repo="))
 		case strings.HasPrefix(w, "-R"):
 			g.repos = append(g.repos, strings.TrimPrefix(w, "-R"))
+		case w == "--hostname":
+			if j+1 < len(args) {
+				g.hosts = append(g.hosts, args[j+1])
+			}
+			j++
+		case strings.HasPrefix(w, "--hostname="):
+			g.hosts = append(g.hosts, strings.TrimPrefix(w, "--hostname="))
 		case ghText[w]:
 			j++
 		case strings.HasPrefix(w, "-"):
@@ -88,11 +98,12 @@ func splitGh(args []string) ghArgs {
 // Where a gh call posts
 // 1. Known reads post nowhere
 // 2. Writes of a checked group post to every repository they name
-// 3. Anything else fails closed
+// 3. Writes to a host other than github.com and anything else fail closed
 // fed is a gh run by xargs or parallel whose last words come from its input
-func ghCall(args, envRepos []string, fed bool) ([]Post, error) {
+func ghCall(args, envRepos, envHosts []string, fed bool) ([]Post, error) {
 	g := splitGh(args)
 	g.repos = append(g.repos, envRepos...)
+	g.hosts = append(g.hosts, envHosts...)
 	if len(g.positional) == 0 {
 		if !fed && len(args) == 1 && ghInfo[args[0]] {
 			return nil, nil
@@ -117,12 +128,27 @@ func ghCall(args, envRepos []string, fed bool) ([]Post, error) {
 		return nil, unknown("gh " + group + " is not checked")
 	}
 	cmd := group + " " + sub
-	locs := g.targets(cmd, g.positional[2:])
+	locs, err := g.targets(cmd, g.positional[2:])
+	if err != nil {
+		return nil, err
+	}
 	if len(locs) == 0 {
 		return nil, unknown("gh " + cmd + " names no repository, add -R OWNER/REPO")
 	}
 	return postsAt(locs, g.act(cmd)), nil
 }
+
+// The first host named that is not github.com or empty when none is
+func (g ghArgs) otherHost() string {
+	for _, h := range g.hosts {
+		if !onGitHub(h) {
+			return h
+		}
+	}
+	return ""
+}
+
+func onGitHub(host string) bool { return strings.EqualFold(host, "github.com") }
 
 func isRead(group, sub string) bool {
 	return group != "api" && (ghReads[group] || ghReads[group+" "+sub])
@@ -154,11 +180,11 @@ func approves(flag string) bool {
 	return false
 }
 
-// Every repository a write names
+// Every repository a write names and an error for a host other than github.com
 // 1. Each -R or GH_REPO repository with each pull request or issue number given
 // 2. Each link to GitHub
-// 3. OWNER/REPO positionals of commands that take one such as issue transfer
-func (g ghArgs) targets(cmd string, rest []string) []dest.Location {
+// 3. OWNER/REPO and HOST/OWNER/REPO positionals of commands that take one such as issue transfer
+func (g ghArgs) targets(cmd string, rest []string) ([]dest.Location, error) {
 	var locs []dest.Location
 	numbers := []int{}
 	numbered := strings.HasPrefix(cmd, "pr ") || strings.HasPrefix(cmd, "issue ")
@@ -175,32 +201,58 @@ func (g ghArgs) targets(cmd string, rest []string) []dest.Location {
 			continue
 		}
 		if positionalRepo && ownerRepo.MatchString(w) {
-			locs = append(locs, repoAt(w, 0)...)
+			loc, err := repoAt(w, 0)
+			if err != nil {
+				return nil, err
+			}
+			locs = append(locs, loc)
 		}
 	}
 	if len(numbers) == 0 {
 		numbers = []int{0}
 	}
+	repos, err := g.repoLocs(numbers)
+	return append(locs, repos...), err
+}
+
+// Each -R or GH_REPO repository with each number and an error for a host other than github.com
+func (g ghArgs) repoLocs(numbers []int) ([]dest.Location, error) {
+	if h := g.otherHost(); h != "" {
+		return nil, unknown("gh on host " + h)
+	}
+	var locs []dest.Location
 	for _, r := range g.repos {
 		for _, n := range numbers {
-			locs = append(locs, repoAt(r, n)...)
+			loc, err := repoAt(r, n)
+			if err != nil {
+				return nil, err
+			}
+			locs = append(locs, loc)
 		}
 	}
-	return locs
+	return locs, nil
 }
 
 // A repository written as OWNER/REPO, HOST/OWNER/REPO or a link
-// A value that names no repository still yields a location so it is denied instead of skipped
-func repoAt(v string, n int) []dest.Location {
+// 1. A host other than github.com is an unknown destination
+// 2. A value that names no repository still yields a location so it is denied instead of skipped
+func repoAt(v string, n int) (dest.Location, error) {
 	if loc, ok := dest.Parse(v); ok && loc.Source == dest.GitHub {
 		loc.Number = n
-		return []dest.Location{loc}
+		return loc, nil
 	}
-	parts := strings.Split(strings.Trim(v, "/"), "/")
-	if len(parts) >= 2 {
-		v = parts[len(parts)-2] + "/" + parts[len(parts)-1]
+	_, rest, linked := strings.Cut(v, "://")
+	if !linked {
+		rest = v
 	}
-	return []dest.Location{{Source: dest.GitHub, Name: v, Number: n}}
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if linked || len(parts) > 2 {
+		if !onGitHub(parts[0]) {
+			return dest.Location{}, unknown("a repository on host " + parts[0])
+		}
+		parts = parts[1:]
+	}
+	return dest.Location{Source: dest.GitHub, Name: strings.Join(parts, "/"), Number: n}, nil
 }
 
 // A write through gh api posts to the repository of its endpoint
@@ -209,7 +261,10 @@ func apiCall(args []string, g ghArgs) ([]Post, error) {
 	if !writes {
 		return nil, nil
 	}
-	var locs []dest.Location
+	locs, err := g.repoLocs([]int{0})
+	if err != nil {
+		return nil, err
+	}
 	merges := false
 	for _, w := range g.positional[1:] {
 		if m := apiPath.FindStringSubmatch(w); m != nil {
@@ -217,9 +272,6 @@ func apiCall(args []string, g ghArgs) ([]Post, error) {
 			locs = append(locs, dest.Location{Source: dest.GitHub, Name: m[1], Number: n})
 			merges = merges || strings.Contains(w, "/merge")
 		}
-	}
-	for _, r := range g.repos {
-		locs = append(locs, repoAt(r, 0)...)
 	}
 	if len(locs) == 0 {
 		return nil, unknown("gh api writes to an endpoint without a repository")
