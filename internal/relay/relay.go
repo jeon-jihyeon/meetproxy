@@ -98,6 +98,47 @@ func (s Store) prune(now time.Time) {
 	}
 }
 
+// Growth past these is removed by Prune
+const (
+	// Observed paths only serve the close of their relay
+	keepObserved = 30 * 24 * time.Hour
+	keepClosed   = 90 * 24 * time.Hour
+)
+
+// Removes state that only grows
+// 1. Stale open relays and ended records as Open does
+// 2. Observed paths of relays no longer open once keepObserved passed
+// 3. Closed records older than keepClosed
+func (s Store) Prune(now time.Time) error {
+	s.prune(now)
+	open := map[string]bool{}
+	for _, e := range entries(filepath.Join(s.dir, "open"), now, 0) {
+		var r Relay
+		if _, err := fileio.ReadJSON(filepath.Join(s.dir, "open", e), &r); err == nil {
+			open[r.Id] = true
+		}
+	}
+	for _, e := range entries(filepath.Join(s.dir, "observed"), now, keepObserved) {
+		if id, ok := strings.CutSuffix(e, ".jsonl"); ok && !open[id] {
+			if err := os.Remove(filepath.Join(s.dir, "observed", e)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	_, err := fileio.RewriteLines(filepath.Join(s.dir, "closed.jsonl"), func(lines [][]byte) [][]byte {
+		var kept [][]byte
+		for _, l := range lines {
+			var rec closed
+			// A line that does not parse is kept since only the user can tell what it held
+			if json.Unmarshal(l, &rec) != nil || now.Sub(rec.ClosedAt) <= keepClosed {
+				kept = append(kept, l)
+			}
+		}
+		return kept
+	})
+	return err
+}
+
 // Names of the files in dir last written more than age ago
 func entries(dir string, now time.Time, age time.Duration) []string {
 	all, err := os.ReadDir(dir)

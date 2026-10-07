@@ -55,6 +55,8 @@ func TestLauncher(t *testing.T) {
 		onPath bool
 		relay  string
 		cmd    []string
+		// none for no marker directory, empty or marked
+		scope string
 	}
 	type want struct {
 		code   int
@@ -65,13 +67,18 @@ func TestLauncher(t *testing.T) {
 		args args
 		want want
 	}{
-		{"runs the cached binary", args{true, false, "none", []string{"hook", "path"}}, want{0, "cached hook path"}},
-		{"falls back to PATH", args{false, true, "none", []string{"open", "x"}}, want{0, "path open x"}},
-		{"guard blocks without a binary while a relay is open", args{false, false, "open", []string{"hook", "guard"}}, want{2, ""}},
-		{"guard passes without a binary when no relay is open", args{false, false, "none", []string{"hook", "guard"}}, want{0, ""}},
-		{"guard blocks without a binary or a data dir", args{false, false, "", []string{"hook", "guard"}}, want{2, ""}},
-		{"path hook passes quietly without a binary", args{false, false, "none", []string{"hook", "path"}}, want{0, ""}},
-		{"other commands fail without a binary", args{false, false, "none", []string{"version"}}, want{1, ""}},
+		{"runs the cached binary", args{true, false, "none", []string{"hook", "path"}, "none"}, want{0, "cached hook path"}},
+		{"falls back to PATH", args{false, true, "none", []string{"open", "x"}, "none"}, want{0, "path open x"}},
+		{"guard blocks without a binary while a relay is open", args{false, false, "open", []string{"hook", "guard"}, "none"}, want{2, ""}},
+		{"guard passes without a binary when no relay is open", args{false, false, "none", []string{"hook", "guard"}, "none"}, want{0, ""}},
+		{"guard blocks without a binary or a data dir", args{false, false, "", []string{"hook", "guard"}, "none"}, want{2, ""}},
+		{"path hook passes quietly without a binary", args{false, false, "none", []string{"hook", "path"}, "none"}, want{0, ""}},
+		{"other commands fail without a binary", args{false, false, "none", []string{"version"}, "none"}, want{1, ""}},
+		{"guard ends before the binary when no session has a scope", args{true, false, "none", []string{"hook", "guard"}, "empty"}, want{0, ""}},
+		{"path hook ends before the binary when no session has a scope", args{true, false, "none", []string{"hook", "path"}, "empty"}, want{0, ""}},
+		{"guard runs the binary while a session has a scope", args{true, false, "none", []string{"hook", "guard"}, "marked"}, want{0, "cached hook guard"}},
+		{"guard blocks without a binary while a session has a scope", args{false, false, "none", []string{"hook", "guard"}, "marked"}, want{2, ""}},
+		{"other hooks never end early", args{true, false, "none", []string{"hook", "stop"}, "empty"}, want{0, "cached hook stop"}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,6 +100,12 @@ func TestLauncher(t *testing.T) {
 					open := filepath.Join(data, "relay", "open")
 					require.NoError(t, os.MkdirAll(open, 0o755))
 					require.NoError(t, os.WriteFile(filepath.Join(open, "s1.json"), []byte("{}"), 0o600))
+				}
+				if tc.args.scope != "none" {
+					require.NoError(t, os.MkdirAll(filepath.Join(data, "scope"), 0o700))
+				}
+				if tc.args.scope == "marked" {
+					require.NoError(t, os.WriteFile(filepath.Join(data, "scope", "s1"), []byte("s1"), 0o600))
 				}
 			}
 

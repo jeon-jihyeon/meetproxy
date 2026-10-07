@@ -33,16 +33,18 @@ linters:
     # 2. relay and workmap use locmap
     # 3. guard uses only dest and shell
     # 4. any package may use fileio and shell which use no package of the module
+    # 5. slackapi speaks HTTP alone and only cmd uses it
     depguard:
       rules:
         base:
           files:
             - "**/internal/fileio/**"
             - "**/internal/shell/**"
+            - "**/internal/slackapi/**"
             - "!$test"
           deny:
             - pkg: github.com/jeon-jihyeon/meetproxy
-              desc: fileio and shell use no package of the module
+              desc: fileio, shell and slackapi use no package of the module
         leaf:
           files:
             - "**/internal/locmap/**"
@@ -57,6 +59,8 @@ linters:
               desc: leaf packages do not import guard
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/workmap
               desc: leaf packages do not import workmap
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/slackapi
+              desc: only cmd calls Slack
             - pkg: github.com/jeon-jihyeon/meetproxy/cmd
               desc: nothing imports cmd
         workmap:
@@ -69,6 +73,8 @@ linters:
               desc: workmap does not import guard
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/dest
               desc: workmap does not know about posting
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/slackapi
+              desc: only cmd calls Slack
             - pkg: github.com/jeon-jihyeon/meetproxy/cmd
               desc: nothing imports cmd
         guard:
@@ -89,6 +95,8 @@ linters:
               desc: guard uses only dest and shell
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/fileio
               desc: guard uses only dest and shell
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/slackapi
+              desc: guard uses only dest and shell
             - pkg: github.com/jeon-jihyeon/meetproxy/cmd
               desc: nothing imports cmd
         relay:
@@ -99,6 +107,8 @@ linters:
               desc: relay does not know about posting
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/guard
               desc: relay does not know about posting
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/slackapi
+              desc: only cmd calls Slack
             - pkg: github.com/jeon-jihyeon/meetproxy/cmd
               desc: nothing imports cmd
   exclusions:

@@ -33,7 +33,10 @@ var (
 	settings = map[string]bool{
 		"allow": true, "resume": true, "delegation put": true, "delegation remove": true,
 		"inbox take": true, "inbox claim": true, "inbox add": true, "inbox advance": true,
+		"slack token": true,
 	}
+	// meetproxy flags that take no value
+	meetproxyBools = map[string]bool{"busy": true}
 )
 
 // Text inside text deeper than this that still names gh is denied
@@ -204,6 +207,7 @@ func commandName(args []string) int {
 // What a meetproxy command does while a request is handled
 // 1. Commands that change what is taken or where posts may go are left to the user
 // 2. open posts to the origin and the target it names so the relay never moves to another request
+// 3. slack post posts to its link
 func meetproxyCall(args []string) ([]Post, error) {
 	pos, target := meetproxyWords(args)
 	word := func(i int) string {
@@ -216,6 +220,12 @@ func meetproxyCall(args []string) ([]Post, error) {
 	switch {
 	case settings[first] || settings[first+" "+second] || (first == "triage" && second != ""):
 		return nil, fmt.Errorf("meetproxy %s %w", strings.TrimSpace(first+" "+second), ErrSettings)
+	case first == "slack" && second == "post":
+		loc, ok := dest.Parse(word(2))
+		if !ok {
+			return nil, unknown("meetproxy slack post of a link that names no place")
+		}
+		return []Post{{At: loc}}, nil
 	case first != "open" || second == "":
 		return nil, nil
 	}
@@ -235,7 +245,7 @@ func meetproxyCall(args []string) ([]Post, error) {
 }
 
 // Positional words and the --target value of a meetproxy command line
-// Every meetproxy flag takes a value
+// Every meetproxy flag but the boolean ones takes a value
 func meetproxyWords(args []string) (pos []string, target string) {
 	for i := 0; i < len(args); i++ {
 		w := args[i]
@@ -247,6 +257,7 @@ func meetproxyWords(args []string) (pos []string, target string) {
 			if strings.TrimLeft(name, "-") == "target" {
 				target = v
 			}
+		case strings.HasPrefix(w, "-") && meetproxyBools[strings.TrimLeft(w, "-")]:
 		case strings.HasPrefix(w, "-") && len(w) > 1:
 			if i+1 < len(args) && strings.TrimLeft(w, "-") == "target" {
 				target = args[i+1]

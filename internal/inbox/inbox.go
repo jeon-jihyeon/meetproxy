@@ -57,19 +57,30 @@ type Item struct {
 	SessionId string    `json:"session_id,omitempty"`
 	AddedAt   time.Time `json:"added_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// Last sign that the session working on a take is still at it
+	// Kept apart from UpdatedAt so a heartbeat never reads as a change of status
+	HeartbeatAt time.Time `json:"heartbeat_at,omitzero"`
 }
 
 // No session works on it
-// A take older than busyFor counts as abandoned
+// A take with no sign of work for busyFor counts as abandoned
 func (it Item) Waiting(now time.Time) bool {
 	switch it.Status {
 	case StatusNew, StatusAsk, StatusHeld:
 		return true
 	case StatusTaken:
-		return now.Sub(it.UpdatedAt) >= busyFor
+		return now.Sub(it.lastSeen()) >= busyFor
 	default:
 		return false
 	}
+}
+
+// The later of the last change and the last heartbeat
+func (it Item) lastSeen() time.Time {
+	if it.HeartbeatAt.After(it.UpdatedAt) {
+		return it.HeartbeatAt
+	}
+	return it.UpdatedAt
 }
 
 // Whether the request belongs to the place with this root and name
@@ -87,6 +98,7 @@ func New(dataDir string) Store { return Store{dir: filepath.Join(dataDir, "inbox
 
 var (
 	ErrNotFound = errors.New("no such request")
+	ErrCorrupt  = errors.New("request file is corrupt")
 	ErrPaused   = errors.New("meetproxy is paused, run meetproxy resume")
 	ErrTaken    = errors.New("another session works on the request")
 )
@@ -143,7 +155,7 @@ func (s Store) Get(id string) (Item, error) {
 	found, err := fileio.ReadJSON(s.itemFile(id), &it)
 	switch {
 	case err != nil && found:
-		return Item{}, fmt.Errorf("%s is corrupt: %w", s.itemFile(id), err)
+		return Item{}, fmt.Errorf("%w: %s: %w", ErrCorrupt, s.itemFile(id), err)
 	case err != nil:
 		return Item{}, err
 	case !found:
@@ -153,7 +165,8 @@ func (s Store) Get(id string) (Item, error) {
 }
 
 // Newest first
-// A request removed while the list is read is left out
+// 1. A request removed while the list is read is left out
+// 2. A request file that cannot be read is moved aside so one broken file never stops every session
 func (s Store) List() ([]Item, error) {
 	entries, err := os.ReadDir(s.dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -169,10 +182,13 @@ func (s Store) List() ([]Item, error) {
 			continue
 		}
 		it, err := s.Get(id)
-		if errors.Is(err, ErrNotFound) {
+		switch {
+		case errors.Is(err, ErrNotFound):
 			continue
-		}
-		if err != nil {
+		case errors.Is(err, ErrCorrupt):
+			_, _ = fileio.Quarantine(s.itemFile(id))
+			continue
+		case err != nil:
 			return nil, err
 		}
 		out = append(out, it)
@@ -216,8 +232,18 @@ func (s Store) prune(now time.Time) {
 	}
 }
 
-// A taken request older than this no longer keeps its session busy and any session may take it over
-const busyFor = time.Hour
+// A taken request with no sign of work for this long no longer keeps its session busy and any session may take it over
+// A running turn renews it through Touch so only a session that stopped working loses its take
+const busyFor = 20 * time.Minute
+
+// Touch writes a heartbeat at most this often so a busy session costs few writes
+const touchEvery = 5 * time.Minute
+
+// Requests nobody took are closed after these
+const (
+	expireOpen = 14 * 24 * time.Hour
+	expireHeld = 30 * 24 * time.Hour
+)
 
 // Takes a request for a session that works on one request at a time
 // 1. Returns false when the session still works on one it took
@@ -406,7 +432,7 @@ func (s Store) Advance(key, ts string) error {
 	if b, err := os.ReadFile(file); err == nil && !newer(ts, strings.TrimSpace(string(b))) {
 		return nil
 	}
-	return fileio.WriteAtomic(file, []byte(ts), 0o644)
+	return fileio.WriteAtomic(file, []byte(ts), 0o600)
 }
 
 func (s Store) Paused() bool {
@@ -421,7 +447,7 @@ func (s Store) SetPaused(paused bool) error {
 		}
 		return nil
 	}
-	return fileio.WriteAtomic(s.pauseFile(), nil, 0o644)
+	return fileio.WriteAtomic(s.pauseFile(), nil, 0o600)
 }
 
 // Serializes every read then write across the sessions that share the inbox
@@ -444,4 +470,128 @@ func (s Store) cursorFile(key string) (string, error) {
 	default:
 		return "", fmt.Errorf("cursor key must be lowercase letters, digits and dashes %q", key)
 	}
+}
+
+// Number of request files List moved aside
+func (s Store) Corrupt() (int, error) {
+	entries, err := os.ReadDir(filepath.Join(s.dir, "corrupt"))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	return len(entries), err
+}
+
+// Renews the takes of a session that is still working so they do not age into ask
+func (s Store) Touch(sessionId string, now time.Time) error {
+	stale := func(it Item) bool {
+		return it.Status == StatusTaken && it.SessionId == sessionId && now.Sub(it.lastSeen()) >= touchEvery
+	}
+	all, err := s.List()
+	if err != nil || !slices.ContainsFunc(all, stale) {
+		return err
+	}
+	unlock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	for _, it := range all {
+		// Read again under the lock since another session may have settled it meanwhile
+		cur, err := s.Get(it.Id)
+		if err != nil || !stale(cur) {
+			continue
+		}
+		cur.HeartbeatAt = now.UTC()
+		if err := s.put(cur); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Closes requests left waiting so long that answering them would no longer help
+// 1. new and ask past expireOpen
+// 2. held past expireHeld since the user put it off on purpose
+func (s Store) Expire(now time.Time) (int, error) {
+	unlock, err := s.lock()
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+	all, err := s.List()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, it := range all {
+		age := now.Sub(it.UpdatedAt)
+		switch {
+		case (it.Status == StatusNew || it.Status == StatusAsk) && age > expireOpen:
+		case it.Status == StatusHeld && age > expireHeld:
+		default:
+			continue
+		}
+		it.Status, it.SessionId, it.Reason, it.UpdatedAt = StatusDone, "", "expired", now.UTC()
+		if err := s.put(it); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+// Which session reads a source until when
+type lease struct {
+	Session string    `json:"session"`
+	Until   time.Time `json:"until"`
+}
+
+// Holds the lease of a source for ttl and reports false while another session holds it
+// The check and the write run under the inbox lock so two sessions never both hold it
+// Holding again renews it
+func (s Store) Lease(source, sessionId string, ttl time.Duration, now time.Time) (bool, error) {
+	file, err := s.leaseFile(source)
+	if err != nil {
+		return false, err
+	}
+	unlock, err := s.lock()
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+	var cur lease
+	if _, err := fileio.ReadJSON(file, &cur); err == nil && cur.Session != sessionId && cur.Until.After(now) {
+		return false, nil
+	}
+	return true, fileio.WriteJSON(file, lease{sessionId, now.Add(ttl).UTC()})
+}
+
+// Gives up the lease so another session can read the source at once
+// A lease another session took over meanwhile stays with it
+func (s Store) Drop(source, sessionId string) error {
+	file, err := s.leaseFile(source)
+	if err != nil {
+		return err
+	}
+	unlock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	var cur lease
+	if found, err := fileio.ReadJSON(file, &cur); !found || (err == nil && cur.Session != sessionId) {
+		return nil
+	}
+	err = os.Remove(file)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func (s Store) leaseFile(source string) (string, error) {
+	if !validKey.MatchString(source) {
+		return "", fmt.Errorf("source must be lowercase letters, digits and dashes %q", source)
+	}
+	return filepath.Join(s.dir, "lease-"+source+".json"), nil
 }

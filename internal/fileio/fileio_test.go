@@ -194,3 +194,77 @@ func TestAppendLine(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, strings.Repeat(string(line)+"\n", 20), string(b))
 }
+
+// Every file the state keeps is the user's alone however it was written
+func TestPermissions(t *testing.T) {
+	t.Parallel()
+	tcs := []struct {
+		name  string
+		write func(path string) error
+	}{
+		{"WriteJSON", func(path string) error { return fileio.WriteJSON(path, map[string]string{"a": "b"}) }},
+		{"AppendLine", func(path string) error { return fileio.AppendLine(path, []byte("x")) }},
+		{"Lock", func(path string) error {
+			unlock, err := fileio.Lock(path)
+			if err == nil {
+				unlock()
+			}
+			return err
+		}},
+	}
+	type want struct {
+		dir, file os.FileMode
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "d", "f")
+
+			require.NoError(t, tc.write(path))
+
+			dir, err := os.Stat(filepath.Dir(path))
+			require.NoError(t, err)
+			file, err := os.Stat(path)
+			require.NoError(t, err)
+			assert.Equal(t, want{0o700, 0o600}, want{dir.Mode().Perm(), file.Mode().Perm()})
+		})
+	}
+}
+
+func TestQuarantine(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.json")
+	require.NoError(t, os.WriteFile(path, []byte("{"), 0o600))
+
+	to, err := fileio.Quarantine(path)
+
+	require.NoError(t, err)
+	_, statErr := os.Stat(path)
+	b, readErr := os.ReadFile(to)
+	require.NoError(t, readErr)
+	assert.ErrorIs(t, statErr, os.ErrNotExist)
+	assert.Equal(t, filepath.Join(dir, "corrupt"), filepath.Dir(to))
+	assert.True(t, strings.HasPrefix(filepath.Base(to), "a.json."))
+	assert.Equal(t, "{", string(b))
+}
+
+func TestRestrict(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	sub := filepath.Join(root, "inbox")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sub, "a.json"), []byte("{}"), 0o644))
+	outside := filepath.Join(t.TempDir(), "outside")
+	require.NoError(t, os.WriteFile(outside, nil, 0o644))
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "link")))
+
+	require.NoError(t, fileio.Restrict(root))
+
+	perm := func(path string) os.FileMode {
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		return info.Mode().Perm()
+	}
+	assert.Equal(t, []os.FileMode{0o700, 0o700, 0o600, 0o644}, []os.FileMode{perm(root), perm(sub), perm(filepath.Join(sub, "a.json")), perm(outside)})
+}

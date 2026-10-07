@@ -3,7 +3,7 @@ name: delegate
 description: Hand meetproxy a kind of request from any connected source to take over, from a sentence such as "when Datadog posts a Triggered alert in #devops-emergency, investigate it". Checks and helps set up what that request needs before saving it. Run with the sentence, with remove and an id, or with nothing to list what is delegated.
 argument-hint: "[what to take over | remove <id>]"
 disable-model-invocation: true
-allowed-tools: Bash(meetproxy delegation), Bash(meetproxy delegation *), Bash(gh auth status*), Bash(command -v *)
+allowed-tools: Bash(meetproxy delegation), Bash(meetproxy delegation *), Bash(meetproxy slack whoami), Bash(meetproxy slack whoami *), Bash(gh auth status*), Bash(command -v *)
 ---
 
 # delegate
@@ -44,7 +44,8 @@ Run `meetproxy delegation remove --data "${CLAUDE_PLUGIN_DATA}" <id>`.
 
    | Needs | Check | Fix |
    |---|---|---|
-   | Slack, for `channel` delegations and Slack mentions | Call the Slack user profile tool | No Slack tools: `/plugin install slack@claude-plugins-official`, then `/reload-plugins`. An auth error: log in from `/mcp` |
+   | Slack, for `channel` delegations and Slack mentions | `meetproxy slack whoami --data "${CLAUDE_PLUGIN_DATA}"`, and without a token the Slack user profile tool | No token and no Slack tools: `/meetproxy:slack setup`, or `/plugin install slack@claude-plugins-official` then `/reload-plugins`. An auth error of the tools: log in from `/mcp` |
+   | A Slack token, for any Slack delegation | `meetproxy slack whoami --data "${CLAUDE_PLUGIN_DATA}"` names the user | Optional. Without it Slack is read through the connector by the session holding the Slack lease, which shows as busy every minute. `/meetproxy:slack setup` sets one up |
    | GitHub, for `review`, `review-request` and GitHub mentions | `command -v gh` and `gh auth status` | install gh, then the user runs `! gh auth login` |
    | Evidence, for `investigate` | the tools this session has for metrics, logs and the cluster, such as a Datadog MCP, `kubectl` or a cloud CLI | name what is missing and what the verdict will rest on without it |
    | The skill, for any other `do` | the skill is listed in this session | name it as missing |

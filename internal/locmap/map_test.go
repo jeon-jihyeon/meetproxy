@@ -3,6 +3,8 @@ package locmap_test
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,6 +127,51 @@ func TestMapRoute(t *testing.T) {
 			got, err := m.Route(tc.terms)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestMapCompact(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "a.go"), nil, 0o600))
+	entry := func(id, rel string, n int) locmap.Entry {
+		return locmap.Entry{RelayId: id, Topic: "topic", Keywords: []string{strings.Repeat("k", n)}, Paths: []locmap.Path{{Root: repo, Rel: rel}}}
+	}
+	type want struct {
+		wrote bool
+		lines int
+	}
+	tcs := []struct {
+		name    string
+		entries []locmap.Entry
+		want    want
+	}{
+		{"a small map is left alone", []locmap.Entry{entry("r1", "a.go", 10), entry("r1", "a.go", 10)}, want{false, 2}},
+		{
+			"a large map keeps the last record of each relay that still exists",
+			append(slices.Repeat([]locmap.Entry{entry("r1", "a.go", 1000)}, 300), entry("r2", "gone.go", 10), entry("", "a.go", 10)),
+			want{true, 2},
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			data := t.TempDir()
+			m := locmap.New(data)
+			for _, e := range tc.entries {
+				require.NoError(t, m.Add(e))
+			}
+
+			wrote, err := m.Compact()
+
+			require.NoError(t, err)
+			b, err := os.ReadFile(filepath.Join(data, "map.jsonl"))
+			require.NoError(t, err)
+			found, err := m.Locate([]string{"topic"}, 0)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, want{wrote, strings.Count(string(b), "\n")})
+			assert.Len(t, found, 1)
 		})
 	}
 }

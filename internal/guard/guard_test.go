@@ -130,6 +130,7 @@ func TestCheck(t *testing.T) {
 		{"allows meetproxy open of the origin and the target", bash(t, "meetproxy open https://w.slack.com/archives/C7/p1 --target https://github.com/t/r/pull/3"), ""},
 		{"allows meetproxy close and inbox done", bash(t, "meetproxy close --topic t && meetproxy inbox done abcdefabcdef"), ""},
 		{"allows meetproxy commands that only read", bash(t, "meetproxy locate --data d retry && meetproxy triage && meetproxy allowed"), ""},
+		{"allows a meetproxy slack post where the request came from", bash(t, "echo hi | meetproxy slack post https://w.slack.com/archives/C7/p2"), ""},
 		{"allows a word that only mentions meetproxy", bash(t, "grep -r meetproxy ."), ""},
 		{"allows python without an inline program", bash(t, "python3 -m json.tool a.json"), ""},
 		{"allows a shell running a file", bash(t, "bash ./build.sh"), ""},
@@ -206,6 +207,10 @@ func TestCheck_Bypass(t *testing.T) {
 		{"i. meetproxy by path", `"/p/bin/meetproxy" --data d allow github:x/*`, "changes meetproxy settings"},
 		{"i. meetproxy open of another request", "meetproxy open --data d https://w.slack.com/archives/C9/p1", "slack:C9 is not allowed"},
 		{"i. meetproxy open with another target", "meetproxy open https://w.slack.com/archives/C7/p1 --target https://github.com/x/r/pull/1", "github:x/r#1"},
+		{"i. meetproxy slack token", "pbpaste | meetproxy slack token --data d", "changes meetproxy settings"},
+		{"i. meetproxy slack token behind a boolean flag", "meetproxy --busy slack token", "changes meetproxy settings"},
+		{"i. meetproxy slack post elsewhere", "echo hi | meetproxy slack post https://w.slack.com/archives/C9/p1 --session s", "slack:C9 is not allowed"},
+		{"i. meetproxy slack post of no link", "echo hi | meetproxy slack post nowhere", "unknown destination"},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
