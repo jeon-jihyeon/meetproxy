@@ -106,7 +106,7 @@ func TestRun(t *testing.T) {
 		{"usage error for tick without --cwd", "s1", false, nil, step{"tick", nil, ""}, want{exitUsage, "", true}},
 		{
 			"tick prints an empty list when nothing waits", "s1", false, nil, step{"tick", []string{"--cwd", "/tmp/notes"}, ""},
-			want{0, `{"protocol":` + strconv.Itoa(protocol) + `,"place":"/tmp/notes","name":"notes","waiting":[]}`, false},
+			want{0, `{"protocol":` + strconv.Itoa(protocol) + `,"place":"/tmp/notes","name":"notes","waiting":[],"slack":{"token":false}}`, false},
 		},
 		{"allowed lists the patterns", "s1", false, []step{allowed}, step{"allowed", nil, ""}, want{0, "slack:C1", false}},
 		{
@@ -512,12 +512,12 @@ func TestRun_Tick(t *testing.T) {
 	}{
 		{
 			"a request of the repository belongs here by its root", filepath.Join(repo, "a.go"),
-			fmt.Sprintf(`{"protocol":%d,"place":%q,"name":"svc","waiting":[%s,%s]}`, protocol, repo,
+			fmt.Sprintf(`{"protocol":%d,"place":%q,"name":"svc","waiting":[%s,%s],"slack":{"token":false}}`, protocol, repo,
 				row(older, "new", repo, "svc", now, true), row(newer, "ask", "", "web", now.Add(time.Second), false)),
 		},
 		{
 			"a request stored without a root belongs here by its name", web,
-			fmt.Sprintf(`{"protocol":%d,"place":%q,"name":"web","waiting":[%s,%s]}`, protocol, web,
+			fmt.Sprintf(`{"protocol":%d,"place":%q,"name":"web","waiting":[%s,%s],"slack":{"token":false}}`, protocol, web,
 				row(older, "new", repo, "svc", now, false), row(newer, "ask", "", "web", now.Add(time.Second), true)),
 		},
 	}

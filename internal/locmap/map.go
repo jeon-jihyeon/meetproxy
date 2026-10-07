@@ -193,3 +193,47 @@ func wholeWord(s, word string) bool {
 }
 
 func wordRune(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' }
+
+// A map larger than this is compacted
+// Below it reading every line costs less than rewriting the file
+const compactAt = 256 << 10
+
+// Rewrites the map without lines no lookup uses again and reports whether it wrote
+// 1. Only the last record of a relay is kept since entries reads no other
+// 2. A record whose paths are all gone is dropped since Locate drops them anyway
+// 3. A line that does not parse is dropped since it fails every lookup
+func (m Map) Compact() (bool, error) {
+	info, err := os.Stat(m.file)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, err
+	case info.Size() <= compactAt:
+		return false, nil
+	}
+	return fileio.RewriteLines(m.file, useful)
+}
+
+func useful(lines [][]byte) [][]byte {
+	entries := make([]*Entry, len(lines))
+	last := map[string]int{}
+	for i, l := range lines {
+		var e Entry
+		if json.Unmarshal(l, &e) != nil {
+			continue
+		}
+		entries[i] = &e
+		if e.RelayId != "" {
+			last[e.RelayId] = i
+		}
+	}
+	var kept [][]byte
+	for i, e := range entries {
+		if e == nil || (e.RelayId != "" && last[e.RelayId] != i) || !slices.ContainsFunc(e.Paths, Path.Exists) {
+			continue
+		}
+		kept = append(kept, lines[i])
+	}
+	return kept
+}

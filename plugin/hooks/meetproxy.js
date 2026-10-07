@@ -8,17 +8,15 @@
 // 5. Requests that need the user start a turn that asks them before anything is posted
 // 6. Replies go out through the post tool
 //    It sends with the source that owns the link
+// 7. Slack is read through the binary with the user's own token when one is set
+//    A connector call fires the PreToolUse hooks and terminal multiplexers then show the session as running
+//    So without a token only the session holding the Slack lease calls the connector
 
 const TICK_MS = 60_000
 const FIRST_MS = 15_000
 const LEASE_MS = 3 * TICK_MS
 // A request found later than this came in while no session was open and is not answered on its own
 const STALE_MS = 60 * 60_000
-// Pages of 100 messages read from one channel in one check
-// Far more than a busy channel gets in a day and still a bound on a runaway loop
-const MAX_PAGES = 50
-// The most results Slack search answers with in one page
-const SEARCH_PAGE = 20
 // Times a message may fail to be queued before it is skipped
 const MAX_FAILURES = 3
 // How far before the cursor searches read again
@@ -29,28 +27,49 @@ const OVERLAP_MS = 5 * 60_000
 const SORTED_MS = 2 * OVERLAP_MS
 // What the binary must speak
 // A session still running an older watcher stops instead of misreading a newer binary
-const PROTOCOL = 6
-// How long a Slack user's trust is remembered
-const TRUST_MS = 24 * 60 * 60_000
-// GitHub associations of members of the repository's own organization or its collaborators
-const TRUSTED_ASSOCIATIONS = ['OWNER', 'MEMBER', 'COLLABORATOR']
-// Profile lines that mark a guest or restricted account
-const RESTRICTED = /\b(?:is[ _])?(?:ultra[ _])?(?:restricted|guest)\b[^:\n\\]*:\s*"?(?:true|yes)|"is_(?:ultra_)?restricted"\s*:\s*true|Account Type: [^\n\\]*(?:guest|restricted)/i
-// Characters of a message kept for triage and the work map
-const TEXT_CHARS = 4000
-// Characters kept of each Slack message a message links to
-const LINKED_CHARS = 1500
+const PROTOCOL = 7
 // Characters of nodloop notes given to triage
 const KNOWLEDGE_CHARS = 2000
 // Enough for the one line verdict triage answers with
 const TRIAGE_TOKENS = 200
 const TRIAGE_MS = 30_000
-// Longer than the two minute run timeout of triage run so a slow engine ends there first
-const BINARY_MS = 150_000
 const UPDATED = 'meetproxy was updated, run /reload-plugins in this session'
-const SLACK = 'plugin:slack:slack'
 const NODLOOP = 'plugin:nodloop:nodloop'
 const MARK = '_Written by Claude on behalf of the user_'
+// Longer than the two minute run timeout of triage run so a slow engine ends there first
+const BINARY_MS = 150_000
+const SLACK_LINK = /https:\/\/[\w-]+\.slack\.com\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})/
+const GITHUB_LINK = /https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(pull|issues)\/(\d+)/
+// Pages of 100 messages read from one channel in one check
+// Far more than a busy channel gets in a day and still a bound on a runaway loop
+const MAX_PAGES = 50
+// The most results Slack search answers with in one page
+const SEARCH_PAGE = 20
+// How long a Slack user's trust is remembered
+const TRUST_MS = 24 * 60 * 60_000
+// How long the user is left alone after being asked about a Slack token or answering later
+const SETUP_AGAIN_MS = 7 * 24 * 60 * 60_000
+// Profile lines that mark a guest or restricted account
+const RESTRICTED = /\b(?:is[ _])?(?:ultra[ _])?(?:restricted|guest)\b[^:\n\\]*:\s*"?(?:true|yes)|"is_(?:ultra_)?restricted"\s*:\s*true|Account Type: [^\n\\]*(?:guest|restricted)/i
+// What a Slack connector answer says when nothing matched
+const NO_RESULTS = /\bno (?:results|messages|matches)\b|\bnothing found\b|^\s*Channel: [^\n]*\s*$/i
+// Characters kept of each Slack message a message links to
+const LINKED_CHARS = 1500
+const SLACK = 'plugin:slack:slack'
+// The tools the Slack connector lists
+const SLACK_TOOLS = 'mcp__plugin_slack_slack__'
+// Choices of the token question besides the token typed under Other
+const TOKEN_CANCEL = 'Cancel'
+const TOKEN_TERMINAL = 'Paste it in my terminal'
+// Characters of a message kept for triage and the work map
+const TEXT_CHARS = 4000
+// How long a GitHub notification read whole is remembered by its updated_at
+// One that does not change in that time was answered or dropped long ago
+const GHSEEN_MS = 24 * 60 * 60_000
+// How often a remembered notification that shows up again renews its memory
+const GHSEEN_RENEW_MS = 60 * 60_000
+// GitHub associations of members of the repository's own organization or its collaborators
+const TRUSTED_ASSOCIATIONS = ['OWNER', 'MEMBER', 'COLLABORATOR']
 
 let stop
 // What keeps the watcher from working
@@ -65,6 +84,16 @@ const failures = new Map()
 // Messages this session already sorted mapped to the last time in ms a read found them
 // The overlap reads them again and this keeps them from costing another triage
 const sorted = new Map()
+// Sources whose lease this session holds mapped to when in ms it runs out
+const holding = {}
+// Whether a turn of the main loop is running so the tick keeps this session's takes alive
+let turning = false
+// The last trouble recorded per source so a failure that repeats every check is recorded once
+const troubled = {}
+// The last tick the binary answered
+let lastTick
+// Whether the Slack user the connector acts for was checked since this session took the lease
+let verified = false
 
 export function register(on) {
   on('session.start', async ($, e, next) => {
@@ -79,9 +108,21 @@ export function register(on) {
         required: ['link', 'text'],
       },
     })
+    await $.tool.register({
+      name: 'slack_token',
+      description:
+        'Ask the user for their Slack user token in a dialog and store it for meetproxy. ' +
+        'The token never reaches the model, only the team and user it acts for and the scopes it lacks.',
+      inputSchema: { type: 'object', properties: {} },
+    })
     cancel(stop)
     stop = undefined
-    if (Number((await meetproxy($, ['protocol'])).out) !== PROTOCOL) {
+    const version = await meetproxy($, ['protocol'])
+    if (!version.ok) {
+      $.ui.status(failed(version))
+      return next(e)
+    }
+    if (Number(version.out) !== PROTOCOL) {
       $.ui.status(UPDATED)
       return next(e)
     }
@@ -91,12 +132,20 @@ export function register(on) {
       busy = true
       try {
         // The binary can change under a running session so every tick checks again
-        const t = parseJSON((await meetproxy($, ['tick', '--cwd', await $.session.cwd()])).out)
+        const args = ['tick', '--cwd', await $.session.cwd(), '--session', await $.session.id()]
+        if (turning) args.push('--busy')
+        const r = await meetproxy($, args)
+        if (!r.ok) {
+          $.ui.status(failed(r))
+          return
+        }
+        const t = parseJSON(r.out)
         if (t?.protocol !== PROTOCOL) {
           $.ui.status(UPDATED)
           return
         }
-        await check($)
+        lastTick = t
+        await check($, t)
         await pickUp($, t)
       } catch (err) {
         $.ui.log('meetproxy: ' + message(err))
@@ -108,49 +157,38 @@ export function register(on) {
     return next(e)
   })
 
+  // A subagent's run raises no turn.start so only the main loop's turns count
+  on('turn.start', ($, e, next) => {
+    turning = true
+    return next(e)
+  })
+  on('turn.complete', ($, e, next) => {
+    if (!e.agentId) turning = false
+    return next(e)
+  })
+
   // A post whose check fails or runs out of time is denied rather than sent
-  on('tool.call', async ($, e, next) => {
-    if (e.tool !== 'mcp__' + $.plugin.name + '__post') return next(e)
+  on('tool.call', { tool: 'mcp__meetproxy__post' }, async ($, e) => {
     return post($, e.link, e.text)
       .then(r => ({ result: r }))
       .catch(err => ({ result: 'denied: post check failed ' + message(err) }))
   }).catch(($, e, next) => (next.called ? next(e) : { result: 'denied: post check failed ' + (next.error?.message ?? next.error?.kind ?? '') }))
-}
 
-// Links
-
-const SLACK_LINK = /https:\/\/[\w-]+\.slack\.com\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})/
-const GITHUB_LINK = /https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(pull|issues)\/(\d+)/
-
-// Where a Slack message sits
-// 1. channel: the channel id
-// 2. ts: the message ts
-// 3. thread: the ts of the thread it sits in
-function slackLink(link) {
-  const m = SLACK_LINK.exec(link ?? '')
-  if (!m) return undefined
-  const ts = m[2] + '.' + m[3]
-  const thread = /[?&]thread_ts=([\d.]+)/.exec(link)?.[1] ?? ts
-  return { channel: m[1], ts, thread }
-}
-
-// The issue or pull request and the review thread when the link points at one
-function githubLink(link) {
-  const m = GITHUB_LINK.exec(link ?? '')
-  if (!m) return undefined
-  return { owner: m[1], repo: m[2], number: m[4], pull: m[3] === 'pull', discussion: /#discussion_r(\d+)/.exec(link)?.[1] }
+  // The token goes from the dialog to the binary and only what it acts for comes back
+  on('tool.call', { tool: 'mcp__meetproxy__slack_token' }, async $ => ({ result: await askToken($) })).catch(($, e, next) => (next.called ? next(e) : { result: 'no token was stored: ' + (next.error?.message ?? next.error?.kind ?? '') }))
 }
 
 // Sources
 
 // Each source is one case in each of these five dispatchers
 // 1. owner(link): the source a link belongs to
-// 2. ready($, source): whether its connection works now
-// 3. receive($, source): messages from a little before its cursors on
+// 2. ready($, source, t): whether its connection works now
+// 3. receive($, source, t): messages from a little before its cursors on
 //    Each names its source and the kind its delegation is matched by
 //    The kind is mention, review-request or a channel delegation id
 //    Each also names the cursor key its position is kept under
-// 4. answered($, m): whether the user already replied after the message
+//    Beside them the newest position seen per cursor key and what to remember once every message is settled
+// 4. answered($, m): whether the user already replied after the message, undefined when that cannot be told
 // 5. send($, source, link, reply): a reply in the thread of the link
 // The mod validator rejects passing $ through object methods so sources dispatch by switch instead of a table
 const SOURCES = ['slack', 'github']
@@ -161,32 +199,33 @@ function owner(link) {
   return undefined
 }
 
-async function ready($, source) {
-  if (reached[source]) return true
-  try {
-    switch (source) {
-      case 'slack':
-        await slackUser($, true)
-        break
-      case 'github':
-        await githubUser($, true)
-        break
-      default:
-        return false
-    }
-    reached[source] = true
-  } catch {}
-  return Boolean(reached[source])
-}
-
-async function receive($, source) {
+// Slack is ready when a token is set or the connector lists its tools
+// Neither costs a connector call
+async function ready($, source, t) {
   switch (source) {
     case 'slack':
-      return slackReceive($)
+      return Boolean(await slackRoute($, t))
+    case 'github':
+      if (reached.github) return true
+      try {
+        await githubUser($, true)
+        reached.github = true
+      } catch (err) {
+        await trouble($, 'github', err, true)
+      }
+      return Boolean(reached.github)
+  }
+  return false
+}
+
+async function receive($, source, t) {
+  switch (source) {
+    case 'slack':
+      return slackReceive($, t)
     case 'github':
       return githubReceive($)
   }
-  return []
+  return { messages: [], newest: {}, marks: [] }
 }
 
 // Whether the user already replied after the message
@@ -199,7 +238,10 @@ async function answered($, m) {
       case 'github':
         return await githubAnswered($, m)
     }
-  } catch {}
+  } catch (err) {
+    await trouble($, m.source, err)
+    return undefined
+  }
   return false
 }
 
@@ -214,30 +256,70 @@ async function send($, source, link, reply) {
 
 // Slack
 
-async function slackReceive($) {
-  const me = await slackUser($)
+// How this session reaches Slack
+// 1. token: the binary calls Slack with the user's token so no tool call fires any hook
+// 2. mcp: the Slack connector, which $.tool.list names without calling it
+// 3. undefined: neither
+async function slackRoute($, t) {
+  t ??= lastTick ?? parseJSON((await meetproxy($, ['tick', '--cwd', await $.session.cwd()])).out)
+  if (t?.slack?.token) return 'token'
+  const tools = await $.tool.list()
+  return tools.some(x => x.name.startsWith(SLACK_TOOLS)) ? 'mcp' : undefined
+}
+
+// Runs once this session holds the Slack lease
+// 1. The connector's user is checked live once per lease
+// 2. A session reading through the connector asks the user once whether to set up a token
+async function slackHeld($, t) {
+  if ((await slackRoute($, t)) !== 'mcp') return
+  if (!verified) {
+    await slackUser($, true)
+    verified = true
+  }
+  await offerToken($, t)
+}
+
+// Asks again only after the user said later or a week after the last ask went unanswered
+async function offerToken($, t) {
+  const setup = t?.slack?.setup
+  const now = await $.clock.now()
+  if (setup?.answer === 'keep' || (setup && now - setup.at * 1000 < SETUP_AGAIN_MS)) return
+  const asked = await $.store.get('slackSetupAsked')
+  if (asked && now - asked < SETUP_AGAIN_MS) return
+  await $.store.set('slackSetupAsked', now)
+  // Not awaited since the command waits for the user and the tick goes on meanwhile
+  $.command.run({ command: $.plugin.name + ':slack', args: 'setup' }).catch(err => $.ui.log('meetproxy: ' + message(err)))
+}
+
+async function slackReceive($, t) {
+  const via = await slackRoute($, t)
+  const me = await slackUser($, false, t)
   const delegations = parseJSON((await meetproxy($, ['delegation'])).out) ?? []
-  const out = []
+  const messages = []
+  const newest = {}
   for (const d of delegations.filter(d => d.when === 'channel')) {
     const cursor = await meetproxy($, ['inbox', 'cursor', '--key', d.id])
     if (!cursor.ok) continue
-    for (const m of await slackChannel($, d, cursor.out)) {
-      if (Number(m.ts) > Number(cursor.out)) out.push({ ...m, source: 'slack', kind: d.id, cursor: d.id, self: m.from === me })
+    for (const m of await slackChannel($, d, cursor.out, via)) {
+      newest[d.id] = later(newest[d.id], m.ts)
+      if (Number(m.ts) > Number(cursor.out)) messages.push({ ...m, source: 'slack', kind: d.id, cursor: d.id, self: m.from === me })
     }
   }
   // The mention cursor keeps the key it had before sources
   const cursor = await meetproxy($, ['inbox', 'cursor', '--key', 'mention'])
-  if (!cursor.ok) return out
+  if (!cursor.ok) return { messages, newest, marks: [] }
   const after = overlapped(cursor.out)
-  for (const m of await slackMentions($, me, after)) {
-    if (Number(m.ts) > after) out.push({ ...m, source: 'slack', kind: 'mention', cursor: 'mention', self: m.from === me })
+  for (const m of await slackMentions($, me, after, via)) {
+    newest.mention = later(newest.mention, m.ts)
+    if (Number(m.ts) > after) messages.push({ ...m, source: 'slack', kind: 'mention', cursor: 'mention', self: m.from === me })
   }
-  return out
+  return { messages, newest, marks: [] }
 }
 
 // Results come oldest first and every page is read
 // One page could hold only messages the overlap already saw so stopping there would never move the cursor
-async function slackMentions($, me, after) {
+async function slackMentions($, me, after, via) {
+  if (via === 'token') return fromBinary($, await meetproxy($, ['slack', 'mentions', '--after', String(after)]))
   const out = []
   let page
   for (let i = 0; i < MAX_PAGES; i++) {
@@ -251,7 +333,7 @@ async function slackMentions($, me, after) {
       limit: SEARCH_PAGE,
       cursor: page,
     })
-    out.push(...searchMessages(found))
+    out.push(...recognized(found, 'results', searchMessages(found)))
     page = nextPage(found)
     if (!page) break
   }
@@ -259,12 +341,13 @@ async function slackMentions($, me, after) {
 }
 
 // The reader answers newest first so every page back to the cursor is read before any message is handled
-async function slackChannel($, d, oldest) {
+async function slackChannel($, d, oldest, via) {
+  if (via === 'token') return fromBinary($, await meetproxy($, ['slack', 'history', d.channel, '--oldest', oldest]))
   const out = []
   let page
   for (let i = 0; i < MAX_PAGES; i++) {
     const found = await $.mcp.call(SLACK, 'slack_read_channel', { channel_id: d.channel, oldest, limit: 100, cursor: page })
-    out.push(...channelMessages(found, d.channel, d.host))
+    out.push(...recognized(found, 'messages', channelMessages(found, d.channel, d.host)))
     page = nextPage(found)
     if (!page) return out.sort(byTs)
   }
@@ -273,9 +356,34 @@ async function slackChannel($, d, oldest) {
   return out.sort(byTs)
 }
 
+// The messages a slack command of the binary printed
+// What it says on stderr such as messages it skipped is logged
+function fromBinary($, r) {
+  if (!r.ok) throw new Error(firstLine(r.err) || 'slack exited ' + r.code)
+  if (r.err) $.ui.log('meetproxy: ' + r.err)
+  const out = parseJSON(r.out)
+  if (!Array.isArray(out)) throw new Error('unrecognized answer of meetproxy slack')
+  return out
+}
+
+// A connector answer with text but no message in it is a format this parser no longer reads
+// Failing makes the source give up its lease and shows in status instead of skipping messages quietly
+function recognized(result, field, messages) {
+  const md = String(parseJSON(text(result))?.[field] ?? text(result))
+  if (messages.length || !md.trim() || NO_RESULTS.test(md)) return messages
+  throw new Error('unrecognized Slack answer format')
+}
+
 // The concise thread lists each reply on a line that starts with > and names its author by email
 // oldest is just past the message so a request the user wrote in the thread does not count as a reply
 async function slackAnswered($, m) {
+  if ((await slackRoute($)) === 'token') {
+    const r = await meetproxy($, ['slack', 'answered', m.link, '--ts', m.ts])
+    const got = parseJSON(r.out)
+    if (!r.ok || typeof got?.answered !== 'boolean') throw new Error('could not read the thread: ' + firstLine(r.err))
+    return got.answered
+  }
+  // A profile that shows no email leaves nothing to match replies by, as before tokens
   const email = await $.store.get('slackEmail')
   const at = slackLink(m.link)
   if (!email || !at) return false
@@ -293,39 +401,248 @@ async function slackAnswered($, m) {
 async function slackSend($, link, reply) {
   const at = slackLink(link)
   if (!at) throw new Error('not a Slack message link ' + link)
+  if ((await slackRoute($)) === 'token') {
+    const r = await meetproxy($, ['slack', 'post', link, '--session', await $.session.id()], reply)
+    if (!r.ok) throw new Error(r.out === 'denied' ? 'denied' : firstLine(r.err))
+    return
+  }
   const r = await $.mcp.call(SLACK, 'slack_send_message', { channel_id: at.channel, thread_ts: at.thread, message: reply })
   if (r?.isError) throw new Error(text(r))
+}
+
+// The token is typed under Other in the dialog
+// It goes to the binary on stdin and never into a result the model reads
+async function askToken($) {
+  let answer
+  try {
+    answer = await $.ui.ask('Paste the User OAuth Token that starts with xoxp- under Other. Which token should meetproxy use?', {
+      header: 'Slack token',
+      options: [TOKEN_CANCEL, TOKEN_TERMINAL],
+    })
+  } catch (err) {
+    return 'the token question was dismissed: ' + message(err)
+  }
+  if (answer === TOKEN_TERMINAL) return 'the user pastes the token in their own terminal'
+  if (answer === TOKEN_CANCEL || !answer?.trim()) return 'no token was given'
+  const r = await meetproxy($, ['slack', 'token'], answer.trim())
+  if (!r.ok) return 'Slack did not accept the token: ' + firstLine(r.err)
+  lastTick = undefined
+  const a = parseJSON(r.out) ?? {}
+  const lacks = a.missing?.length ? ', it lacks ' + a.missing.join(', ') : ', it has every scope meetproxy needs'
+  return `stored the token of user ${a.user} in team ${a.team} at ${a.host}${lacks}`
+}
+
+// Text of up to two Slack messages a message links to
+// Read only for triage and routing so it is never stored
+async function linkedMessages($, s) {
+  const found = [...s.matchAll(new RegExp(SLACK_LINK.source, 'g'))].slice(0, 2)
+  if (!found.length) return []
+  const via = await slackRoute($)
+  const out = []
+  for (const [link] of found) {
+    try {
+      const t = (await linkedText($, link, via)).trim()
+      if (t) out.push(t.slice(0, LINKED_CHARS))
+    } catch (err) {
+      await trouble($, 'slack', err)
+    }
+  }
+  return out
+}
+
+async function linkedText($, link, via) {
+  if (via === 'token') {
+    const r = await meetproxy($, ['slack', 'read', link, '--limit', '5'])
+    if (!r.ok) throw new Error('could not read ' + link + ': ' + firstLine(r.err))
+    return parseJSON(r.out)?.text ?? ''
+  }
+  if (via !== 'mcp') return ''
+  const at = slackLink(link)
+  const r = await $.mcp.call(SLACK, 'slack_read_thread', {
+    channel_id: at.channel,
+    message_ts: at.ts,
+    limit: 5,
+    response_format: 'concise',
+  })
+  return parseJSON(text(r))?.messages ?? text(r)
+}
+
+// With a token the user the token acts for, which the tick names
+// Through the connector the stored one, read live only when asked
+async function slackUser($, live, t) {
+  const tick = t ?? lastTick
+  if (tick?.slack?.token) {
+    if (tick.slack.user) return tick.slack.user
+    const who = parseJSON((await meetproxy($, ['slack', 'whoami'])).out)
+    if (!who?.user) throw new Error('could not read the Slack user id')
+    return who.user
+  }
+  const cached = await $.store.get('slackUser')
+  if (cached && !live) return cached
+  const r = await $.mcp.call(SLACK, 'slack_read_user_profile', {})
+  const id = /User ID: (\w+)/.exec(text(r))?.[1]
+  if (!id) throw new Error('could not read the Slack user id')
+  await $.store.set('slackUser', id)
+  const email = /Email: ([^\s\\]+)/.exec(text(r))?.[1]
+  if (email) await $.store.set('slackEmail', email)
+  const team = slackTeam(text(r))
+  if (team) await $.store.set('slackTeam', team)
+  return id
+}
+
+// Whether a Slack user is a full member of the user's own workspace
+// 1. The profile names the same team as the user's own
+// 2. Guests, restricted and deactivated accounts are never trusted
+// 3. A profile that cannot be read is not trusted and is read again on the next message
+async function slackTrusted($, id) {
+  if (!id) return false
+  const key = 'slackTrust:' + id
+  const now = await $.clock.now()
+  const cached = await $.store.get(key)
+  if (cached && now - cached.at < TRUST_MS) return cached.trusted
+  try {
+    const trusted = (await slackRoute($)) === 'token' ? await tokenTrusts($, id) : await connectorTrusts($, id)
+    if (trusted === undefined) return false
+    await $.store.set(key, { trusted, at: now })
+    return trusted
+  } catch (err) {
+    await trouble($, 'slack', err)
+    return false
+  }
+}
+
+async function tokenTrusts($, id) {
+  const r = await meetproxy($, ['slack', 'trusted', id])
+  const got = parseJSON(r.out)
+  if (!r.ok || typeof got?.trusted !== 'boolean') throw new Error('could not read the Slack profile of ' + id + ': ' + firstLine(r.err))
+  return got.trusted
+}
+
+// undefined when the profile cannot be read
+async function connectorTrusts($, id) {
+  await slackUser($)
+  const mine = await $.store.get('slackTeam')
+  const profile = text(await $.mcp.call(SLACK, 'slack_read_user_profile', { user_id: id }))
+  if (!/User ID: /.test(profile)) return undefined
+  return Boolean(mine) && slackTeam(profile) === mine && !RESTRICTED.test(profile)
+}
+
+// The team id a profile names in any of the shapes the profile tool answers with
+function slackTeam(profile) {
+  return /Team(?: ID)?: (\w+)/i.exec(profile)?.[1] ?? /"team(?:_id)?"\s*:\s*"(\w+)"/.exec(profile)?.[1]
+}
+
+// The cursor of the next page in a Slack tool answer
+function nextPage(result) {
+  const info = parseJSON(text(result))?.pagination_info ?? ''
+  return /cursor: `([^`]+)`/.exec(info)?.[1]
+}
+
+// The search tool answers with JSON whose results field is markdown
+// Each message is one block
+function searchMessages(result) {
+  const md = parseJSON(text(result))?.results ?? text(result)
+  return md
+    .split(/^### Result /m)
+    .slice(1)
+    .map(block => ({
+      author: /^From: ([^<(]*)/m.exec(block)?.[1]?.trim() ?? '',
+      channel: /^Channel: .*\(ID: (\w+)\)/m.exec(block)?.[1] ?? '',
+      from: /^From: .*\(ID: (\w+)\)/m.exec(block)?.[1] ?? '',
+      ts: /^Message_ts: ([\d.]+)/m.exec(block)?.[1] ?? '',
+      link: /^Permalink: \[link\]\((\S+)\)/m.exec(block)?.[1] ?? '',
+      text: body(block),
+    }))
+    .filter(m => m.ts && m.link)
+    .sort(byTs)
+}
+
+// The channel reader answers with one block per message newest first
+// Its blocks carry no permalink so one is built from the host of the delegation
+function channelMessages(result, channel, host) {
+  const md = parseJSON(text(result))?.messages ?? text(result)
+  return md
+    .split(/^=== Message from /m)
+    .slice(1)
+    .map(block => {
+      const ts = /^Message TS: ([\d.]+)/m.exec(block)?.[1] ?? ''
+      const at = block.indexOf('\n\n')
+      return {
+        author: /^([^<(]*)/.exec(block)?.[1]?.trim() ?? '',
+        from: /\((\w+)\) at /.exec(block)?.[1] ?? '',
+        channel,
+        ts,
+        link: ts ? `https://${host}/archives/${channel}/p${ts.replace('.', '')}` : '',
+        text: at < 0 ? '' : block.slice(at).trim(),
+      }
+    })
+    .filter(m => m.ts)
+    .sort(byTs)
+}
+
+function body(block) {
+  const at = block.indexOf('Text: \n')
+  return at < 0 ? '' : block.slice(at + 'Text: \n'.length).replace(/\n-{3}\s*$/, '').trim()
 }
 
 // GitHub
 
 // Notifications that name the user
-// Read without marking them read
+// 1. Read without marking them read
+// 2. One whose updated_at did not change since it was read whole is skipped without reading its subject
 async function githubReceive($) {
   const me = await githubUser($)
   const cursor = await meetproxy($, ['inbox', 'cursor', '--key', 'github'])
-  if (!cursor.ok) return []
+  if (!cursor.ok) return { messages: [], newest: {}, marks: [] }
   const after = overlapped(cursor.out)
   const since = new Date(after * 1000).toISOString()
   const pages = parseJSON(await gh($, ['api', '--paginate', '--slurp', 'notifications', '-X', 'GET', '-f', 'participating=true', '-f', 'since=' + since])) ?? []
-  const out = []
+  const now = await $.clock.now()
+  const messages = []
+  const newest = {}
+  const marks = []
   for (const n of pages.flat()) {
-    const base = { source: 'github', cursor: 'github', channel: n.repository.full_name }
-    if (n.reason === 'review_requested') {
-      const pr = parseJSON(await gh($, ['api', n.subject.url]))
-      if (!pr?.html_url) continue
-      const ts = await reviewRequested($, n, me)
-      if (Number(ts) <= after) continue
+    newest.github = later(newest.github, seconds(n.updated_at))
+    const key = 'ghseen:' + (n.id ?? n.subject?.url)
+    const seen = await $.store.get(key)
+    if (seen?.updated === n.updated_at) {
+      if (now - seen.at > GHSEEN_RENEW_MS) await $.store.set(key, { ...seen, at: now })
+      continue
+    }
+    marks.push({ key, value: { updated: n.updated_at, at: now } })
+    messages.push(...(await githubMessages($, n, me, after)))
+  }
+  await forgetNotifications($, now)
+  return { messages: messages.sort(byTs), newest, marks }
+}
+
+async function githubMessages($, n, me, after) {
+  const base = { source: 'github', cursor: 'github', channel: n.repository.full_name }
+  const out = []
+  if (n.reason === 'review_requested') {
+    const pr = parseJSON(await gh($, ['api', n.subject.url]))
+    if (!pr?.html_url) return out
+    const ts = await reviewRequested($, n, me)
+    if (Number(ts) > after) {
       const content = `Review requested: ${n.subject.title}\n${pr.body ?? ''}`
       out.push({ ...base, kind: 'review-request', self: false, trusted: associated(pr), link: pr.html_url, text: content.slice(0, TEXT_CHARS), from: pr.user?.login ?? '', author: pr.user?.login ?? '', ts })
     }
-    if (n.reason === 'mention' || n.reason === 'team_mention') {
-      for (const c of await githubMentions($, n, me, after)) {
-        out.push({ ...base, kind: 'mention', self: c.user?.login === me, trusted: associated(c), link: c.html_url, text: (c.body ?? '').slice(0, TEXT_CHARS), from: c.user?.login ?? '', author: c.user?.login ?? '', ts: seconds(c.created_at) })
-      }
+  }
+  if (n.reason === 'mention' || n.reason === 'team_mention') {
+    for (const c of await githubMentions($, n, me, after)) {
+      out.push({ ...base, kind: 'mention', self: c.user?.login === me, trusted: associated(c), link: c.html_url, text: (c.body ?? '').slice(0, TEXT_CHARS), from: c.user?.login ?? '', author: c.user?.login ?? '', ts: seconds(c.created_at) })
     }
   }
-  return out.sort(byTs)
+  return out
+}
+
+// Notifications no read found for a day are forgotten so the store does not grow
+async function forgetNotifications($, now) {
+  for (const k of await $.store.keys()) {
+    if (!k.startsWith('ghseen:')) continue
+    const seen = await $.store.get(k)
+    if (!seen || now - seen.at > GHSEEN_MS) await $.store.delete(k)
+  }
 }
 
 // The author of a comment, issue or pull request belongs to the repository's organization or collaborates on it
@@ -401,34 +718,65 @@ async function githubSend($, link, reply) {
   await gh($, ['api', '-X', 'POST', path, '--input', '-'], JSON.stringify({ body: reply }))
 }
 
+async function githubUser($, live) {
+  const cached = await $.store.get('githubUser')
+  if (cached && !live) return cached
+  const login = (await gh($, ['api', 'user', '-q', '.login'])).trim()
+  if (!login) throw new Error('could not read the GitHub login')
+  await $.store.set('githubUser', login)
+  return login
+}
+
 // Receiving
 
 // Each source has its own lease and only a session where that source works may hold it
 // So a session that cannot reach a source never keeps the others from reading it
-async function check($) {
+// t is the tick the check runs in and is read again when a test calls the check alone
+async function check($, t) {
+  t ??= parseJSON((await meetproxy($, ['tick', '--cwd', await $.session.cwd()])).out) ?? {}
+  lastTick = t
   let connected = 0
   let engine
   const now = await $.clock.now()
   forgetSorted(now)
   for (const source of SOURCES) {
-    if (!(await ready($, source))) continue
+    if (!(await ready($, source, t))) continue
     connected++
     if (!(await holdLease($, source))) continue
     engine ??= (await meetproxy($, ['triage'])).out
     try {
-      for (const m of await receive($, source)) {
-        const key = m.link + ' ' + m.ts
-        if (!sorted.has(key) && !(await enqueue($, m, engine))) break
-        sorted.set(key, now)
-      }
+      if (source === 'slack') await slackHeld($, t)
+      const got = await receive($, source, t)
+      const found = await settle($, source, got.messages, engine, now)
+      if (found < 0) continue
+      // Every message up to the newest one seen is settled so the cursors move there and the source is remembered
+      for (const [key, ts] of Object.entries(got.newest)) await meetproxy($, ['inbox', 'advance', ts, '--key', key])
+      for (const m of got.marks) await $.store.set(m.key, m.value)
+      await health($, source, { ok: true, found })
     } catch (err) {
       // Let another session take the source and check again next time
       reached[source] = false
       await dropLease($, source)
-      $.ui.log('meetproxy: ' + source + ': ' + message(err))
+      await trouble($, source, err)
     }
   }
   problem = connected ? undefined : 'no source works in this session, /meetproxy:delegate checks Slack and GitHub'
+}
+
+// Queues or skips each new message and renews the lease after each so a long check keeps the source
+// Returns how many were new or -1 when one stopped the source or the lease went to another session
+async function settle($, source, messages, engine, now) {
+  let found = 0
+  for (const m of messages) {
+    const key = m.link + ' ' + m.ts
+    const fresh = !sorted.has(key)
+    if (fresh && !(await enqueue($, m, engine))) return -1
+    sorted.set(key, now)
+    if (!fresh) continue
+    found++
+    if (!(await holdLease($, source))) return -1
+  }
+  return found
 }
 
 // While no newer message moves the cursor the overlap keeps finding the last ones
@@ -439,42 +787,36 @@ function forgetSorted(now) {
   }
 }
 
-// The time in seconds a search reads from
-function overlapped(cursor) {
-  return Number(cursor) - OVERLAP_MS / 1000
-}
-
-// The store has no compare and set so the lease is read back after writing
-// Two sessions writing at once both see one winner
+// The binary checks and writes the lease under one lock so two sessions never both hold it
+// Holding again renews it
 async function holdLease($, source) {
   const me = await $.session.id()
-  const now = await $.clock.now()
-  const key = 'lease:' + source
-  const lease = await $.store.get(key)
-  if (lease && lease.session !== me && lease.until > now) return false
-  await $.store.set(key, { session: me, until: now + LEASE_MS })
-  return (await $.store.get(key))?.session === me
+  const r = await meetproxy($, ['lease', 'hold', source, '--session', me, '--ttl', LEASE_MS / 1000 + 's'])
+  if (r.ok) {
+    holding[source] = (await $.clock.now()) + LEASE_MS
+    return true
+  }
+  if (source === 'slack') verified = false
+  delete holding[source]
+  return false
 }
 
 // Another session may have taken the lease over meanwhile and keeps it
 async function dropLease($, source) {
-  const key = 'lease:' + source
-  if ((await $.store.get(key))?.session === (await $.session.id())) await $.store.delete(key)
+  if (source === 'slack') verified = false
+  delete holding[source]
+  await meetproxy($, ['lease', 'drop', source, '--session', await $.session.id()])
 }
 
 async function leads($) {
-  const me = await $.session.id()
   const now = await $.clock.now()
-  for (const source of SOURCES) {
-    const lease = await $.store.get('lease:' + source)
-    if (lease?.session === me && lease.until > now) return true
-  }
-  return false
+  return SOURCES.some(source => holding[source] > now)
 }
 
 // Queues the message or only moves the cursor past it
 // 1. A message meetproxy posted only moves the cursor
 // 2. So does one no delegation matches or the user already answered or triage ignores
+// 3. One whose reply could not be checked asks the user rather than answer twice
 // Returns false to stop the source here so the next check starts again from this message
 async function enqueue($, m, engine) {
   const skip = async () => (await meetproxy($, ['inbox', 'advance', m.ts, '--key', m.cursor])).ok
@@ -488,12 +830,14 @@ async function enqueue($, m, engine) {
     return false
   }
   const d = parseJSON(matched.out)
-  if (!d || (await answered($, m))) return settled(m, await skip())
+  const replied = d ? await answered($, m) : false
+  if (!d || replied) return settled(m, await skip())
   const linked = await linkedMessages($, m.text)
   const request = [m.text, ...linked].join('\n')
   const plan = parseJSON((await meetproxy($, ['map', 'plan'], request)).out) ?? {}
-  const v = await classify($, { ...m, trusted }, d, plan, linked, engine)
+  let v = await classify($, { ...m, trusted }, d, plan, linked, engine)
   if (v.verdict !== 'handle' && v.verdict !== 'ask') return settled(m, await skip())
+  if (v.verdict === 'handle' && replied === undefined) v = { ...v, verdict: 'ask', reason: 'could not check whether you already replied' }
   const at = placeOf(d.workspace, plan, v.place, githubLink(m.link)?.repo)
   const words = terms(request)
   const args = ['inbox', 'add', m.link, '--verdict', v.verdict, '--reason', v.reason ?? '', '--from', m.from]
@@ -576,26 +920,6 @@ function countFailure($, step, m, err) {
   return tries
 }
 
-// Text of up to two Slack messages a message links to
-// Read only for triage and routing so it is never stored
-async function linkedMessages($, s) {
-  const found = [...s.matchAll(new RegExp(SLACK_LINK.source, 'g'))].slice(0, 2).map(m => slackLink(m[0]))
-  const out = []
-  for (const at of found) {
-    try {
-      const r = await $.mcp.call(SLACK, 'slack_read_thread', {
-        channel_id: at.channel,
-        message_ts: at.ts,
-        limit: 5,
-        response_format: 'concise',
-      })
-      const t = (parseJSON(text(r))?.messages ?? text(r)).trim()
-      if (t) out.push(t.slice(0, LINKED_CHARS))
-    } catch {}
-  }
-  return out
-}
-
 // Claude runs here because only the session can call its model
 // Other engines run in the binary
 async function triage($, engine, input) {
@@ -619,13 +943,15 @@ function parseVerdict(out) {
 }
 
 // Approved nodloop notes for the place of this name when the nodloop plugin is there
+// Without nodloop there are none so its absence is no trouble
 async function knowledge($, name) {
   if (!name) return []
   try {
     const r = await $.mcp.call(NODLOOP, 'knowledge_for', { producer: 'meetproxy-triage', labels: { repo: [name] } })
     const t = text(r).trim()
     return t ? [t.slice(0, KNOWLEDGE_CHARS)] : []
-  } catch {
+  } catch (err) {
+    $.ui.log('meetproxy: no nodloop notes: ' + message(err), { to: 'debug' })
     return []
   }
 }
@@ -677,7 +1003,7 @@ async function pickUp($, t) {
   const link = (await meetproxy($, ['inbox', 'claim', pick.id, '--session', me])).out
   if (!link) return
   // An ask request starts a turn that asks the user before anything is posted
-  // A take left unsettled for an hour comes back from the tick as ask
+  // A take with no heartbeat for twenty minutes comes back from the tick as ask
   if (pick.status === 'ask') $.ui.toast('meetproxy: a request needs you ' + link)
   await $.command.run({ command: $.plugin.name + ':handle', args: pick.id + (pick.status === 'ask' ? ' --ask' : ' --auto') })
 }
@@ -703,6 +1029,30 @@ async function post($, link, body) {
 
 // Helpers
 
+// Where a Slack message sits
+// 1. channel: the channel id
+// 2. ts: the message ts
+// 3. thread: the ts of the thread it sits in
+function slackLink(link) {
+  const m = SLACK_LINK.exec(link ?? '')
+  if (!m) return undefined
+  const ts = m[2] + '.' + m[3]
+  const thread = /[?&]thread_ts=([\d.]+)/.exec(link)?.[1] ?? ts
+  return { channel: m[1], ts, thread }
+}
+
+// The issue or pull request and the review thread when the link points at one
+function githubLink(link) {
+  const m = GITHUB_LINK.exec(link ?? '')
+  if (!m) return undefined
+  return { owner: m[1], repo: m[2], number: m[4], pull: m[3] === 'pull', discussion: /#discussion_r(\d+)/.exec(link)?.[1] }
+}
+
+// The time in seconds a search reads from
+function overlapped(cursor) {
+  return Number(cursor) - OVERLAP_MS / 1000
+}
+
 function cancel(timers) {
   for (const t of timers ?? []) {
     if (typeof t === 'function') t()
@@ -713,64 +1063,37 @@ function cancel(timers) {
 async function meetproxy($, args, stdin) {
   const argv = [$.plugin.root + '/bin/meetproxy', ...args, '--root', $.plugin.root]
   const r = await $.process.run(argv, { stdin, timeoutMs: BINARY_MS })
-  return { ok: r.exitCode === 0, out: r.stdout.trim(), err: r.stderr.trim() }
+  return { ok: r.exitCode === 0, code: r.exitCode, out: r.stdout.trim(), err: r.stderr.trim() }
+}
+
+// What a failed binary call shows until a tick works again
+function failed(r) {
+  return `meetproxy: ${firstLine(r.err) || 'exit ' + r.code}, /meetproxy:status`
+}
+
+function firstLine(s) {
+  return (s ?? '').split('\n')[0].replace(/^meetproxy: /, '')
+}
+
+// Logs a failure and records it once per message so status shows it
+// quiet failures such as a source that is not set up go to the debug log alone
+async function trouble($, source, err, quiet) {
+  const msg = message(err)
+  $.ui.log('meetproxy: ' + source + ': ' + msg, quiet ? { to: 'debug' } : undefined)
+  if (troubled[source] === msg) return
+  troubled[source] = msg
+  await health($, source, { ok: false, error: msg, found: 0 })
+}
+
+async function health($, source, rec) {
+  if (rec.ok) delete troubled[source]
+  await meetproxy($, ['health', source], JSON.stringify(rec))
 }
 
 async function gh($, args, stdin) {
   const r = await $.process.run(['gh', ...args], { stdin, timeoutMs: 60_000 })
   if (r.exitCode !== 0) throw new Error('gh ' + args.slice(0, 2).join(' ') + ': ' + r.stderr.trim())
   return r.stdout
-}
-
-async function slackUser($, live) {
-  const cached = await $.store.get('slackUser')
-  if (cached && !live) return cached
-  const r = await $.mcp.call(SLACK, 'slack_read_user_profile', {})
-  const id = /User ID: (\w+)/.exec(text(r))?.[1]
-  if (!id) throw new Error('could not read the Slack user id')
-  await $.store.set('slackUser', id)
-  const email = /Email: ([^\s\\]+)/.exec(text(r))?.[1]
-  if (email) await $.store.set('slackEmail', email)
-  const team = slackTeam(text(r))
-  if (team) await $.store.set('slackTeam', team)
-  return id
-}
-
-// Whether a Slack user is a full member of the user's own workspace
-// 1. The profile names the same team as the user's own
-// 2. Guests and restricted accounts are never trusted
-// 3. A profile that cannot be read is not trusted and is read again on the next message
-async function slackTrusted($, id) {
-  if (!id) return false
-  const key = 'slackTrust:' + id
-  const now = await $.clock.now()
-  const cached = await $.store.get(key)
-  if (cached && now - cached.at < TRUST_MS) return cached.trusted
-  try {
-    await slackUser($)
-    const mine = await $.store.get('slackTeam')
-    const profile = text(await $.mcp.call(SLACK, 'slack_read_user_profile', { user_id: id }))
-    if (!/User ID: /.test(profile)) return false
-    const trusted = Boolean(mine) && slackTeam(profile) === mine && !RESTRICTED.test(profile)
-    await $.store.set(key, { trusted, at: now })
-    return trusted
-  } catch {
-    return false
-  }
-}
-
-// The team id a profile names in any of the shapes the profile tool answers with
-function slackTeam(profile) {
-  return /Team(?: ID)?: (\w+)/i.exec(profile)?.[1] ?? /"team(?:_id)?"\s*:\s*"(\w+)"/.exec(profile)?.[1]
-}
-
-async function githubUser($, live) {
-  const cached = await $.store.get('githubUser')
-  if (cached && !live) return cached
-  const login = (await gh($, ['api', 'user', '-q', '.login'])).trim()
-  if (!login) throw new Error('could not read the GitHub login')
-  await $.store.set('githubUser', login)
-  return login
 }
 
 function text(result) {
@@ -797,57 +1120,10 @@ function byTs(a, b) {
   return Number(a.ts) - Number(b.ts)
 }
 
-// The cursor of the next page in a Slack tool answer
-function nextPage(result) {
-  const info = parseJSON(text(result))?.pagination_info ?? ''
-  return /cursor: `([^`]+)`/.exec(info)?.[1]
-}
-
-// The search tool answers with JSON whose results field is markdown
-// Each message is one block
-function searchMessages(result) {
-  const md = parseJSON(text(result))?.results ?? text(result)
-  return md
-    .split(/^### Result /m)
-    .slice(1)
-    .map(block => ({
-      author: /^From: ([^<(]*)/m.exec(block)?.[1]?.trim() ?? '',
-      channel: /^Channel: .*\(ID: (\w+)\)/m.exec(block)?.[1] ?? '',
-      from: /^From: .*\(ID: (\w+)\)/m.exec(block)?.[1] ?? '',
-      ts: /^Message_ts: ([\d.]+)/m.exec(block)?.[1] ?? '',
-      link: /^Permalink: \[link\]\((\S+)\)/m.exec(block)?.[1] ?? '',
-      text: body(block),
-    }))
-    .filter(m => m.ts && m.link)
-    .sort(byTs)
-}
-
-// The channel reader answers with one block per message newest first
-// Its blocks carry no permalink so one is built from the host of the delegation
-function channelMessages(result, channel, host) {
-  const md = parseJSON(text(result))?.messages ?? text(result)
-  return md
-    .split(/^=== Message from /m)
-    .slice(1)
-    .map(block => {
-      const ts = /^Message TS: ([\d.]+)/m.exec(block)?.[1] ?? ''
-      const at = block.indexOf('\n\n')
-      return {
-        author: /^([^<(]*)/.exec(block)?.[1]?.trim() ?? '',
-        from: /\((\w+)\) at /.exec(block)?.[1] ?? '',
-        channel,
-        ts,
-        link: ts ? `https://${host}/archives/${channel}/p${ts.replace('.', '')}` : '',
-        text: at < 0 ? '' : block.slice(at).trim(),
-      }
-    })
-    .filter(m => m.ts)
-    .sort(byTs)
-}
-
-function body(block) {
-  const at = block.indexOf('Text: \n')
-  return at < 0 ? '' : block.slice(at + 'Text: \n'.length).replace(/\n-{3}\s*$/, '').trim()
+// The later of two unix second strings, either of which may be missing
+function later(a, b) {
+  if (a === undefined) return b
+  return Number(b) > Number(a) ? b : a
 }
 
 // Words of the message for the location map
@@ -863,4 +1139,13 @@ function terms(s) {
 }
 
 // Pieces the tests reach without a session
-export const testing = { slackLink, githubLink, searchMessages, channelMessages, terms, nextPage, check, pickUp, post, slackTrusted, reached, failures, sorted }
+export const testing = {
+  slackLink, githubLink, searchMessages, channelMessages, terms, nextPage, check, pickUp, post, slackTrusted, reached, failures, sorted, holding,
+  reset() {
+    lastTick = undefined
+    turning = false
+    verified = false
+    for (const k of Object.keys(holding)) delete holding[k]
+    for (const k of Object.keys(troubled)) delete troubled[k]
+  },
+}
