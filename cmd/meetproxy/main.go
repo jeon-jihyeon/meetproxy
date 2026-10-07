@@ -16,7 +16,7 @@ var version = "dev"
 
 // The command set the plugin mod speaks
 // Raised whenever a command the mod calls changes so an older mod stops instead of misreading
-const protocol = 6
+const protocol = 7
 
 const (
 	exitFailed   = 1
@@ -71,6 +71,35 @@ var families = []family{
 		{name: "version", noData: true, help: "print the binary version", run: printVersion},
 		{name: "protocol", noData: true, help: "print the command set the plugin mod expects", run: printProtocol},
 	}},
+	{"slack", []command{
+		{
+			name: "slack token", help: "store the user token on stdin once Slack accepts it, print user, team, host and missing scopes",
+			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackToken()) },
+		},
+		{name: "slack whoami", help: "check the token with Slack", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackWhoami()) }},
+		{
+			name: "slack mentions", flags: []string{"after"}, help: "print messages that mention the user after --after oldest first",
+			run: func(c cli, _ []string, f flags) (int, error) { return exitCode(c.slackMentions(f.after)) },
+		},
+		{
+			name: "slack history", args: "<channel>", least: 1, most: 1, flags: []string{"oldest"}, help: "print the messages of a channel after --oldest",
+			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackHistory(a[0], f.oldest)) },
+		},
+		{
+			name: "slack read", args: "<link>", least: 1, most: 1, flags: []string{"limit"}, help: "print the text of the thread a link points at",
+			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackRead(a[0], f.limit)) },
+		},
+		{
+			name: "slack post", args: "<link>", least: 1, most: 1, flags: []string{"session"},
+			help: "post the text on stdin in the thread of a link",
+			run:  func(c cli, a []string, _ flags) (int, error) { return c.slackPost(a[0]) },
+		},
+		{name: "slack manifest", help: "print the app manifest and the link that creates the app", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackManifest()) }},
+		{
+			name: "slack setup", flags: []string{"answer"}, help: "record the answer to setting up a token, now, later or keep",
+			run: func(c cli, _ []string, f flags) (int, error) { return exitCode(c.slackSetup(f.answer)) },
+		},
+	}},
 }
 
 func usage() string {
@@ -99,12 +128,13 @@ func usage() string {
 // Every flag any command takes
 // A command names the ones it reads so any other fails
 type flags struct {
-	data, root, session  string
-	topic                string
-	name                 string
-	cwd, keywords, paths string
-	skills, files        string
-	limit                int
+	data, root, session                  string
+	topic                                string
+	name                                 string
+	cwd, keywords, paths                 string
+	skills, files, after, oldest, answer string
+	limit                                int
+	busy                                 bool
 }
 
 func (f *flags) set() *flag.FlagSet {
@@ -125,6 +155,10 @@ func (f *flags) set() *flag.FlagSet {
 	fs.StringVar(&f.files, "files", "", "comma separated files the work map suggests")
 
 	fs.StringVar(&f.cwd, "cwd", "", "directory of the session")
+	fs.StringVar(&f.after, "after", "", "unix seconds to read Slack mentions after")
+	fs.StringVar(&f.oldest, "oldest", "", "Slack ts to read a channel after")
+	fs.StringVar(&f.answer, "answer", "", "now, later or keep")
+	fs.BoolVar(&f.busy, "busy", false, "a turn is running in the session")
 	return fs
 }
 
@@ -221,7 +255,7 @@ func reorder(_ string, args []string) []string {
 			return append(append(flags, a), append(pos, args[i+1:]...)...)
 		case len(a) > 1 && a[0] == '-':
 			flags = append(flags, a)
-			if !strings.Contains(a, "=") && i+1 < len(args) {
+			if !strings.Contains(a, "=") && !boolFlags[strings.TrimLeft(a, "-")] && i+1 < len(args) {
 				flags = append(flags, args[i+1])
 				i++
 			}
@@ -231,3 +265,6 @@ func reorder(_ string, args []string) []string {
 	}
 	return append(flags, pos...)
 }
+
+// Flags that take no value
+var boolFlags = map[string]bool{"busy": true}
