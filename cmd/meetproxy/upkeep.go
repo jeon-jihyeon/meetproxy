@@ -1,0 +1,246 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/jeon-jihyeon/meetproxy/internal/fileio"
+	"github.com/jeon-jihyeon/meetproxy/internal/inbox"
+	"github.com/jeon-jihyeon/meetproxy/internal/locmap"
+	"github.com/jeon-jihyeon/meetproxy/internal/relay"
+)
+
+const (
+	// Three ticks of the mod so one slow check never loses the source
+	defaultLeaseTTL = 3 * time.Minute
+	// Hook failures status keeps
+	keptHookFailures = 10
+	tidyEvery        = 24 * time.Hour
+)
+
+var validSource = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
+// Exits 0 when this session holds the lease and 1 when another does
+func (c cli) leaseHold(source string, ttl time.Duration) (int, error) {
+	if ttl <= 0 {
+		ttl = defaultLeaseTTL
+	}
+	held, err := inbox.New(c.data).Lease(source, c.session, ttl, c.now)
+	if err != nil {
+		return exitFailed, err
+	}
+	if !held {
+		fmt.Fprintln(c.out, "held by another session")
+		return exitFailed, nil
+	}
+	fmt.Fprintln(c.out, "held")
+	return 0, nil
+}
+
+func (c cli) leaseDrop(source string) error { return inbox.New(c.data).Drop(source, c.session) }
+
+// What the last check of a source found
+type sourceHealth struct {
+	Ok    bool      `json:"ok"`
+	Error string    `json:"error,omitempty"`
+	Found int       `json:"found"`
+	At    time.Time `json:"at"`
+}
+
+type hookFailure struct {
+	Hook  string    `json:"hook"`
+	Error string    `json:"error"`
+	At    time.Time `json:"at"`
+}
+
+// Kept so status shows what broke without the user reading logs
+type health struct {
+	Sources map[string]sourceHealth `json:"sources"`
+	// Newest last
+	Hooks []hookFailure `json:"hooks,omitempty"`
+}
+
+func healthFile(data string) string { return filepath.Join(data, "health.json") }
+
+// Every session writes it so each change reads and writes under its own lock
+func updateHealth(data string, change func(h *health)) error {
+	unlock, err := fileio.Lock(filepath.Join(data, "health.lock"))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	h := readHealth(data)
+	change(&h)
+	return fileio.WriteJSON(healthFile(data), h)
+}
+
+// A file that cannot be read starts over since it only reports
+func readHealth(data string) health {
+	var h health
+	if found, err := fileio.ReadJSON(healthFile(data), &h); !found || err != nil {
+		h = health{}
+	}
+	if h.Sources == nil {
+		h.Sources = map[string]sourceHealth{}
+	}
+	return h
+}
+
+// Reads {ok, error, found} on stdin
+func (c cli) recordHealth(source string) error {
+	if !validSource.MatchString(source) {
+		return fmt.Errorf("%w: source must be lowercase letters, digits and dashes %q", errUsage, source)
+	}
+	var in sourceHealth
+	if err := json.NewDecoder(c.in).Decode(&in); err != nil {
+		return fmt.Errorf("%w: health must be JSON: %w", errUsage, err)
+	}
+	in.At = c.now.UTC()
+	return updateHealth(c.data, func(h *health) { h.Sources[source] = in })
+}
+
+func recordHookFailure(data, hook string, failure error, now time.Time) error {
+	return updateHealth(data, func(h *health) {
+		h.Hooks = append(h.Hooks, hookFailure{hook, failure.Error(), now.UTC()})
+		if len(h.Hooks) > keptHookFailures {
+			h.Hooks = h.Hooks[len(h.Hooks)-keptHookFailures:]
+		}
+	})
+}
+
+type inboxCounts struct {
+	Waiting int `json:"waiting"`
+	Taken   int `json:"taken"`
+	Held    int `json:"held"`
+	Corrupt int `json:"corrupt"`
+}
+
+type sizes struct {
+	Map      int64 `json:"map"`
+	Closed   int64 `json:"closed"`
+	Observed int64 `json:"observed"`
+}
+
+type status struct {
+	Protocol   int                     `json:"protocol"`
+	Version    string                  `json:"version"`
+	Paused     bool                    `json:"paused"`
+	Slack      slackState              `json:"slack"`
+	Sources    map[string]sourceHealth `json:"sources"`
+	Hooks      []hookFailure           `json:"hooks,omitempty"`
+	Inbox      inboxCounts             `json:"inbox"`
+	RelaysOpen int                     `json:"relays_open"`
+	Bytes      sizes                   `json:"bytes"`
+}
+
+// Everything the status skill shows read from disk alone
+func (c cli) status() error {
+	store := inbox.New(c.data)
+	items, err := store.List()
+	if err != nil {
+		return err
+	}
+	var counts inboxCounts
+	for _, it := range items {
+		switch {
+		case it.Waiting(c.now) && it.Status == inbox.StatusHeld:
+			counts.Held++
+		case it.Waiting(c.now):
+			counts.Waiting++
+		case it.Status == inbox.StatusTaken:
+			counts.Taken++
+		}
+	}
+	if counts.Corrupt, err = store.Corrupt(); err != nil {
+		return err
+	}
+	h := readHealth(c.data)
+	open, _ := os.ReadDir(filepath.Join(c.data, "relay", "open"))
+	return json.NewEncoder(c.out).Encode(status{
+		Protocol: protocol, Version: version, Paused: store.Paused(), Slack: readSlackState(c.data, true),
+		Sources: h.Sources, Hooks: h.Hooks, Inbox: counts, RelaysOpen: len(open),
+		Bytes: sizes{
+			Map:      size(filepath.Join(c.data, "map.jsonl")),
+			Closed:   size(filepath.Join(c.data, "relay", "closed.jsonl")),
+			Observed: dirSize(filepath.Join(c.data, "relay", "observed")),
+		},
+	})
+}
+
+func size(file string) int64 {
+	info, err := os.Stat(file)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+func dirSize(dir string) int64 {
+	entries, _ := os.ReadDir(dir)
+	var n int64
+	for _, e := range entries {
+		n += size(filepath.Join(dir, e.Name()))
+	}
+	return n
+}
+
+// When tidy last ran and whether the data tree was made private
+type tidyState struct {
+	At         time.Time `json:"at"`
+	Restricted bool      `json:"restricted"`
+}
+
+// Removes what only grows
+// 1. With daily it runs once a day and every session start may ask for it
+// 2. A tidy another session is running already covers this one
+// 3. The first run makes files written before 0.1.6 private
+func (c cli) tidy(daily bool) error {
+	unlock, ok, err := fileio.TryLock(filepath.Join(c.data, "tidy.lock"))
+	if err != nil || !ok {
+		return err
+	}
+	defer unlock()
+	file := filepath.Join(c.data, "tidy.json")
+	var st tidyState
+	if _, err := fileio.ReadJSON(file, &st); err != nil {
+		st = tidyState{}
+	}
+	// Every session start runs this so state from before markers gets its marker directory soon
+	if err := ensureScopeDir(c.data, c.now); err != nil {
+		return err
+	}
+	if daily && c.now.Sub(st.At) < tidyEvery {
+		return nil
+	}
+	if !st.Restricted {
+		if err := fileio.Restrict(c.data); err != nil {
+			return err
+		}
+		st.Restricted = true
+	}
+	expired, err := inbox.New(c.data).Expire(c.now)
+	if err != nil {
+		return err
+	}
+	compacted, err := locmap.New(c.data).Compact()
+	err = errors.Join(err, relay.New(c.data).Prune(c.now), pruneScope(c.data, c.now))
+	if err != nil {
+		return err
+	}
+	st.At = c.now.UTC()
+	if err := fileio.WriteJSON(file, st); err != nil {
+		return err
+	}
+	done := []string{fmt.Sprintf("%d requests expired", expired)}
+	if compacted {
+		done = append(done, "map compacted")
+	}
+	fmt.Fprintln(c.out, "tidied,", strings.Join(done, ", "))
+	return nil
+}

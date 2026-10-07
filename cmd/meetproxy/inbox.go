@@ -89,7 +89,11 @@ func (c cli) delegationOf(id string) (delegation.Delegation, error) {
 
 // Prints the link, the task, the target, whether a review may approve, the place and the suggested skills and files
 func (c cli) inboxTake(id string) error {
-	it, err := inbox.New(c.data).Take(id, c.session, c.now)
+	var it inbox.Item
+	err := withScope(c.data, c.session, c.now, func() (err error) {
+		it, err = inbox.New(c.data).Take(id, c.session, c.now)
+		return err
+	})
 	if err != nil {
 		return err
 	}
@@ -116,7 +120,12 @@ func (c cli) inboxClaim(id string) error {
 	if !errors.Is(err, relay.ErrNoOpen) {
 		return err
 	}
-	it, ok, err := inbox.New(c.data).Claim(id, c.session, c.now)
+	var it inbox.Item
+	var ok bool
+	err = withScope(c.data, c.session, c.now, func() (err error) {
+		it, ok, err = inbox.New(c.data).Claim(id, c.session, c.now)
+		return err
+	})
 	if err != nil || !ok {
 		return err
 	}
@@ -161,7 +170,7 @@ func (c cli) closeRelayOf(id string) error {
 	r, err := relays.Current(c.session)
 	switch {
 	case errors.Is(err, relay.ErrNoOpen) && it.Status == inbox.StatusTaken && it.SessionId == c.session:
-		return relays.Linger(c.session, it.Link, it.Target, c.now)
+		return withScope(c.data, c.session, c.now, func() error { return relays.Linger(c.session, it.Link, it.Target, c.now) })
 	case errors.Is(err, relay.ErrNoOpen):
 		return nil
 	case err != nil:

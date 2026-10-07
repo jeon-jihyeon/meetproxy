@@ -41,7 +41,7 @@ From then on, while any session is open, meetproxy checks every connected source
 
 | Source | Receives | Sends | Connected by |
 |---|---|---|---|
-| Slack | mentions, and every message of a channel you delegate | a reply in the thread | the [Slack plugin](https://github.com/anthropics/claude-plugins-official) |
+| Slack | mentions, and every message of a channel you delegate | a reply in the thread | a personal token set up with `/meetproxy:slack setup`, or the [Slack plugin](https://github.com/anthropics/claude-plugins-official) |
 | GitHub | mentions in comments, and review requests | a comment, or a reply in the review thread | a logged in `gh` |
 
 Adding a service touches one entry in the source table of [internal/dest](internal/dest/dest.go), one case in each of the five dispatchers of the [watcher](plugin/hooks/meetproxy.js) (`owner`, `ready`, `receive`, `answered` and `send`), the tool dispatch of the [posting guard](internal/guard/guard.go) and a reference for the [relay skill](plugin/skills/relay/references). Triage sorts each message.
@@ -51,6 +51,8 @@ Adding a service touches one entry in the source table of [internal/dest](intern
 - **ask** — needs you, such as a deploy approval or a decision. The session stops to ask whether to answer it now, later or not at all, and posts nothing before you choose
 
 A request you wrote yourself is handled without triage. Replies go only where the request came from. `/meetproxy:relay <link>` still hands over one request by hand, and a request waiting for the place a new session starts in is named when it opens.
+
+With a token meetproxy reads and posts Slack through its own binary, so no tool call runs and no session shows as busy. Without one only the session holding the Slack lease calls the connector, and it is asked once whether to set a token up. The token is kept in the plugin data directory, readable by you alone. `/meetproxy:status` shows every source, the inbox and any hook failure.
 
 Triage uses the session's own Claude by default. `/meetproxy:triage codex` switches to Codex, and `/meetproxy:triage command <cmd>` plugs in any command that reads the message as JSON and prints a verdict. Approved [nodloop](https://github.com/jeon-jihyeon/nodloop) notes for the place go into triage when nodloop is installed. `/meetproxy:pause` stops all of it at once and `/meetproxy:pause resume` starts it again.
 

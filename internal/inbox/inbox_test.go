@@ -552,7 +552,7 @@ func TestStoreWaiting(t *testing.T) {
 		{inbox.Item{Link: "p1", Status: inbox.StatusTaken, SessionId: "s1"}, -3 * time.Hour},
 		{inbox.Item{Link: "p2", Status: inbox.StatusNew}, -2 * time.Hour},
 		{inbox.Item{Link: "p3", Status: inbox.StatusDone}, -90 * time.Minute},
-		{inbox.Item{Link: "p4", Status: inbox.StatusTaken, SessionId: "s2"}, -30 * time.Minute},
+		{inbox.Item{Link: "p4", Status: inbox.StatusTaken, SessionId: "s2"}, -15 * time.Minute},
 		{inbox.Item{Link: "p5", Status: inbox.StatusHeld}, -10 * time.Minute},
 	}
 	tcs := []struct {

@@ -38,7 +38,11 @@ func allow(c cli, args []string, _ flags) (int, error) {
 }
 
 func (c cli) open(origin, target string) error {
-	r, err := relay.New(c.data).Open(c.session, origin, target, c.now)
+	var r relay.Relay
+	err := withScope(c.data, c.session, c.now, func() (err error) {
+		r, err = relay.New(c.data).Open(c.session, origin, target, c.now)
+		return err
+	})
 	if err != nil {
 		return err
 	}
@@ -97,19 +101,24 @@ func (c cli) allowed() error {
 
 // The check the meetproxy post tool makes before it posts
 func (c cli) canPost(link string) (int, error) {
-	loc, err := parseLink(link)
+	allowed, err := c.mayPost(link)
 	if err != nil {
 		return exitFailed, err
+	}
+	return c.verdict(allowed)
+}
+
+func (c cli) mayPost(link string) (bool, error) {
+	loc, err := parseLink(link)
+	if err != nil {
+		return false, err
 	}
 	sc, _, err := scopeOf(c.data, c.session, c.now)
 	if err != nil {
-		return exitFailed, err
+		return false, err
 	}
 	reason, err := denial(c.data, []guard.Post{{At: loc}}, sc)
-	if err != nil {
-		return exitFailed, err
-	}
-	return c.verdict(reason == "")
+	return reason == "", err
 }
 
 // Why posts are denied in the scope sc
@@ -162,6 +171,8 @@ type tick struct {
 	Name  string `json:"name"`
 	// Every waiting request oldest first
 	Waiting []waitingRow `json:"waiting"`
+	// Whether Slack is read with a token and the user's answer to setting one up
+	Slack slackState `json:"slack"`
 }
 
 type waitingRow struct {
@@ -176,12 +187,19 @@ type waitingRow struct {
 	Here bool `json:"here"`
 }
 
-func (c cli) tick(cwd string) error {
+// With busy the takes of the session get a heartbeat so a long turn never loses them
+func (c cli) tick(cwd string, busy bool) error {
 	if cwd == "" {
 		return fmt.Errorf("%w: tick needs --cwd", errUsage)
 	}
 	root, name := locmap.Place(cwd)
-	items, err := inbox.New(c.data).Waiting(c.now)
+	store := inbox.New(c.data)
+	if busy && c.session != "" {
+		if err := store.Touch(c.session, c.now); err != nil {
+			return err
+		}
+	}
+	items, err := store.Waiting(c.now)
 	if err != nil {
 		return err
 	}
@@ -192,5 +210,5 @@ func (c cli) tick(cwd string) error {
 			Added: it.AddedAt.Unix(), Link: it.Link, Here: it.At(root, name),
 		})
 	}
-	return json.NewEncoder(c.out).Encode(tick{Protocol: protocol, Place: root, Name: name, Waiting: rows})
+	return json.NewEncoder(c.out).Encode(tick{Protocol: protocol, Place: root, Name: name, Waiting: rows, Slack: readSlackState(c.data, false)})
 }

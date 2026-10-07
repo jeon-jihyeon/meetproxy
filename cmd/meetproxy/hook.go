@@ -22,22 +22,32 @@ type hookInput struct {
 	ToolInput json.RawMessage `json:"tool_input"`
 }
 
+// A failure is kept in health.json so status shows it since the hook itself exits 0
 func runHook(data string, args []string, now time.Time, in io.Reader, out io.Writer) error {
-	switch strings.Join(args, " ") {
+	name := strings.Join(args, " ")
+	err := hook(data, name, now, in, out)
+	if err != nil && data != "" {
+		_ = recordHookFailure(data, name, err, now)
+	}
+	if name == "guard" && err != nil {
+		// Fail closed since this is the safety check
+		return deny(out, "meetproxy: posting check failed "+err.Error())
+	}
+	return err
+}
+
+func hook(data, name string, now time.Time, in io.Reader, out io.Writer) error {
+	switch name {
 	case "path":
-		return observePath(data, in)
+		return observePath(data, now, in)
 	case "start":
 		return noticeWaiting(data, now, in, out)
 	case "guard":
-		// Fail closed since this is the safety check
-		if err := guardPost(data, now, in, out); err != nil {
-			return deny(out, "meetproxy: posting check failed "+err.Error())
-		}
-		return nil
+		return guardPost(data, now, in, out)
 	case "stop":
-		return endTurn(data, in)
+		return endTurn(data, now, in)
 	default:
-		return fmt.Errorf("unknown hook %v", args)
+		return fmt.Errorf("unknown hook %v", name)
 	}
 }
 
@@ -46,10 +56,13 @@ var (
 	errNoSession = errors.New("the hook input names no session")
 )
 
-func observePath(data string, in io.Reader) error {
+// A path read while a request is handled also tells the inbox its session still works on it
+func observePath(data string, now time.Time, in io.Reader) error {
 	if data == "" {
 		return errNoData
 	}
+	// Best effort since without the directory the launcher only skips nothing
+	_ = ensureScopeDir(data, now)
 	var h hookInput
 	if err := json.NewDecoder(in).Decode(&h); err != nil {
 		return err
@@ -74,11 +87,35 @@ func observePath(data string, in io.Reader) error {
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(h.Cwd, target)
 	}
+	if err := heartbeat(data, h.SessionId, now); err != nil {
+		return err
+	}
 	p, ok := locmap.ResolveIn(target, h.Cwd)
 	if !ok {
 		return nil
 	}
 	return relay.New(data).Observe(h.SessionId, p)
+}
+
+// Renews the take whose relay the session has open
+func heartbeat(data, session string, now time.Time) error {
+	r, err := relay.New(data).Current(session)
+	if errors.Is(err, relay.ErrNoOpen) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	it, err := inbox.New(data).Get(inbox.IdOf(r.Origin))
+	switch {
+	case errors.Is(err, inbox.ErrNotFound):
+		return nil
+	case err != nil:
+		return err
+	case it.Status != inbox.StatusTaken || it.SessionId != session:
+		return nil
+	}
+	return inbox.New(data).Touch(session, now)
 }
 
 // Names the requests waiting for the place this session starts in
@@ -139,6 +176,7 @@ func guardPost(data string, now time.Time, in io.Reader, out io.Writer) error {
 	if data == "" {
 		return errNoData
 	}
+	_ = ensureScopeDir(data, now)
 	// Claude Code always names the session so a post without one fails closed rather than skip the scope check
 	if h.SessionId == "" {
 		return errNoSession
@@ -209,7 +247,8 @@ func scopeFor(data, origin, target string) (scope, bool, error) {
 }
 
 // The scope a close or a settle kept ends with the turn
-func endTurn(data string, in io.Reader) error {
+// The marker goes with it once nothing else keeps a scope
+func endTurn(data string, now time.Time, in io.Reader) error {
 	if data == "" {
 		return errNoData
 	}
@@ -220,7 +259,10 @@ func endTurn(data string, in io.Reader) error {
 	if h.SessionId == "" {
 		return nil
 	}
-	return relay.New(data).EndTurn(h.SessionId)
+	if err := relay.New(data).EndTurn(h.SessionId); err != nil {
+		return err
+	}
+	return releaseScope(data, h.SessionId, now)
 }
 
 func deny(out io.Writer, reason string) error {
