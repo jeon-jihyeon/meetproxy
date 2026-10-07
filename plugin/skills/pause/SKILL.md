@@ -3,7 +3,7 @@ name: pause
 description: Stop meetproxy from queuing or taking any request in every session, or start it again with resume.
 argument-hint: "[resume]"
 disable-model-invocation: true
-allowed-tools: Bash(meetproxy *)
+allowed-tools: Bash(meetproxy pause), Bash(meetproxy pause *), Bash(meetproxy resume), Bash(meetproxy resume *)
 ---
 
 # pause

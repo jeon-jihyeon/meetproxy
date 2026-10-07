@@ -29,7 +29,13 @@ const OVERLAP_MS = 5 * 60_000
 const SORTED_MS = 2 * OVERLAP_MS
 // What the binary must speak
 // A session still running an older watcher stops instead of misreading a newer binary
-const PROTOCOL = 5
+const PROTOCOL = 6
+// How long a Slack user's trust is remembered
+const TRUST_MS = 24 * 60 * 60_000
+// GitHub associations of members of the repository's own organization or its collaborators
+const TRUSTED_ASSOCIATIONS = ['OWNER', 'MEMBER', 'COLLABORATOR']
+// Profile lines that mark a guest or restricted account
+const RESTRICTED = /\b(?:is[ _])?(?:ultra[ _])?(?:restricted|guest)\b[^:\n\\]*:\s*"?(?:true|yes)|"is_(?:ultra_)?restricted"\s*:\s*true|Account Type: [^\n\\]*(?:guest|restricted)/i
 // Characters of a message kept for triage and the work map
 const TEXT_CHARS = 4000
 // Characters kept of each Slack message a message links to
@@ -102,10 +108,13 @@ export function register(on) {
     return next(e)
   })
 
+  // A post whose check fails or runs out of time is denied rather than sent
   on('tool.call', async ($, e, next) => {
     if (e.tool !== 'mcp__' + $.plugin.name + '__post') return next(e)
-    return { result: await post($, e.link, e.text) }
-  })
+    return post($, e.link, e.text)
+      .then(r => ({ result: r }))
+      .catch(err => ({ result: 'denied: post check failed ' + message(err) }))
+  }).catch(($, e, next) => (next.called ? next(e) : { result: 'denied: post check failed ' + (next.error?.message ?? next.error?.kind ?? '') }))
 }
 
 // Links
@@ -308,15 +317,20 @@ async function githubReceive($) {
       const ts = await reviewRequested($, n, me)
       if (Number(ts) <= after) continue
       const content = `Review requested: ${n.subject.title}\n${pr.body ?? ''}`
-      out.push({ ...base, kind: 'review-request', self: false, link: pr.html_url, text: content.slice(0, TEXT_CHARS), from: pr.user?.login ?? '', author: pr.user?.login ?? '', ts })
+      out.push({ ...base, kind: 'review-request', self: false, trusted: associated(pr), link: pr.html_url, text: content.slice(0, TEXT_CHARS), from: pr.user?.login ?? '', author: pr.user?.login ?? '', ts })
     }
     if (n.reason === 'mention' || n.reason === 'team_mention') {
       for (const c of await githubMentions($, n, me, after)) {
-        out.push({ ...base, kind: 'mention', self: c.user?.login === me, link: c.html_url, text: (c.body ?? '').slice(0, TEXT_CHARS), from: c.user?.login ?? '', author: c.user?.login ?? '', ts: seconds(c.created_at) })
+        out.push({ ...base, kind: 'mention', self: c.user?.login === me, trusted: associated(c), link: c.html_url, text: (c.body ?? '').slice(0, TEXT_CHARS), from: c.user?.login ?? '', author: c.user?.login ?? '', ts: seconds(c.created_at) })
       }
     }
   }
   return out.sort(byTs)
+}
+
+// The author of a comment, issue or pull request belongs to the repository's organization or collaborates on it
+function associated(item) {
+  return TRUSTED_ASSOCIATIONS.includes(item?.author_association)
 }
 
 // When the review was last requested from the user or a team
@@ -465,7 +479,8 @@ async function leads($) {
 async function enqueue($, m, engine) {
   const skip = async () => (await meetproxy($, ['inbox', 'advance', m.ts, '--key', m.cursor])).ok
   if (m.text.trim().endsWith(MARK)) return skip()
-  const msg = JSON.stringify({ link: m.link, text: m.text, from: m.from, author: m.author })
+  const trusted = await senderTrusted($, m)
+  const msg = JSON.stringify({ link: m.link, text: m.text, from: m.from, author: m.author, trusted })
   const matched = await meetproxy($, ['delegation', 'match', m.kind], msg)
   // A failed match says nothing about the message so it is retried and never skipped
   if (!matched.ok) {
@@ -477,12 +492,12 @@ async function enqueue($, m, engine) {
   const linked = await linkedMessages($, m.text)
   const request = [m.text, ...linked].join('\n')
   const plan = parseJSON((await meetproxy($, ['map', 'plan'], request)).out) ?? {}
-  const v = await classify($, m, d, plan, linked, engine)
+  const v = await classify($, { ...m, trusted }, d, plan, linked, engine)
   if (v.verdict !== 'handle' && v.verdict !== 'ask') return settled(m, await skip())
   const at = placeOf(d.workspace, plan, v.place, githubLink(m.link)?.repo)
   const words = terms(request)
   const args = ['inbox', 'add', m.link, '--verdict', v.verdict, '--reason', v.reason ?? '', '--from', m.from]
-  args.push('--ts', m.ts, '--key', m.cursor, '--delegation', d.delegation, '--self', m.self ? 'yes' : 'no')
+  args.push('--ts', m.ts, '--key', m.cursor, '--delegation', d.delegation, '--self', m.self ? 'yes' : 'no', '--trusted', trusted ? 'yes' : 'no')
   if (at.name) args.push('--name', at.name)
   if (at.root) args.push('--place', at.root)
   if (plan.skills?.length) args.push('--skills', plan.skills.join(','))
@@ -494,6 +509,14 @@ async function enqueue($, m, engine) {
   // A message that keeps failing to queue is skipped so it does not cost a triage every check
   if (countFailure($, 'add', m, added.err) < MAX_FAILURES) return false
   return settled(m, await skip())
+}
+
+// Whether the source vouches for the sender as one of the user's own team
+// The user is always trusted
+async function senderTrusted($, m) {
+  if (m.self) return true
+  if (m.source === 'slack') return slackTrusted($, m.from)
+  return Boolean(m.trusted)
 }
 
 // Forgets the failures of a message once it is queued or skipped so the counts never pile up
@@ -523,7 +546,8 @@ function placeOf(fixed, plan, pickedName, repo) {
 // Whether to handle the message alone or ask the user and which map candidate fits it
 // 1. A request the user wrote or a delegation triage does not decide already has its verdict
 // 2. Triage still runs to pick a place when the map left candidates
-// 3. A request found more than an hour late asks the user
+// 3. A delegation that asks first, or a sender outside the trust set, asks whatever triage says
+// 4. A request found more than an hour late asks the user
 async function classify($, m, d, plan, linked, engine) {
   const candidates = plan.candidates ?? []
   const decided = !d.triage || m.self
@@ -533,6 +557,9 @@ async function classify($, m, d, plan, linked, engine) {
     const input = { text: m.text, channel: m.channel, from: m.from, workspace: plan.name ?? '', linked, knowledge: await knowledge($, plan.name), places }
     const t = await triage($, engine, input)
     v = decided ? { ...v, place: t.place } : t
+  }
+  if (v.verdict === 'handle' && d.post === 'ask') {
+    return { ...v, verdict: 'ask', reason: m.trusted ? 'delegation ' + d.delegation + ' asks first' : 'sender outside the trust set' }
   }
   if (v.verdict === 'handle' && (await $.clock.now()) - Number(m.ts) * 1000 > STALE_MS) {
     return { ...v, verdict: 'ask', reason: 'came in while no session was open' }
@@ -704,7 +731,37 @@ async function slackUser($, live) {
   await $.store.set('slackUser', id)
   const email = /Email: ([^\s\\]+)/.exec(text(r))?.[1]
   if (email) await $.store.set('slackEmail', email)
+  const team = slackTeam(text(r))
+  if (team) await $.store.set('slackTeam', team)
   return id
+}
+
+// Whether a Slack user is a full member of the user's own workspace
+// 1. The profile names the same team as the user's own
+// 2. Guests and restricted accounts are never trusted
+// 3. A profile that cannot be read is not trusted and is read again on the next message
+async function slackTrusted($, id) {
+  if (!id) return false
+  const key = 'slackTrust:' + id
+  const now = await $.clock.now()
+  const cached = await $.store.get(key)
+  if (cached && now - cached.at < TRUST_MS) return cached.trusted
+  try {
+    await slackUser($)
+    const mine = await $.store.get('slackTeam')
+    const profile = text(await $.mcp.call(SLACK, 'slack_read_user_profile', { user_id: id }))
+    if (!/User ID: /.test(profile)) return false
+    const trusted = Boolean(mine) && slackTeam(profile) === mine && !RESTRICTED.test(profile)
+    await $.store.set(key, { trusted, at: now })
+    return trusted
+  } catch {
+    return false
+  }
+}
+
+// The team id a profile names in any of the shapes the profile tool answers with
+function slackTeam(profile) {
+  return /Team(?: ID)?: (\w+)/i.exec(profile)?.[1] ?? /"team(?:_id)?"\s*:\s*"(\w+)"/.exec(profile)?.[1]
 }
 
 async function githubUser($, live) {
@@ -806,4 +863,4 @@ function terms(s) {
 }
 
 // Pieces the tests reach without a session
-export const testing = { slackLink, githubLink, searchMessages, channelMessages, terms, nextPage, check, pickUp, post, reached, failures, sorted }
+export const testing = { slackLink, githubLink, searchMessages, channelMessages, terms, nextPage, check, pickUp, post, slackTrusted, reached, failures, sorted }

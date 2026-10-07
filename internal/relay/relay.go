@@ -88,18 +88,29 @@ func (s Store) Current(sessionId string) (Relay, error) {
 }
 
 // Best effort since a stale relay only guards a session that has ended
+// Ended records past their hour are removed with them
 func (s Store) prune(now time.Time) {
-	entries, err := os.ReadDir(filepath.Join(s.dir, "open"))
+	for _, e := range entries(filepath.Join(s.dir, "open"), now, staleAfter) {
+		_, _ = s.Close(strings.TrimSuffix(e, ".json"), now)
+	}
+	for _, e := range entries(filepath.Join(s.dir, "ended"), now, lingerFor) {
+		_ = os.Remove(filepath.Join(s.dir, "ended", e))
+	}
+}
+
+// Names of the files in dir last written more than age ago
+func entries(dir string, now time.Time, age time.Duration) []string {
+	all, err := os.ReadDir(dir)
 	if err != nil {
-		return
+		return nil
 	}
-	for _, e := range entries {
-		info, err := e.Info()
-		if err != nil || now.Sub(info.ModTime()) < staleAfter {
-			continue
+	var out []string
+	for _, e := range all {
+		if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) >= age {
+			out = append(out, e.Name())
 		}
-		_, _ = s.Close(strings.TrimSuffix(e.Name(), ".json"), now)
 	}
+	return out
 }
 
 func (s Store) Observe(sessionId string, p locmap.Path) error {
@@ -156,23 +167,64 @@ func (s Store) Evidence(relayId string, raws []string, dir string) ([]locmap.Pat
 	return ps, nil
 }
 
+// A relay as it closed
+type closed struct {
+	Relay
+	ClosedAt time.Time `json:"closed_at"`
+}
+
+// An ended record older than this no longer keeps its scope since the turn that closed it is long over
+const lingerFor = time.Hour
+
+// Keeps the scope of the relay until the turn ends
+// So the turn that closed it never posts anywhere a request text names
 func (s Store) Close(sessionId string, now time.Time) (Relay, error) {
 	r, err := s.Current(sessionId)
 	if err != nil {
 		return Relay{}, err
 	}
-	rec := struct {
-		Relay
-		ClosedAt time.Time `json:"closed_at"`
-	}{r, now.UTC()}
+	rec := closed{r, now.UTC()}
 	if err := appendLine(filepath.Join(s.dir, "closed.jsonl"), rec); err != nil {
+		return Relay{}, err
+	}
+	if err := fileio.WriteJSON(s.endedFile(sessionId), rec); err != nil {
 		return Relay{}, err
 	}
 	return r, os.Remove(s.openFile(sessionId))
 }
 
+// Keeps the scope of a request settled without a relay until the turn ends
+func (s Store) Linger(sessionId, origin, target string, now time.Time) error {
+	return fileio.WriteJSON(s.endedFile(sessionId), closed{Relay{SessionId: sessionId, Origin: origin, Target: target}, now.UTC()})
+}
+
+// The relay or request the session settled in the turn still running
+func (s Store) Ended(sessionId string, now time.Time) (Relay, bool, error) {
+	var rec closed
+	found, err := fileio.ReadJSON(s.endedFile(sessionId), &rec)
+	if err != nil {
+		return Relay{}, false, fmt.Errorf("%s is unreadable, remove it to reset the relay: %w", s.endedFile(sessionId), err)
+	}
+	if !found || now.Sub(rec.ClosedAt) > lingerFor {
+		return Relay{}, false, nil
+	}
+	return rec.Relay, true, nil
+}
+
+func (s Store) EndTurn(sessionId string) error {
+	err := os.Remove(s.endedFile(sessionId))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 func (s Store) openFile(sessionId string) string {
 	return filepath.Join(s.dir, "open", sessionId+".json")
+}
+
+func (s Store) endedFile(sessionId string) string {
+	return filepath.Join(s.dir, "ended", sessionId+".json")
 }
 
 func (s Store) observedFile(relayId string) string {

@@ -3,7 +3,7 @@ name: review
 description: Review a GitHub pull request, post the review on GitHub and reply with a short verdict where it was asked. Run with the pull request link, or the Slack link that asked for it.
 argument-hint: "<pull request link | Slack link> [--approve]"
 disable-model-invocation: true
-allowed-tools: Bash(meetproxy *), Bash(gh pr view *), Bash(gh pr diff *), Bash(gh pr checks *), Bash(gh pr review *), mcp__meetproxy__post, mcp__plugin_slack_slack__slack_read_thread, mcp__plugin_slack_slack__slack_read_channel, mcp__plugin_slack_slack__slack_search_public_and_private, mcp__plugin_slack_slack__slack_read_user_profile
+allowed-tools: Bash(meetproxy open *), Bash(meetproxy close *), Bash(meetproxy locate *), Bash(meetproxy map format *), Bash(gh pr view *), Bash(gh pr diff *), Bash(gh pr checks *), mcp__meetproxy__post, mcp__plugin_slack_slack__slack_read_thread, mcp__plugin_slack_slack__slack_read_channel, mcp__plugin_slack_slack__slack_search_public_and_private, mcp__plugin_slack_slack__slack_read_user_profile
 ---
 
 # review

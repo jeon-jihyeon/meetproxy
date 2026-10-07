@@ -140,6 +140,58 @@ func TestStoreClose(t *testing.T) {
 	}
 }
 
+// A relay closed or a request settled keeps its scope until the turn ends or an hour passes
+func TestStoreEnded(t *testing.T) {
+	t.Parallel()
+	type args struct {
+		close   bool
+		linger  bool
+		endTurn bool
+		after   time.Duration
+	}
+	type want struct {
+		origin string
+		target string
+		found  bool
+	}
+	tcs := []struct {
+		name string
+		args args
+		want want
+	}{
+		{"keeps a closed relay", args{close: true}, want{"o1", "pr1", true}},
+		{"keeps a request settled without a relay", args{linger: true}, want{"o2", "pr2", true}},
+		{"forgets it when the turn ends", args{close: true, endTurn: true}, want{"", "", false}},
+		{"forgets it after an hour", args{close: true, after: 2 * time.Hour}, want{"", "", false}},
+		{"has nothing before any close", args{}, want{"", "", false}},
+		{"ends a turn with nothing to forget", args{endTurn: true}, want{"", "", false}},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := relay.New(t.TempDir())
+			now := time.Now()
+			if tc.args.close {
+				_, err := s.Open("s1", "o1", "pr1", now)
+				require.NoError(t, err)
+				_, err = s.Close("s1", now)
+				require.NoError(t, err)
+			}
+			if tc.args.linger {
+				require.NoError(t, s.Linger("s1", "o2", "pr2", now))
+			}
+			if tc.args.endTurn {
+				require.NoError(t, s.EndTurn("s1"))
+			}
+
+			r, found, err := s.Ended("s1", now.Add(tc.args.after))
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, want{r.Origin, r.Target, found})
+		})
+	}
+}
+
 func TestStoreEvidence(t *testing.T) {
 	t.Parallel()
 	repo := filepath.Join(t.TempDir(), "svc")

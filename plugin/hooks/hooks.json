@@ -20,11 +20,21 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|mcp__.*[Ss]lack.*|mcp__.*[Gg]it[Hh]ub.*",
+        "matcher": "Bash|mcp__.*",
         "hooks": [
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy hook guard"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy hook stop"
           }
         ]
       }
