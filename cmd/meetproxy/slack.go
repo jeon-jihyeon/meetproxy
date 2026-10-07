@@ -233,18 +233,6 @@ func permalink(host, channel, ts, thread string) string {
 	return link
 }
 
-func (c cli) slackShared(channel string) error {
-	client, err := c.slack()
-	if err != nil {
-		return err
-	}
-	shared, err := client.Shared(channel)
-	if err != nil {
-		return err
-	}
-	return writeJSON(c.out, map[string]bool{"shared": shared})
-}
-
 var validReaction = regexp.MustCompile(`^[a-z0-9_+-]{1,64}$`)
 
 func (c cli) slackReact(link, name string) error {

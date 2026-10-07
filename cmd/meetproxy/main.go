@@ -16,7 +16,7 @@ var version = "dev"
 
 // The command set the plugin mod speaks
 // Raised whenever a command the mod calls changes so an older mod stops instead of misreading
-const protocol = 8
+const protocol = 9
 
 const (
 	exitFailed   = 1
@@ -86,10 +86,6 @@ var families = []family{
 			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackHistory(a[0], f.oldest)) },
 		},
 		{
-			name: "slack shared", args: "<channel>", least: 1, most: 1, help: "print whether people outside the workspace read the channel",
-			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.slackShared(a[0])) },
-		},
-		{
 			name: "slack react", args: "<link>", least: 1, most: 1, flags: []string{"react"}, help: "add the reaction --react to the message of a link",
 			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackReact(a[0], f.react)) },
 		},
@@ -144,15 +140,15 @@ func usage() string {
 // Every flag any command takes
 // A command names the ones it reads so any other fails
 type flags struct {
-	data, root, session                  string
-	topic                                string
-	name                                 string
-	cwd, keywords, paths                 string
-	skills, files, after, oldest, answer string
-	react                                string
+	data, root, session string
+	topic               string
+
+	keywords, paths, after, oldest string
+	answer, react                  string
+
+	thread, channel string
 
 	limit int
-	busy  bool
 }
 
 func (f *flags) set() *flag.FlagSet {
@@ -167,19 +163,16 @@ func (f *flags) set() *flag.FlagSet {
 	fs.StringVar(&f.paths, "paths", "", "comma separated evidence paths")
 	fs.IntVar(&f.limit, "limit", defaultLimit, "number of results, every one with 0")
 
-	fs.StringVar(&f.name, "name", "", "display name of the place")
-
-	fs.StringVar(&f.skills, "skills", "", "comma separated skills the work map suggests")
-	fs.StringVar(&f.files, "files", "", "comma separated files the work map suggests")
-
-	fs.StringVar(&f.cwd, "cwd", "", "directory of the session")
 	fs.StringVar(&f.after, "after", "", "unix seconds to read Slack mentions after")
 	fs.StringVar(&f.oldest, "oldest", "", "Slack ts to read a channel after")
 	fs.StringVar(&f.answer, "answer", "", "now, later or keep")
 
 	fs.StringVar(&f.react, "react", "", "reaction name")
 
-	fs.BoolVar(&f.busy, "busy", false, "a turn is running in the session")
+	fs.StringVar(&f.thread, "thread", "", "key of the thread the request sits in")
+
+	fs.StringVar(&f.channel, "channel", "", "Slack channel or GitHub repository")
+
 	return fs
 }
 
@@ -276,7 +269,7 @@ func reorder(_ string, args []string) []string {
 			return append(append(flags, a), append(pos, args[i+1:]...)...)
 		case len(a) > 1 && a[0] == '-':
 			flags = append(flags, a)
-			if !strings.Contains(a, "=") && !boolFlags[strings.TrimLeft(a, "-")] && i+1 < len(args) {
+			if !strings.Contains(a, "=") && i+1 < len(args) {
 				flags = append(flags, args[i+1])
 				i++
 			}
@@ -286,6 +279,3 @@ func reorder(_ string, args []string) []string {
 	}
 	return append(flags, pos...)
 }
-
-// Flags that take no value
-var boolFlags = map[string]bool{"busy": true}
