@@ -46,6 +46,8 @@ var (
 	ownerRepo = regexp.MustCompile(`^(?:[\w.-]+/)?[\w.-]+/[\w.-]+$`)
 	number    = regexp.MustCompile(`^#?(\d+)$`)
 	apiPath   = regexp.MustCompile(`^/?repos/([\w.-]+/[\w.-]+)(?:/(?:issues|pulls)/(\d+))?`)
+	// A repository link on a host other than github.com such as GitHub Enterprise
+	hostLink = regexp.MustCompile(`^https?://([\w.-]+)/([\w.-]+/[\w.-]+)(?:/(?:pull|issues)/(\d+))?(?:[/?#]|$)`)
 )
 
 // The words of a gh call split by role
@@ -138,14 +140,21 @@ func ghCall(args, envRepos, envHosts []string, fed bool) ([]Post, error) {
 	return postsAt(locs, g.act(cmd)), nil
 }
 
-// The first host named that is not github.com or empty when none is
-func (g ghArgs) otherHost() string {
+// The host every repository that names none is on and empty for github.com
+// Two other hosts cannot be told apart so they are unknown
+func (g ghArgs) host() (string, error) {
+	host := ""
 	for _, h := range g.hosts {
-		if !onGitHub(h) {
-			return h
+		h = strings.ToLower(h)
+		switch {
+		case onGitHub(h) || h == host:
+		case host == "":
+			host = h
+		default:
+			return "", unknown("gh on hosts " + host + " and " + h)
 		}
 	}
-	return ""
+	return host, nil
 }
 
 func onGitHub(host string) bool { return strings.EqualFold(host, "github.com") }
@@ -180,11 +189,15 @@ func approves(flag string) bool {
 	return false
 }
 
-// Every repository a write names and an error for a host other than github.com
+// Every repository a write names
 // 1. Each -R or GH_REPO repository with each pull request or issue number given
-// 2. Each link to GitHub
+// 2. Each link to a repository, and an error for any other link
 // 3. OWNER/REPO and HOST/OWNER/REPO positionals of commands that take one such as issue transfer
 func (g ghArgs) targets(cmd string, rest []string) ([]dest.Location, error) {
+	host, err := g.host()
+	if err != nil {
+		return nil, err
+	}
 	var locs []dest.Location
 	numbers := []int{}
 	numbered := strings.HasPrefix(cmd, "pr ") || strings.HasPrefix(cmd, "issue ")
@@ -195,17 +208,17 @@ func (g ghArgs) targets(cmd string, rest []string) ([]dest.Location, error) {
 			numbers = append(numbers, n)
 			continue
 		}
-		if loc, ok := dest.Parse(w); ok && loc.Source == dest.GitHub {
+		if strings.Contains(w, "://") {
+			loc, err := linkAt(w)
+			if err != nil {
+				return nil, err
+			}
 			locs = append(locs, loc)
 			numbers = append(numbers, loc.Number)
 			continue
 		}
 		if positionalRepo && ownerRepo.MatchString(w) {
-			loc, err := repoAt(w, 0)
-			if err != nil {
-				return nil, err
-			}
-			locs = append(locs, loc)
+			locs = append(locs, repoAt(w, 0, host))
 		}
 	}
 	if len(numbers) == 0 {
@@ -215,44 +228,59 @@ func (g ghArgs) targets(cmd string, rest []string) ([]dest.Location, error) {
 	return append(locs, repos...), err
 }
 
-// Each -R or GH_REPO repository with each number and an error for a host other than github.com
+// Each -R or GH_REPO repository with each number
 func (g ghArgs) repoLocs(numbers []int) ([]dest.Location, error) {
-	if h := g.otherHost(); h != "" {
-		return nil, unknown("gh on host " + h)
+	host, err := g.host()
+	if err != nil {
+		return nil, err
 	}
 	var locs []dest.Location
 	for _, r := range g.repos {
 		for _, n := range numbers {
-			loc, err := repoAt(r, n)
+			if !strings.Contains(r, "://") {
+				locs = append(locs, repoAt(r, n, host))
+				continue
+			}
+			loc, err := linkAt(r)
 			if err != nil {
 				return nil, err
 			}
+			loc.Number = n
 			locs = append(locs, loc)
 		}
 	}
 	return locs, nil
 }
 
-// A repository written as OWNER/REPO, HOST/OWNER/REPO or a link
-// 1. A host other than github.com is an unknown destination
-// 2. A value that names no repository still yields a location so it is denied instead of skipped
-func repoAt(v string, n int) (dest.Location, error) {
-	if loc, ok := dest.Parse(v); ok && loc.Source == dest.GitHub {
-		loc.Number = n
+// A link to a repository, its pull request or its issue on any host
+// Any other link is unknown so a write never goes to a place the guard skipped
+func linkAt(w string) (dest.Location, error) {
+	if loc, ok := dest.Parse(w); ok && loc.Source == dest.GitHub {
 		return loc, nil
 	}
-	_, rest, linked := strings.Cut(v, "://")
-	if !linked {
-		rest = v
+	m := hostLink.FindStringSubmatch(w)
+	if m == nil {
+		return dest.Location{}, unknown("a link the guard cannot read")
 	}
-	parts := strings.Split(strings.Trim(rest, "/"), "/")
-	if linked || len(parts) > 2 {
-		if !onGitHub(parts[0]) {
-			return dest.Location{}, unknown("a repository on host " + parts[0])
-		}
+	n, _ := strconv.Atoi(m[3])
+	return dest.Location{Source: dest.GitHub, Name: strings.ToLower(m[1]) + "/" + m[2], Number: n}, nil
+}
+
+// A repository written as OWNER/REPO or HOST/OWNER/REPO
+// 1. github.com is dropped and another host stays first in the name
+// 2. A repository that names no host is on the host of --hostname or GH_HOST
+// 3. A value that names no repository still yields a location so it is denied instead of skipped
+func repoAt(v string, n int, host string) dest.Location {
+	parts := strings.Split(strings.Trim(v, "/"), "/")
+	switch {
+	case len(parts) > 2 && onGitHub(parts[0]):
 		parts = parts[1:]
+	case len(parts) > 2:
+		parts[0] = strings.ToLower(parts[0])
+	case host != "":
+		parts = append([]string{host}, parts...)
 	}
-	return dest.Location{Source: dest.GitHub, Name: strings.Join(parts, "/"), Number: n}, nil
+	return dest.Location{Source: dest.GitHub, Name: strings.Join(parts, "/"), Number: n}
 }
 
 // A write through gh api posts to the repository of its endpoint
@@ -265,11 +293,12 @@ func apiCall(args []string, g ghArgs) ([]Post, error) {
 	if err != nil {
 		return nil, err
 	}
+	host, _ := g.host()
 	merges := false
 	for _, w := range g.positional[1:] {
 		if m := apiPath.FindStringSubmatch(w); m != nil {
 			n, _ := strconv.Atoi(m[2])
-			locs = append(locs, dest.Location{Source: dest.GitHub, Name: m[1], Number: n})
+			locs = append(locs, repoAt(m[1], n, host))
 			merges = merges || strings.Contains(w, "/merge")
 		}
 	}
