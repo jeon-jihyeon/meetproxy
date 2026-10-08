@@ -22,7 +22,12 @@ any() { [ -e "$1" ]; }
 # Claude Code writes the session id as the first key so a short head of the input names it
 # Reading the whole input with builtins costs more than the binary once it holds a file an edit writes
 # The head goes to the binary in MEETPROXY_HOOK_HEAD since the binary reads the rest of the same stdin
-# Shells without read -n such as dash skip only while no session has a marker
+# Shells without read -n such as dash hand a hook to bash once a session has a marker
+# Without bash they skip only while no session has a marker
+if [ "$MODE" != cli ] && [ -z "${BASH_VERSION:-}" ] && [ -x /bin/bash ] && [ -n "${CLAUDE_PLUGIN_DATA:-}" ] &&
+  any "${CLAUDE_PLUGIN_DATA}"/scope/*; then
+  exec /bin/bash "$0" "$@"
+fi
 HEAD=
 if [ "$MODE" != cli ] && [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && [ -d "${CLAUDE_PLUGIN_DATA}/scope" ]; then
   if ! any "${CLAUDE_PLUGIN_DATA}"/scope/*; then
