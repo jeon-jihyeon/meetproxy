@@ -7,19 +7,35 @@
 # 5. another meetproxy on PATH
 set -eu
 
+MODE=cli
+
 REPO="jeon-jihyeon/meetproxy"
-ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+# Hooks start the launcher by its absolute path so only other starts resolve the directory with programs
+dir=${0%/*}
+case "$dir" in
+  /*/bin) ROOT=${dir%/bin} ;;
+  *) ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd) ;;
+esac
 MANIFEST="${ROOT}/.claude-plugin/plugin.json"
-SRC=$(dirname -- "$ROOT")
+SRC=${ROOT%/*}
+[ -n "$SRC" ] || SRC=/
 
 fail() {
   echo "meetproxy: $1" >&2
   exit 1
 }
-MODE=cli
 
 # Rebuilds when sources are newer and renames into place so a partial file never runs
-if [ -f "${SRC}/go.mod" ] && grep -q "^module github.com/${REPO}\$" "${SRC}/go.mod" && command -v go >/dev/null 2>&1; then
+dev=
+if [ -f "${SRC}/go.mod" ] && command -v go >/dev/null 2>&1; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "module github.com/${REPO}") dev=yes && break ;;
+      "module "*) break ;;
+    esac
+  done <"${SRC}/go.mod"
+fi
+if [ -n "$dev" ]; then
   DEV_BIN="${SRC}/bin/meetproxy"
   if [ ! -x "$DEV_BIN" ] || { [ "$MODE" = cli ] && [ -n "$(find "${SRC}/cmd" "${SRC}/internal" "${SRC}/go.mod" -newer "$DEV_BIN" 2>/dev/null | head -n 1)" ]; }; then
     mkdir -p "${SRC}/bin"
@@ -34,7 +50,26 @@ if [ -f "${SRC}/go.mod" ] && grep -q "^module github.com/${REPO}\$" "${SRC}/go.m
   exec "$DEV_BIN" "$@"
 fi
 
-version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)
+# The first "version" key of the manifest such as   "version": "0.1.9",
+version=
+while IFS= read -r line || [ -n "$line" ]; do
+  key=${line#"${line%%[![:space:]]*}"}
+  case "$key" in
+    \"version\"*)
+      value=${key#\"version\"}
+      gap=${value%%\"*}
+      case "$gap" in
+        *[!:\ \	]* | *:*:*) continue ;;
+        *:*) ;;
+        *) continue ;;
+      esac
+      value=${value#*\"}
+      case "$value" in
+        *\"*) version=${value%%\"*} && break ;;
+      esac
+      ;;
+  esac
+done <"$MANIFEST" || true
 [ -n "$version" ] || fail "no version in ${MANIFEST}"
 TAG="v${version}"
 
@@ -107,7 +142,7 @@ fi
 # Skips this launcher itself when the plugin bin directory is on PATH
 found=$(command -v meetproxy 2>/dev/null || true)
 if [ -n "$found" ] && [ ! "$found" -ef "$0" ]; then
-  have=$("$found" version 2>/dev/null || echo unknown)
+  have=$("$found" version 2>/dev/null </dev/null || echo unknown)
   case "$have" in
     "$version" | "v$version") ;;
     *) echo "meetproxy: running ${found} from PATH, version ${have} where the plugin expects ${version}" >&2 ;;

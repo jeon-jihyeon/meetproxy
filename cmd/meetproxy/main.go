@@ -16,7 +16,7 @@ var version = "dev"
 
 // The command set the plugin mod speaks
 // Raised whenever a command the mod calls changes so an older mod stops instead of misreading
-const protocol = 9
+const protocol = 10
 
 const (
 	exitFailed   = 1
@@ -112,6 +112,7 @@ var families = []family{
 			run: func(c cli, _ []string, f flags) (int, error) { return exitCode(c.slackSetup(f.answer)) },
 		},
 	}},
+	{"github", githubCommands},
 }
 
 func usage() string {
@@ -141,10 +142,9 @@ func usage() string {
 // A command names the ones it reads so any other fails
 type flags struct {
 	data, root, session string
-	topic               string
 
-	keywords, paths, after, oldest string
-	answer, react                  string
+	after, oldest string
+	answer, react string
 
 	thread, channel string
 
@@ -158,9 +158,6 @@ func (f *flags) set() *flag.FlagSet {
 	fs.StringVar(&f.root, "root", "", "plugin directory that names the data directory when --data is empty")
 	fs.StringVar(&f.session, "session", f.session, "session id, CLAUDE_CODE_SESSION_ID by default")
 
-	fs.StringVar(&f.topic, "topic", "", "one line request topic")
-	fs.StringVar(&f.keywords, "keywords", "", "comma separated keywords")
-	fs.StringVar(&f.paths, "paths", "", "comma separated evidence paths")
 	fs.IntVar(&f.limit, "limit", defaultLimit, "number of results, every one with 0")
 
 	fs.StringVar(&f.after, "after", "", "unix seconds to read Slack mentions after")
