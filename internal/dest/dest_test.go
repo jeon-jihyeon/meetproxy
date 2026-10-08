@@ -33,6 +33,9 @@ func TestParse(t *testing.T) {
 		{"written form with a bad number", "github:o/r#x", want{}},
 		{"written form with a pattern", "github:o/*", want{}},
 		{"unknown shape", "https://example.com/x", want{}},
+		{"written form on another host", "github:ghe.acme.io/o/r#2", want{dest.Location{Source: "github", Name: "ghe.acme.io/o/r", Number: 2}, true}},
+		{"written host", "https:api.example.com", want{dest.Location{Source: "https", Name: "api.example.com"}, true}},
+		{"written host with a path", "https:api.example.com/x", want{}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -91,6 +94,10 @@ func TestAllowAllowed(t *testing.T) {
 		{"allows a channel", args{[]string{"slack:C1"}, "https://w.slack.com/archives/C1/p123"}, true},
 		{"denies another channel", args{[]string{"slack:C1"}, "https://w.slack.com/archives/C2/p123"}, false},
 		{"stores a duplicate once", args{[]string{"slack:C1", "slack:C1"}, "slack:C1"}, true},
+		{"allows an owner on another host", args{[]string{"github:ghe.acme.io/o/*"}, "github:ghe.acme.io/o/r#1"}, true},
+		{"keeps an owner on github.com off another host", args{[]string{"github:o/*"}, "github:ghe.acme.io/o/r"}, false},
+		{"allows a host", args{[]string{"https:*.example.com"}, "https:api.example.com"}, true},
+		{"denies another host", args{[]string{"https:*.example.com"}, "https:example.org"}, false},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -128,6 +135,12 @@ func TestAllowAdd(t *testing.T) {
 		{"rejects an unknown source", "gitlab:o/r", want{true, nil}},
 		{"rejects a link", "https://github.com/o/r", want{true, nil}},
 		{"rejects a number", "github:o/r#3", want{true, nil}},
+		{"takes an owner on another host", "github:ghe.acme.io/o/*", want{false, []string{"github:ghe.acme.io/o/*"}}},
+		{"rejects every repository of every host", "github:*/*/*", want{true, nil}},
+		{"takes a host", "https:api.example.com", want{false, []string{"https:api.example.com"}}},
+		{"rejects every host", "https:*", want{true, nil}},
+		{"rejects every dotted host", "https:*.*", want{true, nil}},
+		{"rejects a host with a path", "https:example.com/x", want{true, nil}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -169,4 +182,18 @@ func TestAllowAllowed_CorruptConfig(t *testing.T) {
 	_, err := dest.New(dir).Allowed(dest.Location{Source: "slack", Name: "C1"})
 
 	assert.Error(t, err)
+}
+
+func FuzzParse(f *testing.F) {
+	for _, s := range []string{"https://github.com/o/r/pull/1", "github:ghe.acme.io/o/r#2", "slack:C1", "https:api.example.com"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, raw string) {
+		loc, ok := dest.Parse(raw)
+		if ok {
+			again, ok := dest.Parse(loc.String())
+			assert.True(t, ok)
+			assert.Equal(t, loc, again)
+		}
+	})
 }

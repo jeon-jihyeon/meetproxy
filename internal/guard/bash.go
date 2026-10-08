@@ -29,6 +29,8 @@ var (
 	interpreter = regexp.MustCompile(`(?i)^(?:python[\d.]*|node|ruby|perl|osascript|pwsh|powershell)(?:\.exe)?$`)
 	// Words that stand for themselves although they hold a character expansion uses
 	plainWords = map[string]bool{"{": true, "}": true, "[": true, "[[": true}
+	// A proxy variable set anywhere in the text routes a request through a host the guard does not see
+	proxyVar = regexp.MustCompile(`(?i)\w*_proxy=`)
 	// meetproxy commands that change what is taken or where posts may go
 	settings = map[string]bool{
 		"allow": true, "resume": true, "delegation put": true, "delegation remove": true,
@@ -45,13 +47,14 @@ var (
 )
 
 // Text inside text deeper than this that still names gh is denied
+// Each depth reads parts of the text above it so the guard reads at most nine times the input
 const maxDepth = 8
 
 func bash(text, data string) ([]Post, error) {
 	if directAPI.MatchString(text) {
 		return nil, unknown("a direct API call")
 	}
-	s := scan{data: data}
+	s := scan{data: data, proxied: proxyVar.MatchString(text)}
 	if data != "" {
 		s.data = filepath.Clean(data)
 	}
@@ -65,6 +68,8 @@ type scan struct {
 	posts []Post
 	// Plugin data directory or empty when unknown
 	data string
+	// The text sets a proxy variable
+	proxied bool
 }
 
 // Commands run inside a word are read as commands too
@@ -77,7 +82,11 @@ func (s *scan) text(text string, depth int) error {
 		}
 		return nil
 	}
-	for _, c := range shell.Commands(text) {
+	cmds, err := shell.Commands(text)
+	if err != nil {
+		return unknown(err.Error())
+	}
+	for _, c := range cmds {
 		if err := s.command(c); err != nil {
 			return err
 		}
@@ -177,7 +186,12 @@ func (s *scan) command(c shell.Command) error {
 	if err := opaque(c); err != nil {
 		return err
 	}
-	if err := netWrite(c); err != nil {
+	if err := remote(c); err != nil {
+		return err
+	}
+	posts, err := netWrite(c, s.proxied)
+	s.posts = append(s.posts, posts...)
+	if err != nil {
 		return err
 	}
 	if i := slices.IndexFunc(c.Args, isMeetproxy); i >= 0 {
@@ -192,9 +206,23 @@ func (s *scan) command(c shell.Command) error {
 		return nil
 	}
 	repos, hosts := envValues("GH_REPO", c.Env, c.Args[:i]), envValues("GH_HOST", c.Env, c.Args[:i])
-	posts, err := ghCall(c.Args[i+1:], repos, hosts, slices.ContainsFunc(c.Args[:i], isFeeder))
+	posts, err = ghCall(c.Args[i+1:], repos, hosts, slices.ContainsFunc(c.Args[:i], isFeeder))
 	s.posts = append(s.posts, posts...)
 	return err
+}
+
+// Words after a wrapper that may name the program it runs
+// xargs and parallel put each input word where {} is so -I{} and a {} after gh name no program
+func wrapped(args []string) []string {
+	gh := slices.IndexFunc(args, isGh)
+	var out []string
+	for i, w := range args[1:] {
+		if w == "-I{}" || (w == "{}" && gh >= 0 && i+1 > gh) {
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
 }
 
 // Commands whose program the guard cannot read
@@ -207,7 +235,7 @@ func opaque(c shell.Command) error {
 		return unknown("a direct API call")
 	}
 	name := c.Args[0]
-	if expanded(name) || (wrappers[base(name)] && slices.ContainsFunc(c.Args[1:], expanded)) {
+	if expanded(name) || (wrappers[base(name)] && slices.ContainsFunc(wrapped(c.Args), expanded)) {
 		return unknown("a command named by an expansion")
 	}
 	if i := slices.IndexFunc(c.Args, isInterpreter); i >= 0 && slices.ContainsFunc(c.Args[i+1:], inline) {

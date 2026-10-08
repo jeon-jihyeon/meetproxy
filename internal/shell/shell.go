@@ -2,9 +2,15 @@
 package shell
 
 import (
+	"errors"
 	"regexp"
 	"strings"
 )
+
+// Substitutions nested deeper than this are not read
+const maxNesting = 256
+
+var ErrTooDeep = errors.New("substitutions nested too deep to read")
 
 // One simple command of shell text
 type Command struct {
@@ -25,10 +31,15 @@ type Command struct {
 // 5. "$(cat <<'EOF' ... EOF)" becomes the body of its here document
 // 6. Other substitutions, backticks, arithmetic and ${...} stay as written inside their word
 // 7. Redirection targets are kept apart from the words of the command
-func Commands(text string) []Command {
-	l := lexer{s: text}
+// Text inside substitutions nested past maxNesting stays one word and ErrTooDeep comes with the commands
+func Commands(text string) ([]Command, error) {
+	deep := false
+	l := lexer{s: text, deep: &deep}
 	l.run()
-	return l.out
+	if deep {
+		return l.out, ErrTooDeep
+	}
+	return l.out, nil
 }
 
 var (
@@ -52,6 +63,10 @@ type lexer struct {
 	nested bool
 	// Open parentheses inside $( )
 	parens int
+	// Substitutions around this lexer
+	depth int
+	// Set by any lexer of the text that reached maxNesting
+	deep   *bool
 	word   strings.Builder
 	inWord bool
 	// Offset in s where the current word starts
@@ -275,7 +290,12 @@ func (l *lexer) expansion() {
 // $( ), <( ) or >( ) read by a nested lexer so quotes, comments and here documents inside never end it early
 // A lone cat reading a here document becomes the body of that here document
 func (l *lexer) substitution() {
-	inner := lexer{s: l.s, i: l.i + 2, nested: true}
+	if l.depth >= maxNesting {
+		*l.deep = true
+		l.raw(len(l.s))
+		return
+	}
+	inner := lexer{s: l.s, i: l.i + 2, nested: true, depth: l.depth + 1, deep: l.deep}
 	inner.run()
 	end := min(inner.i+1, len(l.s))
 	if len(inner.out) == 1 && inner.out[0].Stdin != "" && strings.Join(inner.out[0].Args, " ") == "cat" {

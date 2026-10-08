@@ -188,7 +188,7 @@ var families = []family{
 			run: func(c cli, a []string, _ flags) (int, error) { return c.dest(a[0]) },
 		},
 		{
-			name: "allow", args: "<pattern>", least: 1, most: 1, help: "allow a destination such as github:owner/*",
+			name: "allow", args: "<pattern>", least: 1, most: 1, help: "allow a destination such as github:owner/* or https:host",
 			run: allow,
 		},
 		{name: "allowed", help: "list the allowed patterns", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.allowed()) }},
