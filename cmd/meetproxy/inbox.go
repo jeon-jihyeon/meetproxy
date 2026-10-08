@@ -190,8 +190,10 @@ func (c cli) closeRelayOf(id string) error {
 }
 
 // Prints the requests not done newest first
-// Each line is the id, the status, the source, the author, the link and the summary
-// Statuses read as the list offers them so a held request whose time came is open
+// 1. Each line is the id, the status, the source, the author, the link and the summary
+// 2. Then when it was added and when its newest message was written in RFC 3339
+// 3. Times come last so readers of the first six columns keep working
+// 4. Statuses read as the list offers them so a held request whose time came is open
 func (c cli) inboxList(limit int) error {
 	items, err := inbox.New(c.data).List()
 	if err != nil {
@@ -206,7 +208,8 @@ func (c cli) inboxList(limit int) error {
 		if it.Open(c.now) {
 			st = inbox.StatusOpen
 		}
-		fmt.Fprintf(c.out, "%s\t%s\t%s\t%s\t%s\t%s\n", it.Id, st, orDash(it.Source), orDash(it.Author), it.Link, orDash(it.Summary))
+		fmt.Fprintf(c.out, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", it.Id, st, orDash(it.Source), orDash(it.Author), it.Link,
+			orDash(it.Summary), it.AddedAt.UTC().Format(time.RFC3339), it.Last().UTC().Format(time.RFC3339))
 	}
 	return nil
 }
@@ -314,13 +317,16 @@ type matched struct {
 	Depth string `json:"depth"`
 	// What duplicates of the message share
 	Digest string `json:"digest"`
+	// The inbox already read the message so triage would only repeat
+	Seen bool `json:"seen,omitempty"`
 }
 
 // Reads a message as JSON and prints what the matching delegation does with it
 // 1. key is mention, review-request, dm, own-pr or the id of a channel delegation
 // 2. With followup key is the id of the delegation that took the request before and its filters do not apply
+// 3. With thread or ts it also says whether the session that held the lease until now read the message
 // Prints nothing when none matches so only a failure exits non zero
-func (c cli) delegationMatch(key string, followup bool) error {
+func (c cli) delegationMatch(key string, followup bool, thread, ts string) error {
 	var m delegation.Message
 	if err := json.NewDecoder(c.in).Decode(&m); err != nil {
 		return fmt.Errorf("%w: message must be JSON: %w", errUsage, err)
@@ -336,9 +342,15 @@ func (c cli) delegationMatch(key string, followup bool) error {
 	if !ok {
 		return nil
 	}
+	seen := false
+	if thread != "" || ts != "" {
+		if seen, err = inbox.New(c.data).Known(thread, m.Link, ts, c.now); err != nil {
+			return err
+		}
+	}
 	return json.NewEncoder(c.out).Encode(matched{
 		Delegation: d.Id, Task: d.Do, Triage: d.Triaged() || followup, Target: d.Target(m),
-		Depth: delegation.Depth(m.Text), Digest: delegation.Digest(m.Text),
+		Depth: delegation.Depth(m.Text), Digest: delegation.Digest(m.Text), Seen: seen,
 	})
 }
 

@@ -98,7 +98,11 @@ func readSources(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
-	for _, f := range []string{"hooks/meetproxy.js", "hooks/meetproxy.test.mjs"} {
+	watcher := []string{
+		"hooks/meetproxy.js", "hooks/core.js", "hooks/slack.js", "hooks/github.js", "hooks/meetproxy.test.mjs",
+		"hooks/testdata/links.json",
+	}
+	for _, f := range watcher {
 		_, err := os.ReadFile(f)
 		require.NoError(t, err)
 	}

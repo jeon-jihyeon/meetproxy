@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jeon-jihyeon/meetproxy/internal/dest"
 	"github.com/jeon-jihyeon/meetproxy/internal/fileio"
 	"github.com/jeon-jihyeon/meetproxy/internal/posts"
 	"github.com/jeon-jihyeon/meetproxy/internal/slackapi"
@@ -56,6 +57,9 @@ type slackMessage struct {
 	Ts      string `json:"ts"`
 	Link    string `json:"link"`
 	Text    string `json:"text"`
+	// Key of the request the message belongs to
+	// A direct conversation is one request until it is done
+	Thread string `json:"thread"`
 }
 
 // What auth.test said of the token when it was stored or checked
@@ -172,7 +176,10 @@ func (c cli) slackMentions(after string) error {
 	users := c.users(client)
 	out := make([]slackMessage, 0, len(found))
 	for _, m := range found {
-		out = append(out, slackMessage{Author: users.name(m.User), Channel: m.Channel.Id, From: m.User, Ts: m.Ts, Link: m.Permalink, Text: m.Text})
+		out = append(out, slackMessage{
+			Author: users.name(m.User), Channel: m.Channel.Id, From: m.User, Ts: m.Ts, Link: m.Permalink, Text: m.Text,
+			Thread: mentionThread(m),
+		})
 	}
 	return c.encodeMessages(out, users)
 }
@@ -200,9 +207,19 @@ func (c cli) slackHistory(channel, oldest string) error {
 		out = append(out, slackMessage{
 			Author: authorOf(m, users), Channel: channel, From: cmpOr(m.User, m.BotId), Ts: m.Ts,
 			Link: "https://" + a.Host + "/archives/" + channel + "/p" + strings.Replace(m.Ts, ".", "", 1), Text: m.Text,
+			Thread: slackThread(channel, cmpOr(m.ThreadTs, m.Ts), false),
 		})
 	}
 	return c.encodeMessages(out, users)
+}
+
+// Search names the conversation kind and the permalink the thread
+func mentionThread(m slackapi.Message) string {
+	thread := m.Ts
+	if l, ok := dest.ParseLink(m.Permalink); ok && l.Source == dest.Slack {
+		thread = l.ThreadTs
+	}
+	return slackThread(m.Channel.Id, thread, m.Channel.IsIm || m.Channel.IsMpim)
 }
 
 // Bots name themselves while people are named by their profile
@@ -287,7 +304,7 @@ func (c cli) slackReplies(link, after string) error {
 		}
 		out = append(out, slackMessage{
 			Author: users.name(m.User), Channel: at.channel, From: m.User, Ts: m.Ts, Text: m.Text,
-			Link: permalink(a.Host, at.channel, m.Ts, at.thread),
+			Link: permalink(a.Host, at.channel, m.Ts, at.thread), Thread: slackThread(at.channel, at.thread, false),
 		})
 	}
 	return c.encodeMessages(out, users)
@@ -305,10 +322,10 @@ func permalink(host, channel, ts, thread string) string {
 // Direct messages to the user after --after
 // 1. The user's own messages and bots are left out
 // 2. One that mentions the user is left to the mention reader so it is not queued twice
-// 3. At most dmsPerRead conversations are read per call, the ones read longest ago first
-// 4. Only messages up to the time every conversation was last read are printed
-// 5. The mod moves the dm cursor to each message it settles so a newer one would carry it past a conversation not read yet
-// 6. A conversation that could not be read holds the rest back until it is read
+// 3. Each conversation is read from --after or from its own last read when that is older
+// The mod moves the dm cursor past each message it settles so a conversation read less often still loses none
+// 4. A quiet conversation is read every quietEvery so many quiet ones cost little
+// 5. A rate limit stops the rest, which are read first next time
 func (c cli) slackDMs(after string) error {
 	if after == "" {
 		return fmt.Errorf("%w: slack dms needs --after", errUsage)
@@ -317,7 +334,7 @@ func (c cli) slackDMs(after string) error {
 	if err != nil {
 		return err
 	}
-	ids, err := client.DirectConversations()
+	ids, err := c.directConversations(client)
 	if err != nil {
 		return err
 	}
@@ -326,70 +343,137 @@ func (c cli) slackDMs(after string) error {
 	if err := fileio.WriteJSON(dmsFile(c.data), read); err != nil {
 		return err
 	}
-	through := c.now.Unix()
-	for _, id := range ids {
-		through = min(through, read[id])
-	}
 	users := c.users(client)
 	out := []slackMessage{}
 	for _, m := range found {
-		if ts, _ := strconv.ParseFloat(m.Ts, 64); !tsLess(after, m.Ts) || ts > float64(through) {
-			continue
-		}
 		if m.User == "" || m.User == a.User || m.BotId != "" || strings.Contains(m.Text, "<@"+a.User+">") {
 			continue
 		}
 		out = append(out, slackMessage{
 			Author: users.name(m.User), Channel: m.Channel.Id, From: m.User, Ts: m.Ts, Text: m.Text,
-			Link: permalink(a.Host, m.Channel.Id, m.Ts, ""),
+			Link: permalink(a.Host, m.Channel.Id, m.Ts, ""), Thread: slackThread(m.Channel.Id, "", true),
 		})
 	}
 	return c.encodeMessages(out, users)
 }
 
-// Direct conversations read in one call so a user with many never runs into rate limits every check
-const dmsPerRead = 40
+const (
+	// How long the list of direct conversations is trusted
+	// A conversation opened meanwhile is read once the list is read again
+	conversationsFor = time.Hour
+	// A conversation with no message for quietAfter is read every quietEvery
+	quietAfter = 24 * time.Hour
+	quietEvery = 10 * time.Minute
+	// Read again before the last read since a message can show a little after the time it carries
+	readOverlap = time.Minute
+)
 
-// Unix seconds each direct conversation was last read through
 func dmsFile(data string) string { return filepath.Join(slackDir(data), "dms.json") }
+func conversationsFile(data string) string {
+	return filepath.Join(slackDir(data), "conversations.json")
+}
 
-// When each listed conversation was last read, zero for one never read
+type conversationList struct {
+	Ids []string  `json:"ids"`
+	At  time.Time `json:"at"`
+}
+
+// The direct conversations of the user, listed at most once per conversationsFor
+func (c cli) directConversations(client slackapi.Client) ([]string, error) {
+	var kept conversationList
+	if found, err := fileio.ReadJSON(conversationsFile(c.data), &kept); found && err == nil && c.now.Sub(kept.At) < conversationsFor {
+		return kept.Ids, nil
+	}
+	ids, err := client.DirectConversations()
+	if err != nil {
+		return nil, err
+	}
+	// A list that cannot be kept is only listed again next time
+	_ = fileio.WriteJSON(conversationsFile(c.data), conversationList{ids, c.now.UTC()})
+	return ids, nil
+}
+
+// What was read of one direct conversation
+type dmRead struct {
+	// Unix seconds the last read reached, zero for one never read
+	Read int64 `json:"read"`
+	// ts of the newest message it has
+	Last string `json:"last,omitempty"`
+}
+
+// What was read of each listed conversation
 // A conversation no longer listed is forgotten
-func readDMs(data string, ids []string) map[string]int64 {
-	// A lost file only makes every conversation count as never read
-	var kept map[string]int64
-	_, _ = fileio.ReadJSON(dmsFile(data), &kept)
-	read := make(map[string]int64, len(ids))
+func readDMs(data string, ids []string) map[string]dmRead {
+	// A lost or older file only makes every conversation count as never read
+	var kept map[string]dmRead
+	if _, err := fileio.ReadJSON(dmsFile(data), &kept); err != nil {
+		kept = nil
+	}
+	read := make(map[string]dmRead, len(ids))
 	for _, id := range ids {
 		read[id] = kept[id]
 	}
 	return read
 }
 
-// Reads every page back to after of the conversations read longest ago and records when each was read
-// A conversation that fails keeps its last read time and a rate limit stops the rest
-func (c cli) readConversations(client slackapi.Client, ids []string, read map[string]int64, after string) []slackapi.Message {
+// Whether a conversation read before has had no message for quietAfter and was read within quietEvery
+func (c cli) quiet(r dmRead) bool {
+	if r.Read == 0 || c.now.Sub(time.Unix(r.Read, 0)) >= quietEvery {
+		return false
+	}
+	last, _ := strconv.ParseFloat(r.Last, 64)
+	return c.now.Sub(time.Unix(int64(last), 0)) >= quietAfter
+}
+
+// The ts a conversation is read after
+func (r dmRead) oldest(after string) string {
+	if r.Read == 0 {
+		return after
+	}
+	own := strconv.FormatInt(r.Read, 10)
+	if tsLess(own, after) {
+		return own
+	}
+	return after
+}
+
+// Reads the conversations read longest ago first and records what each read reached
+// Only messages after the ts each conversation was read from are returned
+// A conversation that fails keeps what it had and a rate limit stops the rest
+func (c cli) readConversations(client slackapi.Client, ids []string, read map[string]dmRead, after string) []slackapi.Message {
 	order := slices.Clone(ids)
-	slices.SortStableFunc(order, func(x, y string) int { return cmp.Compare(read[x], read[y]) })
+	slices.SortStableFunc(order, func(x, y string) int { return cmp.Compare(read[x].Read, read[y].Read) })
 	var out []slackapi.Message
-	for _, id := range order[:min(len(order), dmsPerRead)] {
-		msgs, truncated, err := client.History(id, after)
+	for _, id := range order {
+		r := read[id]
+		if c.quiet(r) {
+			continue
+		}
+		oldest := r.oldest(after)
+		msgs, truncated, err := client.History(id, oldest)
 		var e *slackapi.Error
 		switch {
 		case errors.As(err, &e) && e.Code == "ratelimited":
-			fmt.Fprintf(os.Stderr, "direct messages are held back since Slack rate limited reading %s\n", id)
+			fmt.Fprintf(os.Stderr, "direct messages wait since Slack rate limited reading %s\n", id)
 			return out
 		case err != nil:
-			fmt.Fprintf(os.Stderr, "direct messages are held back since %s could not be read: %v\n", id, err)
+			fmt.Fprintf(os.Stderr, "direct messages of %s wait since they could not be read: %v\n", id, err)
 			continue
 		case truncated:
 			fmt.Fprintf(os.Stderr, "%s had more than %d messages since the last check and the older ones are skipped\n", id, slackapi.MaxPages*100)
 		}
 		for _, m := range msgs {
+			if !tsLess(oldest, m.Ts) {
+				continue
+			}
 			m.Channel.Id = id
 			out = append(out, m)
+			if tsLess(r.Last, m.Ts) {
+				r.Last = m.Ts
+			}
 		}
-		read[id] = c.now.Unix()
+		r.Read = c.now.Add(-readOverlap).Unix()
+		read[id] = r
 	}
 	return out
 }
@@ -541,22 +625,20 @@ type slackAt struct {
 	thread string
 }
 
-var (
-	slackLinkRe   = regexp.MustCompile(`^https://[\w-]+\.slack\.com/archives/([A-Z0-9]+)/p(\d{10})(\d{6})`)
-	slackThreadRe = regexp.MustCompile(`[?&]thread_ts=(\d+\.\d+)`)
-)
-
 func parseSlackLink(link string) (slackAt, error) {
-	m := slackLinkRe.FindStringSubmatch(link)
-	if m == nil {
+	l, ok := dest.ParseLink(link)
+	if !ok || l.Source != dest.Slack {
 		return slackAt{}, fmt.Errorf("%w: not a Slack message link %q", errUsage, link)
 	}
-	at := slackAt{channel: m[1], ts: m[2] + "." + m[3]}
-	at.thread = at.ts
-	if t := slackThreadRe.FindStringSubmatch(link); t != nil {
-		at.thread = t[1]
+	return slackAt{channel: l.Channel, ts: l.Ts, thread: l.ThreadTs}, nil
+}
+
+// The key the watcher files a Slack message under
+func slackThread(channel, thread string, direct bool) string {
+	if direct {
+		return dest.SlackDirectThread(channel)
 	}
-	return at, nil
+	return dest.Link{Source: dest.Slack, Channel: channel, ThreadTs: thread}.Thread()
 }
 
 // Users looked up in this run and the day before

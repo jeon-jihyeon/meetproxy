@@ -4,6 +4,40 @@ All notable changes to meetproxy are listed here. The format follows [Keep a Cha
 
 A release that raises the protocol between the binary and the watcher needs `/reload-plugins` in every open session, or a restart of it. Until then the old watcher stops and says so instead of misreading the new binary.
 
+## [0.1.10] - 2026-10-08
+
+Protocol 10. Sessions need `/reload-plugins`.
+
+### Added
+
+- Requests you answered by hand, on another machine, or that a coworker answered close on their own
+- A session that crashes gives its requests back within three minutes instead of a day
+- `/meetproxy:inbox` lists the newest requests first and can filter by source or delegation
+- Without a Slack token, a reply to a question in Slack reopens the request when you open the inbox
+- Builds for Windows
+
+### Changed
+
+- GitHub is read and written by the binary, the same way Slack is with a token
+- A Slack direct message conversation is one request until it is done, and one GitHub review thread is one request
+- A new message in a thread updates what the request asks for, so a question on a reviewed pull request is answered, not reviewed again
+- Hooks skip at once in every session that is not handling a request, and the minute check starts fewer processes, rereads less and makes fewer Slack and GitHub calls
+- A lease handover no longer triages the same messages twice
+
+### Fixed
+
+- Choosing not to send a reply while handling a request keeps the request instead of closing it
+- Messages of a delegated channel read through the Slack connector keep their first lines
+
+### Removed
+
+- The location map, `meetproxy locate`, `meetproxy correct` and the PostToolUse path hook
+- Stored prompt text and place aliases in the work map
+
+### Security
+
+- While a request is handled, network writes through `curl`, `wget`, httpie or `xh` to hosts other than the Slack and GitHub APIs are denied, and so is the PowerShell tool
+
 ## [0.1.9] - 2026-10-07
 
 Protocol 9. Sessions need `/reload-plugins`.
@@ -159,10 +193,12 @@ Protocol 6.
 - Posting guard as a PreToolUse hook, with `/meetproxy:allow` for other destinations
 - Launcher that runs the binary from a cache, a checksum verified release or `go install`
 
-[0.1.8]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...HEAD
-[0.1.7]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...HEAD
-[0.1.6]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...HEAD
-[0.1.5]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...HEAD
+[0.1.10]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.9...v0.1.10
+[0.1.9]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.9
+[0.1.8]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.9
+[0.1.7]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.9
+[0.1.6]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.9
+[0.1.5]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.9
 [0.1.4]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.1...v0.1.2

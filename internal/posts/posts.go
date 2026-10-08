@@ -173,10 +173,17 @@ func (s Store) Retract(reply string, now time.Time) (Post, error) {
 	return p, s.append(p)
 }
 
-// Whether the request has a post that was not retracted
-func (s Store) Posted(request string) (bool, error) {
+// Ids of the requests with a post that was not retracted
+// One read of the ledger answers for every request
+func (s Store) Answered() (map[string]bool, error) {
 	all, err := s.all()
-	return slices.ContainsFunc(all, func(p Post) bool { return p.Request == request && p.RetractedAt.IsZero() }), err
+	out := map[string]bool{}
+	for _, p := range all {
+		if p.RetractedAt.IsZero() {
+			out[p.Request] = true
+		}
+	}
+	return out, err
 }
 
 // Threads still watched oldest first

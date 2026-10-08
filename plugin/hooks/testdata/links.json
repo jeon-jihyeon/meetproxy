@@ -1,0 +1,99 @@
+[
+  {
+    "name": "Slack message at the top of a channel",
+    "link": "https://acme.slack.com/archives/C01AB2CD3/p1893456100000001",
+    "source": "slack", "channel": "C01AB2CD3", "ts": "1893456100.000001", "thread_ts": "1893456100.000001",
+    "thread": "slack:C01AB2CD3:1893456100.000001"
+  },
+  {
+    "name": "Slack reply in a thread",
+    "link": "https://acme.slack.com/archives/C01AB2CD3/p1893456200000002?thread_ts=1893456100.000001&cid=C01AB2CD3",
+    "source": "slack", "channel": "C01AB2CD3", "ts": "1893456200.000002", "thread_ts": "1893456100.000001",
+    "thread": "slack:C01AB2CD3:1893456100.000001"
+  },
+  {
+    "name": "Slack workspace host with a dash",
+    "link": "https://acme-corp.slack.com/archives/G0PRIVATE/p1893456100000001",
+    "source": "slack", "channel": "G0PRIVATE", "ts": "1893456100.000001", "thread_ts": "1893456100.000001",
+    "thread": "slack:G0PRIVATE:1893456100.000001"
+  },
+  {
+    "name": "Slack direct message is one request per conversation",
+    "link": "https://acme.slack.com/archives/D0DIRECT1/p1893456100000001",
+    "source": "slack", "channel": "D0DIRECT1", "ts": "1893456100.000001", "thread_ts": "1893456100.000001",
+    "thread": "slack:D0DIRECT1"
+  },
+  {
+    "name": "Slack direct message reply in a thread keeps the conversation key",
+    "link": "https://acme.slack.com/archives/D0DIRECT1/p1893456200000002?thread_ts=1893456100.000001&cid=D0DIRECT1",
+    "source": "slack", "channel": "D0DIRECT1", "ts": "1893456200.000002", "thread_ts": "1893456100.000001",
+    "thread": "slack:D0DIRECT1"
+  },
+  {
+    "name": "Slack channel link without a message",
+    "link": "https://acme.slack.com/archives/C01AB2CD3",
+    "source": ""
+  },
+  {
+    "name": "Slack message over plain http",
+    "link": "http://acme.slack.com/archives/C01AB2CD3/p1893456100000001",
+    "source": ""
+  },
+  {
+    "name": "GitHub pull request",
+    "link": "https://github.com/acme/api/pull/42",
+    "source": "github", "repo": "acme/api", "number": 42, "pull": true,
+    "thread": "github:acme/api#42"
+  },
+  {
+    "name": "GitHub issue",
+    "link": "https://github.com/acme/api.go/issues/7",
+    "source": "github", "repo": "acme/api.go", "number": 7,
+    "thread": "github:acme/api.go#7"
+  },
+  {
+    "name": "GitHub issue comment",
+    "link": "https://github.com/acme/api/issues/7#issuecomment-1001",
+    "source": "github", "repo": "acme/api", "number": 7, "comment": "1001",
+    "thread": "github:acme/api#7"
+  },
+  {
+    "name": "GitHub comment on a pull request conversation",
+    "link": "https://github.com/acme/api/pull/42#issuecomment-1002",
+    "source": "github", "repo": "acme/api", "number": 42, "pull": true, "comment": "1002",
+    "thread": "github:acme/api#42"
+  },
+  {
+    "name": "GitHub review comment",
+    "link": "https://github.com/acme/api/pull/42#discussion_r2001",
+    "source": "github", "repo": "acme/api", "number": 42, "pull": true, "discussion": "2001",
+    "thread": "github:acme/api#42:2001"
+  },
+  {
+    "name": "GitHub review comment seen in the files tab",
+    "link": "https://github.com/acme/api/pull/42/files#discussion_r2001",
+    "source": "github", "repo": "acme/api", "number": 42, "pull": true, "discussion": "2001",
+    "thread": "github:acme/api#42:2001"
+  },
+  {
+    "name": "GitHub review is the pull request",
+    "link": "https://github.com/acme/api/pull/42#pullrequestreview-3001",
+    "source": "github", "repo": "acme/api", "number": 42, "pull": true,
+    "thread": "github:acme/api#42"
+  },
+  {
+    "name": "GitHub repository",
+    "link": "https://github.com/acme/api",
+    "source": ""
+  },
+  {
+    "name": "GitHub file",
+    "link": "https://github.com/acme/api/blob/main/pull/1",
+    "source": ""
+  },
+  {
+    "name": "Another host",
+    "link": "https://gitlab.com/acme/api/-/issues/7",
+    "source": ""
+  }
+]

@@ -26,13 +26,13 @@ var (
 	feeders = map[string]bool{"xargs": true, "parallel": true}
 	shells  = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true}
 	// Interpreters whose inline program the guard cannot read
-	interpreter = regexp.MustCompile(`^(?:python[\d.]*|node|ruby|perl|osascript)$`)
+	interpreter = regexp.MustCompile(`(?i)^(?:python[\d.]*|node|ruby|perl|osascript|pwsh|powershell)(?:\.exe)?$`)
 	// Words that stand for themselves although they hold a character expansion uses
 	plainWords = map[string]bool{"{": true, "}": true, "[": true, "[[": true}
 	// meetproxy commands that change what is taken or where posts may go
 	settings = map[string]bool{
 		"allow": true, "resume": true, "delegation put": true, "delegation remove": true,
-		"inbox take": true, "inbox claim": true, "inbox add": true, "inbox advance": true,
+		"inbox take": true, "inbox add": true, "inbox advance": true,
 		"slack token": true, "hook": true,
 	}
 	// Commands that remove, move or rewrite the files they name
@@ -157,7 +157,13 @@ func shortFlag(w, letters string) bool {
 }
 
 func inline(w string) bool {
-	return shortFlag(w, "cep") || w == "--eval" || w == "--print"
+	return shortFlag(w, "cep") || w == "--eval" || w == "--print" || psParam(w, "-command", "-encodedcommand")
+}
+
+// PowerShell takes a parameter in any case and by any prefix of its name
+func psParam(w string, names ...string) bool {
+	l := strings.ToLower(w)
+	return len(l) > 1 && slices.ContainsFunc(names, func(n string) bool { return strings.HasPrefix(n, l) })
 }
 
 // Every word whose base name is gh or meetproxy starts a call whatever wrapper comes before it
@@ -169,6 +175,9 @@ func (s *scan) command(c shell.Command) error {
 		return nil
 	}
 	if err := opaque(c); err != nil {
+		return err
+	}
+	if err := netWrite(c); err != nil {
 		return err
 	}
 	if i := slices.IndexFunc(c.Args, isMeetproxy); i >= 0 {
