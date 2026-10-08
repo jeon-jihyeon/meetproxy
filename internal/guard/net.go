@@ -1,19 +1,27 @@
 package guard
 
 import (
-	"cmp"
 	"net/url"
 	"slices"
 	"strings"
 
+	"github.com/jeon-jihyeon/meetproxy/internal/dest"
 	"github.com/jeon-jihyeon/meetproxy/internal/shell"
 )
 
+// What the words after an HTTP program ask for
+type request struct {
+	writes bool
+	urls   []string
+	// A flag that sends the request through a place the URL does not name and empty when none does
+	route string
+}
+
 var (
-	// Programs that send HTTP requests and whether the words after them write
-	// A write to the Slack or GitHub API is already denied as a direct API call so any other write is one the guard cannot place
-	netTools = map[string]func(args []string, stdin string) bool{
-		"curl": curlWrites, "wget": wgetWrites, "http": httpieWrites, "https": httpieWrites, "xh": httpieWrites, "xhs": httpieWrites,
+	// Programs that send HTTP requests and how their words read
+	// A write to the Slack or GitHub API is already denied as a direct API call
+	netTools = map[string]func(args []string, stdin string) request{
+		"curl": curlRequest, "wget": wgetRequest, "http": httpieRequest, "https": httpieRequest, "xh": httpieRequest, "xhs": httpieRequest,
 	}
 	readMethods = map[string]bool{"GET": true, "HEAD": true, "OPTIONS": true}
 	// Methods httpie and xh take as their first positional word
@@ -21,42 +29,130 @@ var (
 		"GET": true, "HEAD": true, "OPTIONS": true, "POST": true, "PUT": true, "PATCH": true, "DELETE": true,
 	}
 	// Short curl flags that take a value so the rest of a cluster such as -oout is that value
-	curlValued = "AbcCDeEHKmoPQrtuUwxXyYz"
+	curlValued = "AbcCdDeEFHKmoPQrtTuUwxXyYz"
+	// Long curl flags that take a value so the next word is no URL
+	curlLongValued = toSet("--data", "--data-ascii", "--data-binary", "--data-raw", "--data-urlencode", "--json",
+		"--form", "--form-string", "--url", "--request", "--upload-file", "--config", "--resolve", "--connect-to",
+		"--proxy", "--preproxy", "--socks4", "--socks4a", "--socks5", "--socks5-hostname", "--unix-socket",
+		"--abstract-unix-socket", "--doh-url", "--output", "--output-dir", "--header", "--user", "--user-agent",
+		"--referer", "--cookie", "--cookie-jar", "--cert", "--key", "--cacert", "--capath", "--max-time",
+		"--connect-timeout", "--retry", "--retry-delay", "--retry-max-time", "--write-out", "--range", "--limit-rate",
+		"--proxy-user", "--oauth2-bearer", "--interface", "--dump-header", "--trace", "--trace-ascii", "--stderr",
+		"--max-filesize", "--variable", "--url-query", "--aws-sigv4", "--max-redirs", "--proto", "--proto-redir",
+		"--netrc-file", "--dns-servers", "--local-port")
+	// curl flags that send a request somewhere its URL does not say
+	curlRoutes = toSet("--resolve", "--connect-to", "--proxy", "--preproxy", "--socks4", "--socks4a", "--socks5",
+		"--socks5-hostname", "--unix-socket", "--abstract-unix-socket", "--doh-url", "--config")
+	// Short wget flags that take a value
+	wgetValued = "aABDeIiloOPQRtTUwX"
+	// Long wget flags that take a value when no = joins it
+	wgetLongValued = toSet("--post-data", "--post-file", "--body-data", "--body-file", "--method", "--header",
+		"--output-document", "--output-file", "--append-output", "--user", "--password", "--http-user",
+		"--http-password", "--user-agent", "--referer", "--execute", "--input-file", "--directory-prefix", "--tries",
+		"--timeout", "--wait", "--quota", "--level", "--accept", "--reject", "--domains", "--config",
+		"--load-cookies", "--save-cookies", "--ca-certificate", "--certificate", "--private-key", "--bind-address")
+	// Long httpie and xh flags that take a value when no = joins it
+	httpieLongValued = toSet("--auth", "--auth-type", "--output", "--session", "--session-read-only", "--verify",
+		"--cert", "--cert-key", "--cert-key-pass", "--ssl", "--ciphers", "--timeout", "--max-redirects", "--pretty",
+		"--style", "--print", "--format-options", "--boundary", "--response-charset", "--response-mime",
+		"--default-scheme", "--raw", "--proxy")
+	// Short httpie and xh flags that take a value
+	httpieValued = "aAops"
+	// Programs that open a connection to any host and port
+	rawSockets = toSet("nc", "ncat", "netcat", "socat", "telnet")
+	// Programs that copy files to another host
+	remoteCopies = toSet("scp", "rsync", "sftp")
 )
+
+func toSet(words ...string) map[string]bool {
+	out := make(map[string]bool, len(words))
+	for _, w := range words {
+		out[w] = true
+	}
+	return out
+}
 
 func isNetTool(w string) bool { return netTools[netName(w)] != nil }
 
 // Windows names the same programs with .exe
 func netName(w string) string { return strings.TrimSuffix(base(w), ".exe") }
 
-// A request that sends data or names a method that writes
+// A request that sends data or names a method that writes posts to the host of every URL it names
+// 1. A URL the guard cannot place such as one holding a variable is unknown
+// 2. A request routed through a proxy, a resolve rule, a socket or a config file is unknown
 // Every word naming such a program starts a call whatever wrapper comes before it
-func netWrite(c shell.Command) error {
+func netWrite(c shell.Command, proxied bool) ([]Post, error) {
 	i := slices.IndexFunc(c.Args, isNetTool)
 	if i < 0 {
-		return nil
+		return nil, nil
 	}
 	tool := netName(c.Args[i])
-	if !netTools[tool](c.Args[i+1:], c.Stdin) {
-		return nil
+	r := netTools[tool](c.Args[i+1:], c.Stdin)
+	switch {
+	case !r.writes:
+		return nil, nil
+	case r.route != "":
+		return nil, unknown("a " + tool + " write through " + r.route)
+	case proxied || slices.ContainsFunc(c.Args[:i], proxyVar.MatchString) || hasProxyEnv(c.Env):
+		return nil, unknown("a " + tool + " write through a proxy")
+	case len(r.urls) == 0:
+		return nil, unknown("a " + tool + " write to a host the guard cannot place")
 	}
-	if h := host(c.Args[i+1:]); h != "" {
-		return unknown("a " + tool + " write to " + h)
+	var posts []Post
+	for _, u := range r.urls {
+		loc, ok := dest.Parse(dest.HTTPS + ":" + urlHost(u))
+		if !ok {
+			return nil, unknown("a " + tool + " write to a host the guard cannot place")
+		}
+		posts = append(posts, Post{At: loc})
 	}
-	return unknown("a " + tool + " write to a host the guard cannot place")
+	return posts, nil
+}
+
+func hasProxyEnv(env map[string]string) bool {
+	for k := range env {
+		if strings.HasSuffix(strings.ToLower(k), "_proxy") {
+			return true
+		}
+	}
+	return false
+}
+
+// The host of a URL in lower case without its port and empty when the guard cannot tell it
+// A variable, a glob or a brace may name any host so it is never read
+func urlHost(raw string) string {
+	if strings.ContainsAny(raw, "$`{}[]*?") {
+		return ""
+	}
+	if strings.HasPrefix(raw, ":") {
+		raw = "localhost" + raw
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
 }
 
 func writeMethod(m string) bool { return m != "" && !readMethods[strings.ToUpper(m)] }
 
-// The host of the first link among the words or empty when none names one
-func host(args []string) string {
-	for _, w := range args {
-		if !strings.Contains(w, "://") {
-			continue
-		}
-		if u, err := url.Parse(w); err == nil && u.Host != "" {
-			return u.Host
-		}
+// The words of one command line with each flag value skipped
+type words struct {
+	args []string
+	i    int
+}
+
+// The value of the flag at i joined by = or in the next word
+func (w *words) value(joined string, eq bool) string {
+	if eq {
+		return joined
+	}
+	if w.i+1 < len(w.args) {
+		w.i++
+		return w.args[w.i]
 	}
 	return ""
 }
@@ -64,123 +160,182 @@ func host(args []string) string {
 // 1. A method other than GET, HEAD or OPTIONS
 // 2. Data unless -G sends it as a query
 // 3. A form, an upload or options read from a config file
-func curlWrites(args []string, _ string) bool {
-	var method string
-	data, get := false, false
-	for i, w := range args {
-		var m string
-		var d, g, writes bool
+// URLs are the positional words and the values of --url
+func curlRequest(args []string, _ string) request {
+	var c curl
+	ws := words{args: args}
+	for ; ws.i < len(args); ws.i++ {
+		w := args[ws.i]
 		switch {
-		case w == "-X" || w == "--request":
-			if i+1 < len(args) {
-				m = args[i+1]
-			}
+		case w == "--":
+			c.urls = append(c.urls, args[ws.i+1:]...)
+			ws.i = len(args)
 		case strings.HasPrefix(w, "--"):
-			m, d, g, writes = curlLong(w)
+			name, v, eq := strings.Cut(w, "=")
+			if curlLongValued[name] {
+				v = ws.value(v, eq)
+			}
+			c.long(name, v)
 		case len(w) > 1 && w[0] == '-':
-			m, d, g, writes = curlCluster(w[1:])
+			c.cluster(w[1:], &ws)
+		default:
+			c.urls = append(c.urls, w)
 		}
-		if writes {
-			return true
-		}
-		method, data, get = cmp.Or(m, method), data || d, get || g
 	}
-	return writeMethod(method) || (data && !get)
+	c.writes = c.writes || writeMethod(c.method) || (c.data && !c.get)
+	return c.request
 }
 
-func curlLong(w string) (method string, data, get, writes bool) {
+// A curl request while its words are read
+type curl struct {
+	request
+	method    string
+	data, get bool
+}
+
+func (c *curl) long(name, v string) {
 	switch {
-	case strings.HasPrefix(w, "--request="):
-		return strings.TrimPrefix(w, "--request="), false, false, false
-	case w == "--get":
-		return "", false, true, false
-	case strings.HasPrefix(w, "--data"), w == "--json", strings.HasPrefix(w, "--json="):
-		return "", true, false, false
-	case strings.HasPrefix(w, "--form"), strings.HasPrefix(w, "--upload-file"), strings.HasPrefix(w, "--config"):
-		return "", false, false, true
+	case name == "--url":
+		c.urls = append(c.urls, v)
+	case name == "--request":
+		c.method = v
+	case name == "--get":
+		c.get = true
+	case strings.HasPrefix(name, "--data") || name == "--json":
+		c.data = true
+	case strings.HasPrefix(name, "--form") || name == "--upload-file" || name == "--config":
+		c.writes = true
 	}
-	return "", false, false, false
+	if curlRoutes[name] {
+		c.route = name
+	}
 }
 
 // Reads a cluster of short curl flags such as -sSd until a flag that takes a value
-func curlCluster(letters string) (method string, data, get, writes bool) {
-	for i, c := range letters {
-		switch {
-		case c == 'F' || c == 'T' || c == 'K':
-			return "", false, false, true
-		case c == 'd':
-			return "", true, get, false
-		case c == 'G':
-			get = true
-		case c == 'X':
-			return letters[i+1:], false, get, false
-		case strings.ContainsRune(curlValued, c):
-			return "", false, get, false
+func (c *curl) cluster(letters string, ws *words) {
+	for i, l := range letters {
+		if l == 'G' {
+			c.get = true
+			continue
 		}
+		if !strings.ContainsRune(curlValued, l) {
+			continue
+		}
+		rest := letters[i+1:]
+		v := ws.value(rest, rest != "")
+		switch l {
+		case 'X':
+			c.method = v
+		case 'd':
+			c.data = true
+		case 'F', 'T':
+			c.writes = true
+		case 'K':
+			c.writes, c.route = true, "-K"
+		case 'x':
+			c.route = "-x"
+		}
+		return
 	}
-	return "", false, get, false
 }
 
 // Post or body data, a method that writes or startup commands that may set them
-func wgetWrites(args []string, _ string) bool {
-	for i, w := range args {
-		name, v, eq := strings.Cut(w, "=")
-		if !eq && i+1 < len(args) {
-			v = args[i+1]
-		}
-		switch name {
-		case "--post-data", "--post-file", "--body-data", "--body-file", "--config":
-			return true
-		case "--method":
-			if writeMethod(v) {
-				return true
+// URLs read from a file or a proxy set by -e cannot be placed
+func wgetRequest(args []string, _ string) request {
+	var r request
+	ws := words{args: args}
+	for ; ws.i < len(args); ws.i++ {
+		w := args[ws.i]
+		switch {
+		case w == "--":
+			r.urls = append(r.urls, args[ws.i+1:]...)
+			ws.i = len(args)
+		case strings.HasPrefix(w, "--"):
+			name, v, eq := strings.Cut(w, "=")
+			if wgetLongValued[name] {
+				v = ws.value(v, eq)
 			}
-		case "-e", "--execute":
-			if wgetrcWrites(v) {
-				return true
+			r.wget(name, v)
+		case len(w) > 1 && w[0] == '-':
+			for i, c := range w[1:] {
+				if !strings.ContainsRune(wgetValued, c) {
+					continue
+				}
+				rest := w[i+2:]
+				r.wget("-"+string(c), ws.value(rest, rest != ""))
+				break
 			}
+		default:
+			r.urls = append(r.urls, w)
 		}
 	}
-	return false
+	return r
 }
 
-func wgetrcWrites(cmd string) bool {
-	c := strings.ToLower(cmd)
-	return strings.Contains(c, "post_") || strings.Contains(c, "body_") || strings.Contains(c, "method")
+func (r *request) wget(flag, v string) {
+	switch flag {
+	case "--post-data", "--post-file", "--body-data", "--body-file":
+		r.writes = true
+	case "--config":
+		r.writes, r.route = true, flag
+	case "--method":
+		r.writes = r.writes || writeMethod(v)
+	case "-i", "--input-file":
+		r.route = flag
+	case "-e", "--execute":
+		c := strings.ToLower(v)
+		r.writes = r.writes || strings.Contains(c, "post_") || strings.Contains(c, "body_") || strings.Contains(c, "method")
+		if strings.Contains(c, "proxy") {
+			r.route = flag
+		}
+	}
 }
 
 // httpie and xh take [METHOD] URL [ITEM...]
 // 1. A method that writes
 // 2. A data field such as a=b, a:=1 or a@file while headers a:b and queries a==b only read
 // 3. A form, multipart or raw body or a here document as the body
-func httpieWrites(args []string, stdin string) bool {
-	if stdin != "" {
-		return true
-	}
+func httpieRequest(args []string, stdin string) request {
+	r := request{writes: stdin != ""}
 	var pos []string
-	for i, w := range args {
-		if w == "--" {
-			pos = append(pos, args[i+1:]...)
-			break
-		}
+	ws := words{args: args}
+	for ; ws.i < len(args); ws.i++ {
+		w := args[ws.i]
 		switch {
-		case w == "-f" || w == "--form" || w == "--multipart" || strings.HasPrefix(w, "--raw"):
-			return true
+		case w == "--":
+			pos = append(pos, args[ws.i+1:]...)
+			ws.i = len(args)
 		case strings.HasPrefix(w, "-") && len(w) > 1:
+			r.httpieFlag(w, &ws)
 		default:
 			pos = append(pos, w)
 		}
 	}
 	if len(pos) > 0 && httpMethods[strings.ToUpper(pos[0])] {
-		if writeMethod(pos[0]) {
-			return true
-		}
+		r.writes = r.writes || writeMethod(pos[0])
 		pos = pos[1:]
 	}
 	if len(pos) > 0 {
-		pos = pos[1:]
+		r.urls = pos[:1]
+		r.writes = r.writes || slices.ContainsFunc(pos[1:], dataItem)
 	}
-	return slices.ContainsFunc(pos, dataItem)
+	return r
+}
+
+func (r *request) httpieFlag(w string, ws *words) {
+	name, v, eq := strings.Cut(w, "=")
+	switch {
+	case w == "-f" || w == "--form" || w == "--multipart":
+		r.writes = true
+	case httpieLongValued[name]:
+		ws.value(v, eq)
+		r.writes = r.writes || name == "--raw"
+		if name == "--proxy" {
+			r.route = name
+		}
+	case len(w) == 2 && strings.ContainsRune(httpieValued, rune(w[1])):
+		ws.value("", false)
+	}
 }
 
 // The separator found first decides what an item is
@@ -200,4 +355,47 @@ func dataItem(item string) bool {
 		return next != '='
 	}
 	return true
+}
+
+// Connections the guard cannot place
+// 1. A raw socket program or a bash /dev/tcp path opens any host and port
+// 2. sftp, and scp or rsync whose last word is HOST:PATH, copy files to another host
+func remote(c shell.Command) error {
+	if slices.ContainsFunc(slices.Concat(c.Args, c.Redirects), devSocket) {
+		return unknown("a raw socket through /dev/tcp")
+	}
+	if i := slices.IndexFunc(c.Args, isRawSocket); i >= 0 {
+		return unknown("a raw socket through " + netName(c.Args[i]))
+	}
+	i := slices.IndexFunc(c.Args, isRemoteCopy)
+	if i < 0 {
+		return nil
+	}
+	tool := netName(c.Args[i])
+	if tool == "sftp" {
+		return unknown("an sftp session")
+	}
+	last := ""
+	for _, w := range c.Args[i+1:] {
+		if !strings.HasPrefix(w, "-") {
+			last = w
+		}
+	}
+	if remotePath(last) {
+		return unknown("a " + tool + " copy to another host")
+	}
+	return nil
+}
+
+func isRawSocket(w string) bool  { return rawSockets[netName(w)] }
+func isRemoteCopy(w string) bool { return remoteCopies[netName(w)] }
+func devSocket(w string) bool {
+	return strings.Contains(w, "/dev/tcp/") || strings.Contains(w, "/dev/udp/")
+}
+func remotePath(w string) bool {
+	if strings.HasPrefix(w, "rsync://") {
+		return true
+	}
+	i := strings.IndexByte(w, ':')
+	return i > 0 && !strings.Contains(w[:i], "/")
 }

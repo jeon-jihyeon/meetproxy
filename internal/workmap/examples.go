@@ -37,7 +37,7 @@ func written(name string, input json.RawMessage, at time.Time) []draft {
 			return nil
 		}
 		var out []draft
-		cmds := shell.Commands(in.Command)
+		cmds, _ := shell.Commands(in.Command)
 		for i, c := range cmds {
 			files := messageFiles{stdin: c.Stdin, ranAt: at}
 			// A lone cat of a here document is how a session pipes a message to the next command

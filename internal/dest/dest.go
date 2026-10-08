@@ -15,12 +15,15 @@ import (
 const (
 	GitHub = "github"
 	Slack  = "slack"
+	// A host an HTTP write goes to
+	HTTPS = "https"
 )
 
 // Where a post goes written as source:name and an optional #number
 type Location struct {
 	Source string
-	// Slack channel id or GitHub owner and repository joined by a slash
+	// Slack channel id, GitHub owner and repository joined by a slash or a host
+	// A GitHub host other than github.com comes first as HOST/OWNER/REPO
 	Name string
 	// Pull request or issue number and zero for the whole repository or channel
 	Number int
@@ -44,6 +47,7 @@ func (l Location) Covers(p Location) bool {
 type source struct {
 	name string
 	// Link whose first group is the name and optional second group the number
+	// Nil for a source written only as source:name
 	link *regexp.Regexp
 	// Name in the written form
 	written *regexp.Regexp
@@ -55,8 +59,8 @@ var sources = []source{
 	{
 		GitHub,
 		regexp.MustCompile(`^https?://github\.com/([\w.-]+/[\w.-]+)(?:/(?:pull|issues)/(\d+))?`),
-		regexp.MustCompile(`^[\w.-]+/[\w.-]+$`),
-		regexp.MustCompile(`^(?:\*|[\w.*-]+/[\w.*-]+)$`),
+		regexp.MustCompile(`^(?:[\w.-]+/)?[\w.-]+/[\w.-]+$`),
+		regexp.MustCompile(`^(?:\*|(?:[\w.*-]+/)?[\w.*-]+/[\w.*-]+)$`),
 	},
 	{
 		Slack,
@@ -64,13 +68,19 @@ var sources = []source{
 		regexp.MustCompile(`^[A-Z0-9]+$`),
 		regexp.MustCompile(`^[A-Z0-9*]+$`),
 	},
+	{
+		HTTPS,
+		nil,
+		regexp.MustCompile(`^[a-z0-9.-]+$`),
+		regexp.MustCompile(`^[a-z0-9.*-]+$`),
+	},
 }
 
 // Reads a link or the written form so patterns do not depend on link shape
 func Parse(raw string) (Location, bool) {
 	raw = strings.TrimSpace(raw)
 	for _, s := range sources {
-		if m := s.link.FindStringSubmatch(raw); m != nil {
+		if m := s.linkMatch(raw); m != nil {
 			n, _ := strconv.Atoi(m[len(m)-1])
 			return Location{Source: s.name, Name: m[1], Number: n}, true
 		}
@@ -88,6 +98,13 @@ func Parse(raw string) (Location, bool) {
 	return Location{}, false
 }
 
+func (s source) linkMatch(raw string) []string {
+	if s.link == nil {
+		return nil
+	}
+	return s.link.FindStringSubmatch(raw)
+}
+
 type Allow struct{ file string }
 
 func New(dataDir string) Allow { return Allow{file: filepath.Join(dataDir, "dest.json")} }
@@ -99,7 +116,7 @@ type config struct {
 // Holds a lock so concurrent adds never drop each other
 func (a Allow) Add(pattern string) error {
 	if !validPattern(pattern) {
-		return fmt.Errorf("pattern must look like github:owner/repo or slack:CHANNEL %q", pattern)
+		return fmt.Errorf("pattern must look like github:owner/repo, slack:CHANNEL or https:host %q", pattern)
 	}
 	unlock, err := fileio.Lock(a.file + ".lock")
 	if err != nil {
@@ -116,11 +133,11 @@ func (a Allow) Add(pattern string) error {
 	return fileio.WriteJSON(a.file, config{Allow: append(ps, pattern)})
 }
 
-// A pattern that covers a whole source such as slack:* would let a request text post anywhere so it is refused
+// A pattern that covers a whole source such as slack:* or https:*.* would let a request text post anywhere so it is refused
 func validPattern(p string) bool {
 	for _, s := range sources {
 		if name, ok := strings.CutPrefix(p, s.name+":"); ok {
-			return s.pattern.MatchString(name) && strings.Trim(name, "*/") != ""
+			return s.pattern.MatchString(name) && strings.Trim(name, "*/.") != ""
 		}
 	}
 	return false

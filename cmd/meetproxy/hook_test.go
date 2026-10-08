@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -90,7 +91,7 @@ func TestRunHookGuard(t *testing.T) {
 		{"lets PowerShell run when nothing is handled", args{false, "", powershell}, ""},
 		{
 			"denies a network write while a request is handled",
-			args{true, "", bash("s1", "curl -d a=1 https://gitlab.com/api")}, "a curl write to gitlab.com",
+			args{true, "", bash("s1", "curl -d a=1 https://gitlab.com/api")}, "https:gitlab.com is not allowed",
 		},
 		{
 			"lets a network write run when nothing is handled",
@@ -141,6 +142,10 @@ func TestRunHookGuard_Scope(t *testing.T) {
 		"session_id": "s1", "tool_name": "mcp__plugin_slack_slack__slack_send_message",
 		"tool_input": map[string]any{"channel_id": "C9", "message": "m"},
 	}
+	large := map[string]any{
+		"session_id": "s1", "tool_name": "Write",
+		"tool_input": map[string]any{"file_path": "/tmp/a", "content": strings.Repeat("a", maxHookInput)},
+	}
 	queued := step{"inbox", []string{"add", link, "--target", target}, ""}
 	taken := []step{queued, {"inbox", []string{"take", id}, ""}}
 	opened := append(slices.Clone(taken), step{"open", []string{link}, ""})
@@ -173,9 +178,9 @@ func TestRunHookGuard_Scope(t *testing.T) {
 		{"denies gh in a substitution as the output file", args{taken, "", bash(`echo x > "$(gh pr comment 1 -R x/r -b hi)"`)}, "github:x/r#1"},
 		{"denies gh in a substitution as the error file", args{taken, "", bash("ls 2>$(gh pr comment 1 -R x/r -b hi)")}, "github:x/r#1"},
 		{"denies gh in a process substitution behind exec", args{taken, "", bash("exec 3> >(gh pr comment 1 -R x/r -b hi)")}, "github:x/r#1"},
-		{"denies a repository on another host", args{taken, "", bash("gh pr comment 3 -R ghe.acme.io/t/r -b hi")}, "a repository on host ghe.acme.io"},
-		{"denies GH_REPO on another host", args{taken, "", bash("GH_REPO=ghe.acme.io/t/r gh pr comment 3 -b hi")}, "a repository on host ghe.acme.io"},
-		{"denies GH_HOST of another host", args{taken, "", bash("GH_HOST=ghe.acme.io gh pr comment 3 -R t/r -b hi")}, "gh on host ghe.acme.io"},
+		{"denies a repository on another host", args{taken, "", bash("gh pr comment 3 -R ghe.acme.io/t/r -b hi")}, "github:ghe.acme.io/t/r#3 is not allowed"},
+		{"denies GH_REPO on another host", args{taken, "", bash("GH_REPO=ghe.acme.io/t/r gh pr comment 3 -b hi")}, "github:ghe.acme.io/t/r#3 is not allowed"},
+		{"denies GH_HOST of another host", args{taken, "", bash("GH_HOST=ghe.acme.io gh pr comment 3 -R t/r -b hi")}, "github:ghe.acme.io/t/r#3 is not allowed"},
 		{"allows the target on github.com by host", args{taken, "", bash("gh pr comment 3 -R github.com/t/r -b hi")}, ""},
 		{"denies meetproxy hook stop after a close in the same turn", args{closed, "", bash(`echo '{"session_id":"s1"}' | meetproxy hook stop`)}, "meetproxy hook stop changes meetproxy settings"},
 		{"denies removing the scope marker after a close in the same turn", args{closed, "", bash("rm DATA/scope/s1")}, "a file edit in the meetproxy data directory"},
@@ -184,6 +189,8 @@ func TestRunHookGuard_Scope(t *testing.T) {
 		{"lets a post go anywhere once the session of a take ended", args{taken, "end", elsewhere}, ""},
 		{"lets a post go anywhere once the session of an open relay ended", args{opened, "end", elsewhere}, ""},
 		{"keeps the scope of a take after a turn ends", args{taken, "stop", elsewhere}, "slack:C9 is not allowed"},
+		{"denies input over 4 MiB while a request is handled", args{taken, "", large}, "over 4 MiB"},
+		{"lets input over 4 MiB pass when nothing is handled", args{nil, "", large}, ""},
 		{"lets meetproxy hook stop run when nothing is handled", args{nil, "", bash(`echo '{"session_id":"s1"}' | meetproxy hook stop`)}, ""},
 	}
 	for _, tc := range tcs {
@@ -241,6 +248,28 @@ func TestRunHook_BadInput(t *testing.T) {
 		{"guard denies broken input", args{true, "guard", "{"}, want{false, "posting check failed"}},
 		{"stop hook errors without a data dir", args{false, "stop", "{}"}, want{true, ""}},
 		{"stop hook passes input without a session", args{true, "stop", "{}"}, want{false, ""}},
+		{"stop hook errors on a session id of another shape", args{true, "stop", `{"session_id":"../x"}`}, want{true, ""}},
+		{"end hook errors on another event", args{true, "end", `{"session_id":"s1","hook_event_name":"PreToolUse"}`}, want{true, ""}},
+		{
+			"guard denies a post from a session id of another shape",
+			args{true, "guard", `{"session_id":"../x","tool_name":"Bash","tool_input":{"command":"gh pr comment 1 -R o/r -b hi"}}`},
+			want{false, "unknown shape"},
+		},
+		{
+			"guard passes a non posting call from a session id of another shape",
+			args{true, "guard", `{"session_id":"../x","tool_name":"Bash","tool_input":{"command":"ls"}}`},
+			want{false, ""},
+		},
+		{
+			"guard denies a post on another event",
+			args{true, "guard", `{"session_id":"s1","hook_event_name":"Stop","tool_name":"Bash","tool_input":{"command":"gh pr comment 1 -R o/r -b hi"}}`},
+			want{false, "got a Stop event"},
+		},
+		{
+			"guard denies input over 4 MiB that names no session first",
+			args{true, "guard", `{"tool_name":"Write","tool_input":{"content":"` + strings.Repeat("a", maxHookInput) + `"}}`},
+			want{false, "over 4 MiB"},
+		},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -363,6 +392,45 @@ func TestRunHookEnd(t *testing.T) {
 			require.NoError(t, err)
 			_, err = relay.New(data).Current("s1")
 			assert.Equal(t, tc.want, want{got, it.Reason, err == nil, markers(t, data)})
+		})
+	}
+}
+
+type panicReader struct{}
+
+func (panicReader) Read([]byte) (int, error) { panic("broken input") }
+
+func TestRunHookGuard_Panic(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+
+	require.NoError(t, runHook(t.TempDir(), []string{"guard"}, time.Now(), panicReader{}, &out))
+
+	assert.Contains(t, denyReason(t, out.Bytes()), "posting check failed panic: broken input")
+}
+
+// One guard hook without a scope and one inside a take
+func BenchmarkRunHookGuard(b *testing.B) {
+	link := "https://w.slack.com/archives/C7/p1"
+	input := `{"session_id":"s1","tool_name":"Bash","tool_input":{"command":"gh pr comment 3 -R t/r -b hi && curl -d a=1 https://example.com"}}`
+	tcs := []struct {
+		name  string
+		setup []step
+	}{
+		{"no scope", nil},
+		{"taken", []step{{"inbox", []string{"add", link}, ""}, {"inbox", []string{"take", inbox.IdOf(link)}, ""}}},
+	}
+	for _, tc := range tcs {
+		b.Run(tc.name, func(b *testing.B) {
+			data := b.TempDir()
+			for _, s := range tc.setup {
+				code, err := run(s.cmd, append([]string{"--data", data}, s.args...), "s1", time.Now(), strings.NewReader(s.stdin), &bytes.Buffer{})
+				require.NoError(b, err)
+				require.Equal(b, 0, code)
+			}
+			for b.Loop() {
+				_ = runHook(data, []string{"guard"}, time.Now(), strings.NewReader(input), io.Discard)
+			}
 		})
 	}
 }

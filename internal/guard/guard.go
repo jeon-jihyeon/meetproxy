@@ -153,6 +153,9 @@ func slackPost(name string, input json.RawMessage) ([]Post, error) {
 	if !ok {
 		return nil, unknown("a Slack post without a channel")
 	}
+	if strings.Contains(name, "delete") {
+		return []Post{{At: loc, Act: ActDelete}}, nil
+	}
 	return []Post{{At: loc}}, nil
 }
 
