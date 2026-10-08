@@ -32,8 +32,20 @@ linters:
     # 1. cmd uses everything and nothing imports cmd
     # 4. any package may use fileio and shell which use no package of the module
     # 5. slackapi speaks HTTP alone and only cmd uses it
+    # 6. github runs gh, uses only dest and only cmd uses it
     depguard:
       rules:
+        github:
+          files:
+            - "**/internal/github/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/fileio
+              desc: github uses only dest
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/slackapi
+              desc: github uses only dest
+            - pkg: github.com/jeon-jihyeon/meetproxy/cmd
+              desc: nothing imports cmd
         base:
           files:
             - "**/internal/fileio/**"
@@ -43,14 +55,6 @@ linters:
           deny:
             - pkg: github.com/jeon-jihyeon/meetproxy
               desc: fileio, shell and slackapi use no package of the module
-        leaf:
-          files:
-            - "**/internal/locmap/**"
-          deny:
-            - pkg: github.com/jeon-jihyeon/meetproxy/internal/slackapi
-              desc: only cmd calls Slack
-            - pkg: github.com/jeon-jihyeon/meetproxy/cmd
-              desc: nothing imports cmd
   exclusions:
     rules:
       - path: _test\.go

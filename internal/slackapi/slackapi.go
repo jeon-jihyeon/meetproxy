@@ -115,10 +115,15 @@ type Message struct {
 	BotId    string `json:"bot_id"`
 	Username string `json:"username"`
 	Text     string `json:"text"`
+	// ts of the thread a reply sits in
+	ThreadTs string `json:"thread_ts"`
 	// Set by search alone
 	Permalink string `json:"permalink"`
-	Channel   struct {
-		Id string `json:"id"`
+	// Search sets the kind of the conversation
+	Channel struct {
+		Id     string `json:"id"`
+		IsIm   bool   `json:"is_im"`
+		IsMpim bool   `json:"is_mpim"`
 	} `json:"channel"`
 	BotProfile struct {
 		Name string `json:"name"`

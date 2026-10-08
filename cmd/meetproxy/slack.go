@@ -1,5 +1,7 @@
 package main
 
+import "github.com/jeon-jihyeon/meetproxy/internal/messageurl"
+
 import (
 	"encoding/json"
 	"errors"
@@ -160,7 +162,9 @@ func (c cli) slackMentions(after string) error {
 	users := c.users(client)
 	out := make([]slackMessage, 0, len(found))
 	for _, m := range found {
-		out = append(out, slackMessage{Author: users.name(m.User), Channel: m.Channel.Id, From: m.User, Ts: m.Ts, Link: m.Permalink, Text: m.Text})
+		out = append(out, slackMessage{
+			Author: users.name(m.User), Channel: m.Channel.Id, From: m.User, Ts: m.Ts, Link: m.Permalink, Text: m.Text,
+		})
 	}
 	return c.encodeMessages(out, users)
 }
@@ -368,22 +372,12 @@ type slackAt struct {
 	thread string
 }
 
-var (
-	slackLinkRe   = regexp.MustCompile(`^https://[\w-]+\.slack\.com/archives/([A-Z0-9]+)/p(\d{10})(\d{6})`)
-	slackThreadRe = regexp.MustCompile(`[?&]thread_ts=(\d+\.\d+)`)
-)
-
 func parseSlackLink(link string) (slackAt, error) {
-	m := slackLinkRe.FindStringSubmatch(link)
-	if m == nil {
+	l, ok := messageurl.ParseLink(link)
+	if !ok || l.Source != messageurl.Slack {
 		return slackAt{}, fmt.Errorf("%w: not a Slack message link %q", errUsage, link)
 	}
-	at := slackAt{channel: m[1], ts: m[2] + "." + m[3]}
-	at.thread = at.ts
-	if t := slackThreadRe.FindStringSubmatch(link); t != nil {
-		at.thread = t[1]
-	}
-	return at, nil
+	return slackAt{channel: l.Channel, ts: l.Ts, thread: l.ThreadTs}, nil
 }
 
 // Users looked up in this run and the day before
