@@ -96,6 +96,9 @@ type Item struct {
 	// A newer message came while a session worked on the request
 	// The request opens again once the take settles so the message is never absorbed
 	Again bool `json:"again,omitempty"`
+	// Last heartbeat of the session that took it, zero when that session never sent one
+	// Read with the item and never stored in it
+	beat time.Time
 }
 
 // How long a question to the requester waits before it opens again
@@ -112,16 +115,59 @@ func (it Item) Unanswered(now time.Time) bool {
 }
 
 // No session works on it
-// A take kept past takeFor counts as abandoned
+// 1. A take kept past takeFor counts as abandoned
+// 2. A take whose session sent heartbeats and none for liveFor counts as abandoned since that session crashed
 func (it Item) Waiting(now time.Time) bool {
 	switch it.Status {
 	case StatusOpen, StatusHeld, StatusQuestion:
 		return true
 	case StatusTaken:
-		return now.Sub(it.UpdatedAt) >= takeFor
+		return it.expired(now) || (!it.beat.IsZero() && now.Sub(latest(it.beat, it.UpdatedAt)) >= liveFor)
 	default:
 		return false
 	}
+}
+
+// A take kept past takeFor whatever its session says
+func (it Item) expired(now time.Time) bool { return now.Sub(it.UpdatedAt) >= takeFor }
+
+func latest(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
+
+// Every request of a List no session works on, oldest first
+// 1. A take no session works on any longer shows as open since its session ended
+// 2. A question the requester left unanswered shows as open
+func Waiting(all []Item, now time.Time) []Item {
+	var out []Item
+	for i := len(all) - 1; i >= 0; i-- {
+		it := all[i]
+		if !it.Waiting(now) {
+			continue
+		}
+		switch {
+		case it.Status == StatusTaken:
+			it.Status, it.SessionId, it.Reason = StatusOpen, "", Released
+		case it.Unanswered(now):
+			it.Status, it.Reason = StatusOpen, Unanswered
+		}
+		out = append(out, it)
+	}
+	return out
+}
+
+// When the newest message was written, when the request was added if no message gave a time
+func (it Item) Last() time.Time {
+	sec, frac, _ := strings.Cut(it.Ts, ".")
+	s, err := strconv.ParseInt(sec, 10, 64)
+	if !validTs.MatchString(it.Ts) || err != nil {
+		return it.AddedAt
+	}
+	ns, _ := strconv.ParseInt((frac + "000000000")[:9], 10, 64)
+	return time.Unix(s, ns).UTC()
 }
 
 // Whether the list offers it to the user now
@@ -185,16 +231,16 @@ var (
 	ErrDuplicate = errors.New("the same request was queued moments ago")
 )
 
-func (s Store) Add(it Item, now time.Time) (Item, bool, error) {
-	return s.AddLimited(it, Limits{}, now)
-}
-
 // Returns false with the stored item when the thread was seen before
 //  1. A message newer than the stored one moves the author and the summary to it
-//     The link stays the first one so a relay opened with it still finds the request
-//  2. A done, held or question request asked again opens again and returns true
-//  3. A taken request asked again opens again once its take settles
-//  4. A new thread past the limits of its delegation fails with ErrLimited or ErrDuplicate counted under the lock
+//  2. An open request asked again also takes the task of the newer message since it is the request now
+//  3. A done, held or question request asked again opens again as the newer message asks and returns true
+//     A done one also moves its link to the newer message so the reply goes there
+//     Any other keeps the first link so a relay opened with it still finds the request
+//  4. A taken request keeps its task and opens again once its take settles
+//  5. A new thread past the limits of its delegation fails with ErrLimited or ErrDuplicate counted under the lock
+//
+// Only the file of the request is read so adding never costs more as the inbox grows
 func (s Store) AddLimited(it Item, lim Limits, now time.Time) (Item, bool, error) {
 	if s.Paused() {
 		return Item{}, false, ErrPaused
@@ -207,7 +253,6 @@ func (s Store) AddLimited(it Item, lim Limits, now time.Time) (Item, bool, error
 		return Item{}, false, err
 	}
 	defer unlock()
-	s.prune(now)
 	it.Id, it.Status = IdOf(it.key()), StatusOpen
 	it.AddedAt, it.UpdatedAt = now.UTC(), now.UTC()
 	seen, err := s.Get(it.Id)
@@ -220,52 +265,88 @@ func (s Store) AddLimited(it Item, lim Limits, now time.Time) (Item, bool, error
 	default:
 		seen.Ts, seen.From, seen.Author, seen.Summary = it.Ts, it.From, it.Author, it.Summary
 		seen.Followup, seen.Correction = it.Followup, it.Correction
-		switch seen.Status {
-		case StatusOpen:
-			return seen, false, s.put(seen)
-		case StatusTaken:
+		if seen.Status == StatusTaken {
 			seen.Again = true
 			return seen, false, s.put(seen)
-		case StatusDone:
-			// A follow-up of an answered request is a new round of the same request
-			seen.Acked = nil
 		}
+		seen.Task, seen.Target, seen.MayApprove = it.Task, it.Target, it.MayApprove
+		seen.Delegation, seen.Depth = it.Delegation, it.Depth
+		if seen.Status == StatusOpen {
+			return seen, false, s.put(seen)
+		}
+		if seen.Status == StatusDone {
+			// A follow-up of an answered request is a new round of the same request
+			seen.Link, seen.Acked = it.Link, nil
+		}
+		seen.Digest = it.Digest
 		seen.Status, seen.Reason, seen.HeldUntil, seen.UpdatedAt = StatusOpen, it.Reason, time.Time{}, now.UTC()
 		return seen, true, s.put(seen)
 	}
-	if err := s.limit(it, lim, now); err != nil {
+	recent, err := s.limit(it, lim, now)
+	if err != nil {
 		return Item{}, false, err
 	}
-	return it, true, s.put(it)
+	if err := s.put(it); err != nil {
+		return Item{}, false, err
+	}
+	return it, true, recent()
 }
 
-// Counts the requests the delegation of it queued lately
+// A request a delegation with limits queued as its limits count it
+type queued struct {
+	Id     string    `json:"id"`
+	Digest string    `json:"digest,omitempty"`
+	At     time.Time `json:"at"`
+}
+
+// Counts the requests the delegation of it queued lately and returns what records it among them
+// 1. Each delegation with limits keeps only the requests it queued within its windows
+// 2. So the count reads one small file however large the inbox is
 // Callers hold the lock
-func (s Store) limit(it Item, lim Limits, now time.Time) error {
+func (s Store) limit(it Item, lim Limits, now time.Time) (record func() error, err error) {
 	if lim.PerHour <= 0 && (lim.Dedupe <= 0 || it.Digest == "") {
-		return nil
+		return func() error { return nil }, nil
 	}
-	all, err := s.List()
+	file, err := s.queuedFile(it.Delegation)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	kept := recentQueued(file, max(time.Hour, lim.Dedupe), now)
 	hour := 0
-	for _, x := range all {
-		if x.Delegation != it.Delegation || x.Id == it.Id {
-			continue
-		}
-		age := now.Sub(x.AddedAt)
-		if lim.Dedupe > 0 && it.Digest != "" && x.Digest == it.Digest && age < lim.Dedupe {
-			return ErrDuplicate
+	for _, q := range kept {
+		age := now.Sub(q.At)
+		if lim.Dedupe > 0 && it.Digest != "" && q.Digest == it.Digest && age < lim.Dedupe {
+			return nil, ErrDuplicate
 		}
 		if age < time.Hour {
 			hour++
 		}
 	}
 	if lim.PerHour > 0 && hour >= lim.PerHour {
-		return ErrLimited
+		return nil, ErrLimited
 	}
-	return nil
+	return func() error { return fileio.WriteJSON(file, append(kept, queued{it.Id, it.Digest, now.UTC()})) }, nil
+}
+
+// The records of the file within window
+// A file that cannot be read starts over since it only counts
+func recentQueued(file string, window time.Duration, now time.Time) []queued {
+	var all []queued
+	if found, err := fileio.ReadJSON(file, &all); !found || err != nil {
+		return nil
+	}
+	return slices.DeleteFunc(all, func(q queued) bool { return now.Sub(q.At) >= window })
+}
+
+// The default delegation has an empty id
+func (s Store) queuedFile(delegation string) (string, error) {
+	if delegation == "" {
+		delegation = "default"
+	}
+	if !validKey.MatchString(delegation) {
+		return "", fmt.Errorf("delegation must be lowercase letters, digits and dashes %q", delegation)
+	}
+	return filepath.Join(s.dir, "queued-"+delegation+".json"), nil
 }
 
 func (s Store) Get(id string) (Item, error) {
@@ -284,6 +365,9 @@ func (s Store) Get(id string) (Item, error) {
 	}
 	if slices.Contains(legacyOpen, it.Status) {
 		it.Status = StatusOpen
+	}
+	if it.Status == StatusTaken {
+		it.beat = s.beatOf(it.SessionId)
 	}
 	return it, nil
 }
@@ -321,48 +405,83 @@ func (s Store) List() ([]Item, error) {
 	return out, nil
 }
 
-// Every request no session works on, oldest first
-// 1. A take kept past takeFor shows as open since its session no longer works on it
-// 2. A question the requester left unanswered shows as open
-func (s Store) Waiting(now time.Time) ([]Item, error) {
+// Removes done requests past keepDone and heartbeats past keepBeat
+// 1. Runs under the lock so a request asked again is never removed
+// 2. Removing is best effort since a leftover file only takes space
+func (s Store) Prune(now time.Time) error {
+	unlock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	all, err := s.List()
 	if err != nil {
-		return nil, err
-	}
-	var out []Item
-	for i := len(all) - 1; i >= 0; i-- {
-		it := all[i]
-		if !it.Waiting(now) {
-			continue
-		}
-		switch {
-		case it.Status == StatusTaken:
-			it.Status, it.SessionId, it.Reason = StatusOpen, "", Released
-		case it.Unanswered(now):
-			it.Status, it.Reason = StatusOpen, Unanswered
-		}
-		out = append(out, it)
-	}
-	return out, nil
-}
-
-// Best effort since a leftover done request only takes space
-// Runs under the lock so a request asked again is never removed
-func (s Store) prune(now time.Time) {
-	all, err := s.List()
-	if err != nil {
-		return
+		return err
 	}
 	for _, it := range all {
 		if it.Status == StatusDone && now.Sub(it.UpdatedAt) > keepDone {
 			_ = os.Remove(s.itemFile(it.Id))
 		}
 	}
+	entries, err := os.ReadDir(s.beatDir())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	for _, e := range entries {
+		file := filepath.Join(s.beatDir(), e.Name())
+		if now.Sub(s.readBeat(file)) > keepBeat {
+			_ = os.Remove(file)
+		}
+	}
+	return nil
 }
 
-// A take still unsettled after this opens again
-// A session that ended gives its takes back at once so this only catches one that crashed
-const takeFor = 24 * time.Hour
+const (
+	// A take still unsettled after this opens again
+	// A session that ended gives its takes back at once so this only catches one that crashed with no heartbeat
+	takeFor = 24 * time.Hour
+	// Three ticks of the mod so one slow tick never gives a take away
+	liveFor  = 3 * time.Minute
+	keepBeat = 24 * time.Hour
+)
+
+// Records that the session still runs
+// Each session sends one a tick so a take of a session that crashed opens again within liveFor
+func (s Store) Beat(sessionId string, now time.Time) error {
+	if sessionId == "" {
+		return errors.New("a heartbeat needs a session id")
+	}
+	return fileio.WriteAtomic(s.beatFile(sessionId), []byte(strconv.FormatInt(now.Unix(), 10)), 0o600)
+}
+
+// Zero when the session never sent a heartbeat
+func (s Store) beatOf(sessionId string) time.Time {
+	if sessionId == "" {
+		return time.Time{}
+	}
+	return s.readBeat(s.beatFile(sessionId))
+}
+
+// A heartbeat that cannot be read counts as none so the take keeps the takeFor rule
+func (s Store) readBeat(file string) time.Time {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return time.Time{}
+	}
+	sec, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0)
+}
+
+var unsafeName = regexp.MustCompile(`[^A-Za-z0-9_-]`)
+
+func (s Store) beatDir() string { return filepath.Join(s.dir, "beat") }
+
+func (s Store) beatFile(sessionId string) string {
+	return filepath.Join(s.beatDir(), unsafeName.ReplaceAllString(sessionId, "-"))
+}
 
 // Requests nobody took are closed after these
 const (
@@ -371,13 +490,15 @@ const (
 )
 
 // The request the session took and still works on
+// Only takeFor ends it here since a session asking still runs whatever its heartbeat says
+// So a heartbeat that stopped never lifts the guard of a session that handles a request
 func (s Store) TakenBy(sessionId string, now time.Time) (Item, bool, error) {
 	all, err := s.List()
 	if err != nil {
 		return Item{}, false, err
 	}
 	for _, it := range all {
-		if it.Status == StatusTaken && it.SessionId == sessionId && !it.Waiting(now) {
+		if it.Status == StatusTaken && it.SessionId == sessionId && !it.expired(now) {
 			return it, true, nil
 		}
 	}
@@ -546,6 +667,31 @@ func (s Store) ByOrigin(origin string) (Item, error) {
 	return s.Get(IdOf(origin))
 }
 
+// Whether a message was read before such as by the session that held the lease of its source until now
+// 1. The request of its thread already has a message at ts or newer
+// 2. The ignored list has its link
+// The thread falls back to the link as a request without a thread is keyed by it
+func (s Store) Known(thread, link, ts string, now time.Time) (bool, error) {
+	if ts != "" && !validTs.MatchString(ts) {
+		return false, fmt.Errorf("timestamp must be unix seconds %q", ts)
+	}
+	key := cmp.Or(thread, link)
+	if key != "" && ts != "" {
+		it, err := s.Get(IdOf(key))
+		switch {
+		case err == nil && !newer(ts, it.Ts):
+			return true, nil
+		case err != nil && !errors.Is(err, ErrNotFound):
+			return false, err
+		}
+	}
+	if link == "" {
+		return false, nil
+	}
+	ignored, err := s.IgnoredSince(now, 0)
+	return slices.ContainsFunc(ignored, func(r Ignored) bool { return r.Link == link }), err
+}
+
 // Unix seconds of the newest message checked under a key such as a delegation id
 // The first read starts the key at now so nothing before it is ever read and nothing after it is skipped
 func (s Store) Cursor(key string, now time.Time) (string, error) {
@@ -693,9 +839,28 @@ func (s Store) Expire(now time.Time) (int, error) {
 }
 
 // Which session reads a source until when
-type lease struct {
+type Lease struct {
 	Session string    `json:"session"`
 	Until   time.Time `json:"until"`
+}
+
+// The leases that still last by source
+// Read without the lock since each lease file is replaced whole
+func (s Store) Leases(now time.Time) (map[string]Lease, error) {
+	files, err := filepath.Glob(filepath.Join(s.dir, "lease-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]Lease{}
+	for _, file := range files {
+		var l Lease
+		if found, err := fileio.ReadJSON(file, &l); !found || err != nil || !l.Until.After(now) {
+			continue
+		}
+		source := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(file), "lease-"), ".json")
+		out[source] = l
+	}
+	return out, nil
 }
 
 // Holds the lease of a source for ttl and reports false while another session holds it
@@ -711,11 +876,11 @@ func (s Store) Lease(source, sessionId string, ttl time.Duration, now time.Time)
 		return false, err
 	}
 	defer unlock()
-	var cur lease
+	var cur Lease
 	if _, err := fileio.ReadJSON(file, &cur); err == nil && cur.Session != sessionId && cur.Until.After(now) {
 		return false, nil
 	}
-	return true, fileio.WriteJSON(file, lease{sessionId, now.Add(ttl).UTC()})
+	return true, fileio.WriteJSON(file, Lease{sessionId, now.Add(ttl).UTC()})
 }
 
 // Gives up the lease so another session can read the source at once
@@ -730,7 +895,7 @@ func (s Store) Drop(source, sessionId string) error {
 		return err
 	}
 	defer unlock()
-	var cur lease
+	var cur Lease
 	if found, err := fileio.ReadJSON(file, &cur); !found || (err == nil && cur.Session != sessionId) {
 		return nil
 	}

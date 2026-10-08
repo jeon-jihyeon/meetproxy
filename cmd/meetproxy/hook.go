@@ -5,19 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/jeon-jihyeon/meetproxy/internal/guard"
 	"github.com/jeon-jihyeon/meetproxy/internal/inbox"
-	"github.com/jeon-jihyeon/meetproxy/internal/locmap"
 	"github.com/jeon-jihyeon/meetproxy/internal/relay"
 )
 
 type hookInput struct {
 	SessionId string          `json:"session_id"`
-	Cwd       string          `json:"cwd"`
 	ToolName  string          `json:"tool_name"`
 	ToolInput json.RawMessage `json:"tool_input"`
 }
@@ -38,8 +35,6 @@ func runHook(data string, args []string, now time.Time, in io.Reader, out io.Wri
 
 func hook(data, name string, now time.Time, in io.Reader, out io.Writer) error {
 	switch name {
-	case "path":
-		return observePath(data, now, in)
 	case "guard":
 		return guardPost(data, now, in, out)
 	case "stop":
@@ -55,43 +50,6 @@ var (
 	errNoData    = errors.New("CLAUDE_PLUGIN_DATA is not set")
 	errNoSession = errors.New("the hook input names no session")
 )
-
-func observePath(data string, now time.Time, in io.Reader) error {
-	if data == "" {
-		return errNoData
-	}
-	// Best effort since without the directory the launcher only skips nothing
-	_ = ensureScopeDir(data, now)
-	var h hookInput
-	if err := json.NewDecoder(in).Decode(&h); err != nil {
-		return err
-	}
-	if h.SessionId == "" || len(h.ToolInput) == 0 {
-		return nil
-	}
-	var tool struct {
-		FilePath string `json:"file_path"`
-		Path     string `json:"path"`
-	}
-	if err := json.Unmarshal(h.ToolInput, &tool); err != nil {
-		return err
-	}
-	target := tool.FilePath
-	if target == "" {
-		target = tool.Path
-	}
-	if target == "" {
-		return nil
-	}
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(h.Cwd, target)
-	}
-	p, ok := locmap.ResolveIn(target, h.Cwd)
-	if !ok {
-		return nil
-	}
-	return relay.New(data).Observe(h.SessionId, p)
-}
 
 // Enforced by a hook because request text is untrusted and no person reviews the post
 // Non posting calls return before any state is read so broken state never blocks them

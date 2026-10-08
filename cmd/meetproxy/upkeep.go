@@ -7,12 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/jeon-jihyeon/meetproxy/internal/fileio"
 	"github.com/jeon-jihyeon/meetproxy/internal/inbox"
-	"github.com/jeon-jihyeon/meetproxy/internal/locmap"
 	"github.com/jeon-jihyeon/meetproxy/internal/posts"
 	"github.com/jeon-jihyeon/meetproxy/internal/relay"
 )
@@ -93,6 +91,9 @@ func readHealth(data string) health {
 	return h
 }
 
+// A record the same but for its time is rewritten only this often so a tick of every session writes nothing
+const healthEvery = 10 * time.Minute
+
 // Reads {ok, error, found} on stdin
 func (c cli) recordHealth(source string) error {
 	if !validSource.MatchString(source) {
@@ -103,7 +104,15 @@ func (c cli) recordHealth(source string) error {
 		return fmt.Errorf("%w: health must be JSON: %w", errUsage, err)
 	}
 	in.At = c.now.UTC()
+	// Read without the lock since a stale read only costs one more write
+	if cur, ok := readHealth(c.data).Sources[source]; ok && cur.sameAs(in) && c.now.Sub(cur.At) < healthEvery {
+		return nil
+	}
 	return updateHealth(c.data, func(h *health) { h.Sources[source] = in })
+}
+
+func (h sourceHealth) sameAs(o sourceHealth) bool {
+	return h.Ok == o.Ok && h.Error == o.Error && h.Found == o.Found
 }
 
 func recordHookFailure(data, hook string, failure error, now time.Time) error {
@@ -145,9 +154,7 @@ type history struct {
 }
 
 type sizes struct {
-	Map      int64 `json:"map"`
-	Closed   int64 `json:"closed"`
-	Observed int64 `json:"observed"`
+	Closed int64 `json:"closed"`
 }
 
 type status struct {
@@ -198,11 +205,7 @@ func (c cli) status() error {
 	return json.NewEncoder(c.out).Encode(status{
 		Protocol: protocol, Version: version, Paused: store.Paused(), Slack: readSlackState(c.data, true),
 		Sources: h.Sources, Hooks: h.Hooks, Inbox: counts, Held: held, History: hist, RelaysOpen: len(open),
-		Bytes: sizes{
-			Map:      size(filepath.Join(c.data, "map.jsonl")),
-			Closed:   size(filepath.Join(c.data, "relay", "closed.jsonl")),
-			Observed: dirSize(filepath.Join(c.data, "relay", "observed")),
-		},
+		Bytes: sizes{Closed: size(filepath.Join(c.data, "relay", "closed.jsonl"))},
 	})
 }
 
@@ -232,15 +235,6 @@ func size(file string) int64 {
 		return 0
 	}
 	return info.Size()
-}
-
-func dirSize(dir string) int64 {
-	entries, _ := os.ReadDir(dir)
-	var n int64
-	for _, e := range entries {
-		n += size(filepath.Join(dir, e.Name()))
-	}
-	return n
 }
 
 // When tidy last ran and whether the data tree was made private
@@ -281,7 +275,14 @@ func (c cli) tidy(daily bool) error {
 	if err != nil {
 		return err
 	}
-	compacted, err := locmap.New(c.data).Compact()
+	if err := inbox.New(c.data).Prune(c.now); err != nil {
+		return err
+	}
+	// The location map is gone and its file held request topics so it leaves too
+	err = os.Remove(filepath.Join(c.data, "map.jsonl"))
+	if errors.Is(err, os.ErrNotExist) {
+		err = nil
+	}
 	err = errors.Join(err, relay.New(c.data).Prune(c.now), pruneScope(c.data, c.now),
 		inbox.New(c.data).PruneIgnored(c.now), posts.New(c.data).Prune(c.now))
 	if err != nil {
@@ -291,10 +292,6 @@ func (c cli) tidy(daily bool) error {
 	if err := fileio.WriteJSON(file, st); err != nil {
 		return err
 	}
-	done := []string{fmt.Sprintf("%d requests expired", expired)}
-	if compacted {
-		done = append(done, "map compacted")
-	}
-	fmt.Fprintln(c.out, "tidied,", strings.Join(done, ", "))
+	fmt.Fprintf(c.out, "tidied, %d requests expired\n", expired)
 	return nil
 }

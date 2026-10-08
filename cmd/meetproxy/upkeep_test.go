@@ -91,8 +91,14 @@ func TestScopeMarkers(t *testing.T) {
 		{"nothing handled leaves no marker", []step{queued}, nil},
 		{"an open relay marks the session", []step{{"open", []string{link}, ""}}, []string{"s1"}},
 		{"a take marks the session", []step{queued, {"inbox", []string{"take", id}, ""}}, []string{"s1"}},
-		{"a close keeps the marker for the rest of the turn", []step{{"open", []string{link}, ""}, {"close", []string{"--topic", "t"}, ""}}, []string{"s1"}},
-		{"the turn that ends the scope removes the marker", []step{{"open", []string{link}, ""}, {"close", []string{"--topic", "t"}, ""}, stop}, []string{}},
+		{
+			"a close keeps the marker for the rest of the turn",
+			[]step{{"open", []string{link}, ""}, {"close", nil, ""}}, []string{"s1"},
+		},
+		{
+			"the turn that ends the scope removes the marker",
+			[]step{{"open", []string{link}, ""}, {"close", nil, ""}, stop}, []string{},
+		},
 		{"a turn that ends with the relay open keeps it", []step{{"open", []string{link}, ""}, stop}, []string{"s1"}},
 		{"a settle keeps it until the turn ends", []step{queued, {"inbox", []string{"take", id}, ""}, {"inbox", []string{"done", id}, ""}}, []string{"s1"}},
 		{"a settled take loses it with the turn", []step{queued, {"inbox", []string{"take", id}, ""}, {"inbox", []string{"done", id}, ""}, stop}, []string{}},
@@ -141,13 +147,13 @@ func TestScopeMarkers_Migration(t *testing.T) {
 	now := time.Now()
 	_, err := relay.New(data).Open("old", "https://w.slack.com/archives/C7/p1", "", now)
 	require.NoError(t, err)
-	_, _, err = inbox.New(data).Add(inbox.Item{Link: "https://w.slack.com/archives/C7/p2", Status: inbox.StatusOpen}, now)
+	_, _, err = inbox.New(data).AddLimited(inbox.Item{Link: "https://w.slack.com/archives/C7/p2"}, inbox.Limits{}, now)
 	require.NoError(t, err)
 	_, err = inbox.New(data).Take(inbox.IdOf("https://w.slack.com/archives/C7/p2"), "taker", now)
 	require.NoError(t, err)
-	input := `{"session_id":"s9","tool_name":"Read","tool_input":{"file_path":"/nowhere"}}`
+	input := `{"session_id":"s9","tool_name":"Bash","tool_input":{"command":"gh pr comment 1 -R o/r -b hi"}}`
 
-	require.NoError(t, runHook(data, []string{"path"}, now, strings.NewReader(input), &bytes.Buffer{}))
+	require.NoError(t, runHook(data, []string{"guard"}, now, strings.NewReader(input), &bytes.Buffer{}))
 
 	got := markers(t, data)
 	slices.Sort(got)
@@ -223,6 +229,10 @@ func TestScope_Take(t *testing.T) {
 		want want
 	}{
 		{"lasts an hour without a tick", args{nil, time.Hour}, want{true, []string{"s1"}}},
+		{
+			"lasts after the heartbeat of the session stops", args{[]step{{"tick", nil, ""}}, time.Hour},
+			want{true, []string{"s1"}},
+		},
 		{"lasts past turns that end", args{[]step{stop, stop}, 23 * time.Hour}, want{true, []string{"s1"}}},
 		{"ends a day after the take", args{nil, 25 * time.Hour}, want{false, []string{"s1"}}},
 		{"ends with the turn of a done", args{[]step{{"inbox", []string{"done", id}, ""}, stop}, time.Hour}, want{false, []string{}}},
@@ -249,6 +259,82 @@ func TestScope_Take(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, want{scoped, markers(t, data)})
+		})
+	}
+}
+
+// Other sessions see a take of a session whose ticks stopped as open
+func TestRun_TickHeartbeat(t *testing.T) {
+	t.Parallel()
+	link := "https://w.slack.com/archives/C1/p1"
+	tcs := []struct {
+		name  string
+		ticks []time.Duration
+		after time.Duration
+		// Statuses of the waiting rows the other session reads
+		want []inbox.Status
+	}{
+		{
+			"a take of a session that ticks stays taken", []time.Duration{time.Minute, 2 * time.Minute}, 4 * time.Minute,
+			[]inbox.Status{},
+		},
+		{
+			"a take of a session whose ticks stopped opens again", []time.Duration{time.Minute}, 5 * time.Minute,
+			[]inbox.Status{inbox.StatusOpen},
+		},
+		{"a take of a session that never ticked waits a day", nil, time.Hour, []inbox.Status{}},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			data := t.TempDir()
+			start := time.Now()
+			mustRun(t, data, "s1", start, step{"inbox", []string{"add", link}, ""})
+			mustRun(t, data, "s1", start, step{"inbox", []string{"take", inbox.IdOf(link)}, ""})
+			for _, at := range tc.ticks {
+				mustRun(t, data, "s1", start.Add(at), step{"tick", nil, ""})
+			}
+
+			out := mustRun(t, data, "s2", start.Add(tc.after), step{"tick", []string{"--session", "s2"}, ""})
+
+			var got struct {
+				Waiting []waitingRow `json:"waiting"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(out), &got))
+			statuses := []inbox.Status{}
+			for _, row := range got.Waiting {
+				statuses = append(statuses, row.Status)
+			}
+			assert.Equal(t, tc.want, statuses)
+		})
+	}
+}
+
+// A check that found the same as the last one leaves health.json alone for a while
+func TestRun_HealthUnchanged(t *testing.T) {
+	t.Parallel()
+	ok := `{"ok":true,"found":2}`
+	tcs := []struct {
+		name   string
+		second string
+		after  time.Duration
+		want   time.Duration
+	}{
+		{"the same result within ten minutes keeps the time of the first", ok, 5 * time.Minute, 0},
+		{"the same result past ten minutes is written again", ok, 11 * time.Minute, 11 * time.Minute},
+		{"another result is written at once", `{"ok":true,"found":3}`, time.Minute, time.Minute},
+		{"an error is written at once", `{"ok":false,"error":"HTTP 500","found":2}`, time.Minute, time.Minute},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			data := t.TempDir()
+			start := time.Unix(1893456000, 0)
+			mustRun(t, data, "s1", start, step{"health", []string{"slack"}, ok})
+
+			mustRun(t, data, "s1", start.Add(tc.after), step{"health", []string{"slack"}, tc.second})
+
+			assert.Equal(t, start.Add(tc.want).UTC(), readHealth(data).Sources["slack"].At)
 		})
 	}
 }

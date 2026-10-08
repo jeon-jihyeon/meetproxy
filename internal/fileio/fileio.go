@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"syscall"
 	"time"
 )
 
@@ -68,30 +67,28 @@ func ReadJSON(path string, v any) (bool, error) {
 // 1. The kernel drops the lock with the process so a crash never leaves it held
 // 2. The file stays after unlock since removing it would let a second locker lock a new file while the first still holds the old one
 func Lock(path string) (unlock func(), err error) {
-	return lock(path, syscall.LOCK_EX)
+	unlock, _, err = lock(path, true)
+	return unlock, err
 }
 
 // Takes the lock of Lock only when no one holds it
 func TryLock(path string) (unlock func(), ok bool, err error) {
-	unlock, err = lock(path, syscall.LOCK_EX|syscall.LOCK_NB)
-	if errors.Is(err, syscall.EWOULDBLOCK) {
-		return nil, false, nil
-	}
-	return unlock, err == nil, err
+	return lock(path, false)
 }
 
-func lock(path string, how int) (func(), error) {
+func lock(path string, wait bool) (func(), bool, error) {
 	if err := os.MkdirAll(filepath.Dir(path), dirPerm); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, filePerm)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if err := syscall.Flock(int(f.Fd()), how); err != nil {
-		return nil, errors.Join(err, f.Close())
+	locked, err := lockFile(f, wait)
+	if err != nil || !locked {
+		return nil, false, errors.Join(err, f.Close())
 	}
-	return func() { _ = f.Close() }, nil
+	return func() { _ = f.Close() }, true, nil
 }
 
 // Appends line and a newline in one write so lines of concurrent writers never interleave

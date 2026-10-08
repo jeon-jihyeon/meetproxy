@@ -30,12 +30,32 @@ linters:
           disabled: true
     # Imports point down only
     # 1. cmd uses everything and nothing imports cmd
-    # 2. relay and workmap use locmap
-    # 3. guard uses only dest and shell
+    # 2. guard uses only dest and shell
+    # 3. relay and workmap know nothing of posting
     # 4. any package may use fileio and shell which use no package of the module
     # 5. slackapi speaks HTTP alone and only cmd uses it
+    # 6. github runs gh, uses only dest and only cmd uses it
     depguard:
       rules:
+        github:
+          files:
+            - "**/internal/github/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/relay
+              desc: github uses only dest
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/guard
+              desc: github uses only dest
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/inbox
+              desc: github uses only dest
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/posts
+              desc: github uses only dest
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/fileio
+              desc: github uses only dest
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/slackapi
+              desc: github uses only dest
+            - pkg: github.com/jeon-jihyeon/meetproxy/cmd
+              desc: nothing imports cmd
         base:
           files:
             - "**/internal/fileio/**"
@@ -47,7 +67,6 @@ linters:
               desc: fileio, shell and slackapi use no package of the module
         leaf:
           files:
-            - "**/internal/locmap/**"
             - "**/internal/dest/**"
             - "**/internal/inbox/**"
             - "**/internal/triage/**"
@@ -62,6 +81,8 @@ linters:
               desc: leaf packages do not import workmap
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/slackapi
               desc: only cmd calls Slack
+            - pkg: github.com/jeon-jihyeon/meetproxy/internal/github
+              desc: only cmd calls GitHub
             - pkg: github.com/jeon-jihyeon/meetproxy/cmd
               desc: nothing imports cmd
         workmap:
@@ -84,8 +105,6 @@ linters:
           deny:
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/relay
               desc: guard decides from the locations it is given
-            - pkg: github.com/jeon-jihyeon/meetproxy/internal/locmap
-              desc: guard uses only dest and shell
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/inbox
               desc: guard uses only dest and shell
             - pkg: github.com/jeon-jihyeon/meetproxy/internal/triage

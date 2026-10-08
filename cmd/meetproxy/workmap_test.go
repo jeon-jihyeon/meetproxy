@@ -35,7 +35,7 @@ func TestMap(t *testing.T) {
 	repo := mapConfig(t)
 	now := time.Now()
 	refreshed := step{"map", []string{"refresh"}, ""}
-	shown := "1\tsvc\t" + repo + "\t[]\n0 skills and commands"
+	shown := "1\tsvc\t" + repo + "\n0 skills and commands"
 	for _, k := range workmap.Kinds {
 		shown += "\n" + string(k) + "\t0 guides\t0 skills\t0 examples"
 	}

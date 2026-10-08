@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/jeon-jihyeon/meetproxy/internal/locmap"
 	"github.com/jeon-jihyeon/meetproxy/internal/relay"
 )
 
@@ -23,22 +22,21 @@ func TestStoreOpen(t *testing.T) {
 		secondTarget string
 	}
 	type want struct {
-		sameId  bool
-		origin  string
-		target  string
-		saved   string
-		observe []string
+		sameId bool
+		origin string
+		target string
+		saved  string
 	}
 	tcs := []struct {
 		name string
 		args args
 		want want
 	}{
-		{"continues the same origin and keeps observations", args{"o1", "", "o1", ""}, want{true, "o1", "", "", []string{"a.go"}}},
-		{"takes a target given to the same origin", args{"o1", "", "o1", "pr"}, want{true, "o1", "pr", "pr", []string{"a.go"}}},
-		{"replaces the target of the same origin", args{"o1", "pr1", "o1", "pr2"}, want{true, "o1", "pr2", "pr2", []string{"a.go"}}},
-		{"keeps the target when none is given", args{"o1", "pr", "o1", ""}, want{true, "o1", "pr", "pr", []string{"a.go"}}},
-		{"opens a new relay for another origin", args{"o1", "pr", "o2", ""}, want{false, "o2", "", "", []string{}}},
+		{"continues the same origin", args{"o1", "", "o1", ""}, want{true, "o1", "", ""}},
+		{"takes a target given to the same origin", args{"o1", "", "o1", "pr"}, want{true, "o1", "pr", "pr"}},
+		{"replaces the target of the same origin", args{"o1", "pr1", "o1", "pr2"}, want{true, "o1", "pr2", "pr2"}},
+		{"keeps the target when none is given", args{"o1", "pr", "o1", ""}, want{true, "o1", "pr", "pr"}},
+		{"opens a new relay for another origin", args{"o1", "pr", "o2", ""}, want{false, "o2", "", ""}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -47,66 +45,12 @@ func TestStoreOpen(t *testing.T) {
 			now := time.Now()
 			first, err := s.Open("s1", tc.args.first, tc.args.firstTarget, now)
 			require.NoError(t, err)
-			require.NoError(t, s.Observe("s1", locmap.Path{Root: "/r", Rel: "a.go"}))
 
 			second, err := s.Open("s1", tc.args.second, tc.args.secondTarget, now)
 			require.NoError(t, err)
 			cur, err := s.Current("s1")
 			require.NoError(t, err)
-			ps, err := s.Observed(second.Id)
-			require.NoError(t, err)
-			got := []string{}
-			for _, p := range ps {
-				got = append(got, p.Rel)
-			}
-			assert.Equal(t, tc.want, want{first.Id == second.Id, second.Origin, second.Target, cur.Target, got})
-		})
-	}
-}
-
-func TestStoreObserve(t *testing.T) {
-	t.Parallel()
-	a := locmap.Path{Name: "svc", Root: "/r", Rel: "a.go"}
-	b := locmap.Path{Name: "svc", Root: "/r", Rel: "b.go"}
-
-	type args struct {
-		open    bool
-		observe []locmap.Path
-	}
-	type want struct {
-		observed []string
-		files    int
-	}
-	tcs := []struct {
-		name string
-		args args
-		want want
-	}{
-		{"records in order without duplicates", args{true, []locmap.Path{a, b, a}}, want{[]string{"a.go", "b.go"}, 1}},
-		{"writes nothing without an open relay", args{false, []locmap.Path{a}}, want{[]string{}, 0}},
-	}
-	for _, tc := range tcs {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			dir := t.TempDir()
-			s := relay.New(dir)
-			var id string
-			if tc.args.open {
-				r, err := s.Open("s1", "origin", "", time.Now())
-				require.NoError(t, err)
-				id = r.Id
-			}
-			for _, p := range tc.args.observe {
-				require.NoError(t, s.Observe("s1", p))
-			}
-			ps, err := s.Observed(id)
-			require.NoError(t, err)
-			got := []string{}
-			for _, p := range ps {
-				got = append(got, p.Rel)
-			}
-			files, _ := os.ReadDir(filepath.Join(dir, "relay", "observed"))
-			assert.Equal(t, tc.want, want{got, len(files)})
+			assert.Equal(t, tc.want, want{first.Id == second.Id, second.Origin, second.Target, cur.Target})
 		})
 	}
 }
@@ -193,56 +137,6 @@ func TestStoreEnded(t *testing.T) {
 	}
 }
 
-func TestStoreEvidence(t *testing.T) {
-	t.Parallel()
-	repo := filepath.Join(t.TempDir(), "svc")
-	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0o755))
-	observed := locmap.Path{Name: "svc", Root: repo, Rel: "observed.go"}
-
-	type want struct {
-		rels   []string
-		failed bool
-	}
-	tcs := []struct {
-		name string
-		raws []string
-		want want
-	}{
-		{"falls back to observed paths", nil, want{[]string{"observed.go"}, false}},
-		{"uses only given paths", []string{filepath.Join(repo, "given.go")}, want{[]string{"given.go"}, false}},
-		{"skips a path outside a repository", []string{"/nowhere/x.go", filepath.Join(repo, "given.go")}, want{[]string{"given.go"}, false}},
-		{"falls back when no path resolves", []string{"/nowhere/x.go"}, want{[]string{"observed.go"}, false}},
-	}
-	for _, tc := range tcs {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			s := relay.New(t.TempDir())
-			r, err := s.Open("s1", "origin", "", time.Now())
-			require.NoError(t, err)
-			require.NoError(t, s.Observe("s1", observed))
-
-			ps, err := s.Evidence(r.Id, tc.raws, "")
-			got := []string{}
-			for _, p := range ps {
-				got = append(got, p.Rel)
-			}
-			assert.Equal(t, tc.want, want{got, err != nil})
-		})
-	}
-}
-
-func TestStoreObserved_CorruptLine(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	file := filepath.Join(dir, "relay", "observed", "r1.jsonl")
-	require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o755))
-	require.NoError(t, os.WriteFile(file, []byte("{broken\n"), 0o644))
-
-	_, err := relay.New(dir).Observed("r1")
-
-	assert.ErrorContains(t, err, "line 1 is corrupt")
-}
-
 func TestStoreOpen_PrunesStale(t *testing.T) {
 	t.Parallel()
 	tcs := []struct {
@@ -288,15 +182,15 @@ func TestStorePrune(t *testing.T) {
 	s := relay.New(dir)
 	start := time.Now()
 	later := start.Add(31 * 24 * time.Hour)
-	p := locmap.Path{Root: "/w/svc", Rel: "a.go"}
-	done, err := s.Open("s1", "o1", "", start)
+	_, err := s.Open("s1", "o1", "", start)
 	require.NoError(t, err)
-	require.NoError(t, s.Observe("s1", p))
 	_, err = s.Close("s1", start)
 	require.NoError(t, err)
-	open, err := s.Open("s2", "o2", "", start)
+	_, err = s.Open("s2", "o2", "", start)
 	require.NoError(t, err)
-	require.NoError(t, s.Observe("s2", p))
+	observed := filepath.Join(dir, "relay", "observed", "r1.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(observed), 0o700))
+	require.NoError(t, os.WriteFile(observed, []byte(`{"rel":"a.go"}`+"\n"), 0o600))
 	// The open relay was written just now as far as the stale check goes
 	require.NoError(t, os.Chtimes(filepath.Join(dir, "relay", "open", "s2.json"), later, later))
 	closedFile := filepath.Join(dir, "relay", "closed.jsonl")
@@ -306,13 +200,10 @@ func TestStorePrune(t *testing.T) {
 
 	require.NoError(t, s.Prune(later))
 
-	gone, err := s.Observed(done.Id)
-	require.NoError(t, err)
-	kept, err := s.Observed(open.Id)
-	require.NoError(t, err)
 	b, err := os.ReadFile(closedFile)
 	require.NoError(t, err)
-	assert.Empty(t, gone)
-	assert.Equal(t, []locmap.Path{p}, kept)
+	_, cur := s.Current("s2")
+	assert.NoDirExists(t, filepath.Dir(observed))
+	assert.NoError(t, cur)
 	assert.Equal(t, recent+"\nnot json\n", string(b))
 }

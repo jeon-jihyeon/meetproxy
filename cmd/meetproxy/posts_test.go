@@ -31,7 +31,7 @@ func TestRun_Posts(t *testing.T) {
 		run  step
 		want slackWant
 	}{
-		{"the protocol is 9", step{"protocol", nil, ""}, slackWant{0, "9", false}},
+		{"the protocol is 10", step{"protocol", nil, ""}, slackWant{0, "10", false}},
 		{"a channel delegation with a limit", step{"delegation", []string{"put"}, ops}, slackWant{0, "", false}},
 		{"the first alert is queued", alert("1"), slackWant{0, inbox.IdOf(alertLink("1")) + "\topen\tnew", false}},
 		{
