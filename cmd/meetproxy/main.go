@@ -18,12 +18,12 @@ var version = "dev"
 
 // The command set the plugin mod speaks
 // Raised whenever a command the mod calls changes so an older mod stops instead of misreading
-const protocol = 9
+const protocol = 10
 
 const (
 	exitFailed = 1
 	exitUsage  = 2
-	// Results locate and inbox list print without --limit
+	// Results inbox list prints without --limit
 	defaultLimit = 10
 	// Width of the command column in the usage text
 	usageColumn = 32
@@ -40,7 +40,9 @@ func main() {
 	cmd, args := os.Args[1], os.Args[2:]
 	if cmd == "hook" {
 		// Exit 0 so a broken hook never blocks the session
-		if err := runHook(os.Getenv("CLAUDE_PLUGIN_DATA"), args, time.Now(), os.Stdin, os.Stdout); err != nil {
+		// The launcher read the head of the input to find the session and passes it on
+		in := io.MultiReader(strings.NewReader(os.Getenv("MEETPROXY_HOOK_HEAD")), os.Stdin)
+		if err := runHook(os.Getenv("CLAUDE_PLUGIN_DATA"), args, time.Now(), in, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "meetproxy hook:", err)
 		}
 		return
@@ -81,11 +83,15 @@ var families = []family{
 	{"setup", []command{
 		{name: "version", noData: true, help: "print the binary version", run: printVersion},
 		{name: "protocol", noData: true, help: "print the command set the plugin mod expects", run: printProtocol},
-		{name: "tick", help: "print the protocol, the waiting requests and Slack as JSON", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.tick()) }},
+		{
+			name: "tick", flags: []string{"session"},
+			help: "print the protocol, the waiting requests, Slack and the leases as JSON, a heartbeat of --session",
+			run:  func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.tick()) },
+		},
 		{name: "pause", help: "stop queueing and taking requests", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.pause(true)) }},
 		{name: "resume", help: "take requests again", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.pause(false)) }},
 		{name: "status", help: "print the state of every source, the inbox, Slack and the hooks as JSON", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.status()) }},
-		{name: "tidy", help: "expire old requests and prune relays, the map and markers", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.tidy(false)) }},
+		{name: "tidy", help: "expire old requests and prune done requests, heartbeats, relays, the map and markers", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.tidy(false)) }},
 		{name: "tidy daily", help: "tidy only once a day", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.tidy(true)) }},
 	}},
 	{"sources", []command{
@@ -159,6 +165,7 @@ var families = []family{
 			run: func(c cli, _ []string, f flags) (int, error) { return exitCode(c.slackSetup(f.answer)) },
 		},
 	}},
+	{"github", githubCommands},
 	{"relay", []command{
 		{
 			name: "open", args: "<origin>", least: 1, most: 1, flags: []string{"target", "session"}, session: true,
@@ -166,20 +173,13 @@ var families = []family{
 			run:  func(c cli, a []string, f flags) (int, error) { return exitCode(c.open(a[0], f.target)) },
 		},
 		{
-			name: "close", flags: []string{"topic", "keywords", "paths", "session"}, session: true,
-			help: "close the relay and record evidence paths, the observed ones without --paths",
-			run: func(c cli, _ []string, f flags) (int, error) {
-				return exitCode(c.close(f.topic, split(f.keywords), split(f.paths)))
-			},
+			name: "close", flags: []string{"session"}, session: true, help: "close the relay",
+			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.close()) },
 		},
 		{
 			name: "can-post", args: "<link>", least: 1, most: 1, flags: []string{"session"},
 			help: "check a post against the open relay of this session and the allow list",
 			run:  func(c cli, a []string, _ flags) (int, error) { return c.canPost(a[0]) },
-		},
-		{
-			name: "locate", args: "<term...>", least: 1, most: -1, flags: []string{"limit"}, help: "look up location map candidates",
-			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.locate(a, f.limit)) },
 		},
 	}},
 	{"destinations", []command{
@@ -259,10 +259,12 @@ var families = []family{
 			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.delegationRemove(a[0])) },
 		},
 		{
-			name: "delegation match", args: "<mention | review-request | dm | own-pr | id>", least: 1, most: 1, flags: []string{"followup"},
-			help: "print what the matching delegation does with a message on stdin, nothing when none matches, --followup yes picks by id",
+			name: "delegation match", args: "<mention | review-request | dm | own-pr | id>", least: 1, most: 1,
+			flags: []string{"followup", "thread", "ts"},
+			help: "print what the matching delegation does with a message on stdin, nothing when none matches, " +
+				"--followup yes picks by id, seen once the inbox read the message of --thread at --ts",
 			run: func(c cli, a []string, f flags) (int, error) {
-				return exitCode(c.delegationMatch(a[0], f.followup == "yes"))
+				return exitCode(c.delegationMatch(a[0], f.followup == "yes", f.thread, f.ts))
 			},
 		},
 	}},
@@ -287,10 +289,6 @@ var families = []family{
 		{
 			name: "watch seen", args: "<id> <ts>", least: 2, most: 2, help: "move the watch of a request past the reply at ts",
 			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.watchSeen(a[0], a[1])) },
-		},
-		{
-			name: "correct", args: "<relay id>", least: 1, most: 1, help: "halve how much the answer of a relay counts in the location map",
-			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.correct(a[0])) },
 		},
 	}},
 	{"triage", []command{
@@ -338,8 +336,7 @@ var families = []family{
 
 // Hooks run on their own path since they read the data directory from the environment and never fail
 const hookUsage = `hooks
-  hook path                       PostToolUse path collection
-  hook guard                      PreToolUse posting guard
+  hook guard                     PreToolUse posting guard
   hook stop                       Stop end of the scope a close kept for the turn
   hook end                        SessionEnd return of the session's takes`
 
@@ -371,9 +368,9 @@ func usage() string {
 // A command names the ones it reads so any other fails
 type flags struct {
 	data, root, session                 string
-	target, topic, from, ts, reason     string
+	target, from, ts, reason            string
 	place, key, delegation, self        string
-	keywords, paths, after, oldest      string
+	after, oldest                       string
 	answer, until, react, depth, digest string
 	followup, correction                string
 	thread, source, author, channel     string
@@ -389,9 +386,6 @@ func (f *flags) set() *flag.FlagSet {
 	fs.StringVar(&f.root, "root", "", "plugin directory that names the data directory when --data is empty")
 	fs.StringVar(&f.session, "session", f.session, "session id, CLAUDE_CODE_SESSION_ID by default")
 	fs.StringVar(&f.target, "target", "", "what the task works on such as a pull request link")
-	fs.StringVar(&f.topic, "topic", "", "one line request topic")
-	fs.StringVar(&f.keywords, "keywords", "", "comma separated keywords")
-	fs.StringVar(&f.paths, "paths", "", "comma separated evidence paths")
 	fs.IntVar(&f.limit, "limit", defaultLimit, "number of results, every one with 0")
 	fs.StringVar(&f.from, "from", "", "requester id")
 	fs.StringVar(&f.ts, "ts", "", "unix seconds of the request")
@@ -524,14 +518,4 @@ func reorder(cmd string, args []string) []string {
 		}
 	}
 	return append(flags, pos...)
-}
-
-func split(s string) []string {
-	var out []string
-	for v := range strings.SplitSeq(s, ",") {
-		if v = strings.TrimSpace(v); v != "" {
-			out = append(out, v)
-		}
-	}
-	return out
 }

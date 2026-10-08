@@ -128,8 +128,11 @@ func TestCheck(t *testing.T) {
 		{"lets an unknown tool that lists pass", call{"mcp__linear__list_issues", `{}`}, ""},
 		{"leaves the post tool to its own check", call{"mcp__meetproxy__post", `{"link":"https://github.com/x/r/pull/1","text":"hi"}`}, ""},
 		{"allows meetproxy open of the origin and the target", bash(t, "meetproxy open https://w.slack.com/archives/C7/p1 --target https://github.com/t/r/pull/3"), ""},
-		{"allows meetproxy close and inbox done", bash(t, "meetproxy close --topic t && meetproxy inbox done abcdefabcdef"), ""},
-		{"allows meetproxy commands that only read", bash(t, "meetproxy locate --data d retry && meetproxy triage && meetproxy allowed"), ""},
+		{"allows meetproxy close and inbox done", bash(t, "meetproxy close && meetproxy inbox done abcdefabcdef"), ""},
+		{
+			"allows meetproxy commands that only read",
+			bash(t, "meetproxy inbox list --data d && meetproxy triage && meetproxy allowed"), "",
+		},
 		{"allows a meetproxy slack post where the request came from", bash(t, "echo hi | meetproxy slack post https://w.slack.com/archives/C7/p2"), ""},
 		{"allows a word that only mentions meetproxy", bash(t, "grep -r meetproxy ."), ""},
 		{"allows python without an inline program", bash(t, "python3 -m json.tool a.json"), ""},
@@ -140,8 +143,22 @@ func TestCheck(t *testing.T) {
 		{"allows GH_HOST of github.com", bash(t, "GH_HOST=github.com gh pr comment 1 -R o/r -b hi"), ""},
 		{"allows a read on another host", bash(t, "GH_HOST=ghe.acme.io gh pr view 1 -R o/r"), ""},
 		{"allows reading a file in the data directory", bash(t, "cat "+dataDir+"/relay/open/s1.json"), ""},
-		{"allows meetproxy commands naming the data directory", bash(t, "meetproxy close --data "+dataDir+" --topic t"), ""},
+		{"allows meetproxy commands naming the data directory", bash(t, "meetproxy close --data "+dataDir), ""},
 		{"allows rm outside the data directory", bash(t, "rm -rf "+dataDir+"-old /tmp/x"), ""},
+		{"allows a curl read", bash(t, "curl -fsSL https://gitlab.com/api/v4/projects/1/issues -o out.json"), ""},
+		{
+			"allows a curl read with a header",
+			bash(t, `curl -sH "Authorization: Bearer x" https://api.linear.app/graphql`), "",
+		},
+		{"allows a curl query sent with -G", bash(t, "curl -G --data-urlencode q=x https://example.com/search"), ""},
+		{"allows a curl HEAD", bash(t, "curl -I -X HEAD https://example.com"), ""},
+		{"allows a wget read", bash(t, "wget -q -e robots=off -O - https://example.com"), ""},
+		{"allows an httpie read with a header and a query", bash(t, "http GET example.com/a Accept:json q==x"), ""},
+		{"allows an xh read", bash(t, "xh https://example.com/a q==x"), ""},
+		{
+			"denies a PowerShell call",
+			call{"PowerShell", `{"command":"Get-ChildItem"}`}, "a PowerShell call the guard cannot read",
+		},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -161,6 +178,7 @@ func TestCheck(t *testing.T) {
 // j. gh inside a redirection target
 // k. a repository on another host
 // l. a hook run or a file edit that ends the scope by hand
+// m. a network write to a host other than Slack or GitHub
 func TestCheck_Bypass(t *testing.T) {
 	t.Parallel()
 	allow := dest.New(t.TempDir())
@@ -245,6 +263,54 @@ func TestCheck_Bypass(t *testing.T) {
 		{"l. rm through the data variable", `rm -f "$CLAUDE_PLUGIN_DATA"/scope/*`, "a file edit in the meetproxy data directory"},
 		{"l. a redirection into the allow list", `echo '{"allow":["github:*"]}' > ` + dataDir + "/dest.json", "a file edit in the meetproxy data directory"},
 		{"l. rm inside bash -c", `bash -c "rm ` + dataDir + `/scope/s1"`, "a file edit in the meetproxy data directory"},
+		{
+			"m. curl POST to GitLab",
+			"curl -X POST https://gitlab.com/api/v4/projects/1/issues/2/notes", "a curl write to gitlab.com",
+		},
+		{
+			"m. curl data to GitLab",
+			`curl -sd "body=hi" https://gitlab.com/api/v4/projects/1/issues/2/notes`, "a curl write to gitlab.com",
+		},
+		{"m. curl -XPOST to Linear", `curl -XPOST https://api.linear.app/graphql`, "a curl write to api.linear.app"},
+		{
+			"m. curl json to Linear",
+			`curl --json '{"query":"mutation"}' https://api.linear.app/graphql`, "a curl write to api.linear.app",
+		},
+		{
+			"m. curl to a Discord webhook",
+			`curl -H "Content-Type: application/json" -d '{"content":"hi"}' https://discord.com/api/webhooks/1/x`,
+			"a curl write to discord.com",
+		},
+		{"m. curl form", "curl -F file=@a.txt https://example.com/up", "a curl write to example.com"},
+		{"m. curl upload", "curl -T a.txt https://example.com/up", "a curl write to example.com"},
+		{"m. curl upload in a cluster", "curl -sT a.txt https://example.com/up", "a curl write to example.com"},
+		{"m. curl options from a file", "curl -K req.cfg", "a curl write to a host the guard cannot place"},
+		{"m. curl --request DELETE", "curl --request DELETE https://example.com/a/1", "a curl write to example.com"},
+		{"m. curl data with -G and POST", "curl -G -d a=1 -X POST https://example.com", "a curl write to example.com"},
+		{"m. curl behind sudo", "sudo -u me curl --data-binary @a https://example.com", "a curl write to example.com"},
+		{"m. curl.exe", "curl.exe -d a=1 https://example.com", "a curl write to example.com"},
+		{"m. curl inside bash -c", `bash -c "curl -d a=1 https://example.com"`, "a curl write to example.com"},
+		{"m. curl inside a substitution", `echo "$(curl -d a=1 https://example.com)"`, "a curl write to example.com"},
+		{
+			"m. wget post data to Discord",
+			"wget --post-data='content=hi' https://discord.com/api/webhooks/1/x", "a wget write to discord.com",
+		},
+		{"m. wget post file", "wget --post-file a.json https://example.com", "a wget write to example.com"},
+		{"m. wget method", "wget --method=PUT https://example.com/a", "a wget write to example.com"},
+		{"m. wget method set by -e", "wget -e method=POST https://example.com/a", "a wget write to example.com"},
+		{
+			"m. httpie POST to GitLab",
+			"http POST https://gitlab.com/api/v4/projects/1/issues title=x", "a http write to gitlab.com",
+		},
+		{"m. httpie data item to Linear", "https api.linear.app/graphql query=mutation", "a https write"},
+		{"m. httpie json item", "http example.com/a n:=1", "a http write"},
+		{"m. httpie file item", "http example.com/a f@a.txt", "a http write"},
+		{"m. httpie form", "http -f example.com/a", "a http write"},
+		{"m. httpie here document", "http example.com/a <<EOF\n{}\nEOF", "a http write"},
+		{"m. xh DELETE", "xh delete https://example.com/a/1", "a xh write to example.com"},
+		{"m. xh data to Discord", "xh https://discord.com/api/webhooks/1/x content=hi", "a xh write to discord.com"},
+		{"m. pwsh -Command", `pwsh -Command "Invoke-RestMethod -Method Post https://example.com"`, "inline pwsh program"},
+		{"m. powershell -c", `powershell.exe -c "iwr https://example.com"`, "inline powershell.exe program"},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {

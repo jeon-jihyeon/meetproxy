@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -112,26 +113,26 @@ func TestRun_Slack(t *testing.T) {
 		{"tick names the token's user and host", step{"tick", nil, ""}, slackWant{0, `"slack":{"token":true,"user":"U1","team":"T1","host":"w.slack.com"}`, false}},
 		{
 			"mentions come oldest first in the mod's shape", step{"slack", []string{"mentions", "--after", "1893456000"}, ""},
-			slackWant{0, `[{"author":"Kai","channel":"C1","from":"U2","ts":"1893456100.000001","link":"` + link + `","text":"<@U1> a"},` +
-				`{"author":"Kai","channel":"C1","from":"U2","ts":"1893456200.000001","link":"https://w.slack.com/archives/C1/p1893456200000001","text":"<@U1> b"}]`, false},
+			slackWant{0, `[{"author":"Kai","channel":"C1","from":"U2","ts":"1893456100.000001","link":"` + link + `","text":"<@U1> a","thread":"slack:C1:1893456100.000001"},` +
+				`{"author":"Kai","channel":"C1","from":"U2","ts":"1893456200.000001","link":"https://w.slack.com/archives/C1/p1893456200000001","text":"<@U1> b","thread":"slack:C1:1893456200.000001"}]`, false},
 		},
 		{"usage error for mentions without --after", step{"slack", []string{"mentions"}, ""}, slackWant{exitUsage, "", true}},
 		{
 			"history builds links and names bots", step{"slack", []string{"history", "C9", "--oldest", "1893456000"}, ""},
-			slackWant{0, `[{"author":"Kai","channel":"C9","from":"U2","ts":"1893456060.000001","link":"https://w.slack.com/archives/C9/p1893456060000001","text":"hello"},` +
-				`{"author":"Kai","channel":"C9","from":"U2","ts":"1893456070.000001","link":"https://w.slack.com/archives/C9/p1893456070000001","text":"<@U1> ping"},` +
-				`{"author":"Datadog","channel":"C9","from":"B9","ts":"1893456120.000001","link":"https://w.slack.com/archives/C9/p1893456120000001","text":"Triggered: cpu"}]`, false},
+			slackWant{0, `[{"author":"Kai","channel":"C9","from":"U2","ts":"1893456060.000001","link":"https://w.slack.com/archives/C9/p1893456060000001","text":"hello","thread":"slack:C9:1893456060.000001"},` +
+				`{"author":"Kai","channel":"C9","from":"U2","ts":"1893456070.000001","link":"https://w.slack.com/archives/C9/p1893456070000001","text":"<@U1> ping","thread":"slack:C9:1893456070.000001"},` +
+				`{"author":"Datadog","channel":"C9","from":"B9","ts":"1893456120.000001","link":"https://w.slack.com/archives/C9/p1893456120000001","text":"Triggered: cpu","thread":"slack:C9:1893456120.000001"}]`, false},
 		},
 		{"covered finds the user's reply after the message", step{"slack", []string{"covered", link, "--ts", "1893456100.000001"}, ""}, slackWant{0, `{"covered":true}`, false}},
 		{"covered finds a reply meetproxy posted for someone else", step{"slack", []string{"covered", link, "--ts", "1893456355"}, ""}, slackWant{0, `{"covered":true}`, false}},
 		{"covered is false after every reply", step{"slack", []string{"covered", link, "--ts", "1893456370"}, ""}, slackWant{0, `{"covered":false}`, false}},
 		{
 			"replies leave out the user and meetproxy", step{"slack", []string{"replies", link, "--after", "1893456100.000001"}, ""},
-			slackWant{0, `[{"author":"Kai","channel":"C1","from":"U2","ts":"1893456350.000001","link":"https://w.slack.com/archives/C1/p1893456350000001?thread_ts=1893456100.000001&cid=C1","text":"and the timeout?"}]`, false},
+			slackWant{0, `[{"author":"Kai","channel":"C1","from":"U2","ts":"1893456350.000001","link":"https://w.slack.com/archives/C1/p1893456350000001?thread_ts=1893456100.000001&cid=C1","text":"and the timeout?","thread":"slack:C1:1893456100.000001"}]`, false},
 		},
 		{
 			"dms leave out bots and messages the mention reader finds", step{"slack", []string{"dms", "--after", "1893456000"}, ""},
-			slackWant{0, `[{"author":"Kai","channel":"D1","from":"U2","ts":"1893456060.000001","link":"https://w.slack.com/archives/D1/p1893456060000001","text":"hello"}]`, false},
+			slackWant{0, `[{"author":"Kai","channel":"D1","from":"U2","ts":"1893456060.000001","link":"https://w.slack.com/archives/D1/p1893456060000001","text":"hello","thread":"slack:D1"}]`, false},
 		},
 		{"react adds a reaction", step{"slack", []string{"react", link, "--react", "eyes"}, ""}, slackWant{0, "", false}},
 		{"usage error for a reaction that is no emoji name", step{"slack", []string{"react", link, "--react", "a b"}, ""}, slackWant{exitUsage, "", true}},
@@ -221,9 +222,9 @@ func TestRun_SlackRefusesAnotherHost(t *testing.T) {
 	assert.ErrorContains(t, err, "loopback")
 }
 
-// A fake Slack with n direct conversations each holding one message
+// A fake Slack with n direct conversations each holding one message at ts
 // A conversation named in failing answers an error
-func fakeDMs(t *testing.T, n int, failing *sync.Map) *httptest.Server {
+func fakeDMs(t *testing.T, n int, ts string, failing *sync.Map, lists *atomic.Int32) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.NoError(t, r.ParseForm())
@@ -234,6 +235,7 @@ func fakeDMs(t *testing.T, n int, failing *sync.Map) *httptest.Server {
 		case "users.info":
 			body["user"] = map[string]any{"id": "U2", "team_id": "T1", "real_name": "Kai"}
 		case "conversations.list":
+			lists.Add(1)
 			ids := []map[string]any{}
 			for i := range n {
 				ids = append(ids, map[string]any{"id": fmt.Sprintf("D%02d", i)})
@@ -244,7 +246,7 @@ func fakeDMs(t *testing.T, n int, failing *sync.Map) *httptest.Server {
 				body = map[string]any{"ok": false, "error": "internal_error"}
 				break
 			}
-			body["messages"] = []map[string]any{{"ts": "1893456100.000001", "user": "U2", "text": "hi"}}
+			body["messages"] = []map[string]any{{"ts": ts, "user": "U2", "text": "hi"}}
 		}
 		w.Header().Set("X-OAuth-Scopes", strings.Join(slackScopes, ","))
 		_ = json.NewEncoder(w).Encode(body)
@@ -253,38 +255,64 @@ func fakeDMs(t *testing.T, n int, failing *sync.Map) *httptest.Server {
 	return srv
 }
 
+// One read of the direct messages
+type dmRun struct {
+	// After the first read
+	at time.Duration
+	// Conversations failing on this read
+	failing []string
+}
+
 // Not parallel since the fake Slack is named through the environment
-// Messages never come past a conversation not read yet so the dm cursor never skips one
+// A conversation read less often still loses no message since it is read from its own last read
 func TestRun_SlackDMs(t *testing.T) {
+	type args struct {
+		n int
+		// ts of the message each conversation holds
+		ts   string
+		runs []dmRun
+	}
+	type want struct {
+		msgs  []int
+		lists int32
+	}
 	tcs := []struct {
 		name string
-		n    int
-		// Conversations failing on each read
-		failing [][]string
-		want    []int
+		args args
+		want want
 	}{
-		{"few conversations are read at once", 3, [][]string{nil}, []int{3}},
-		{"many conversations wait for every one to be read", 41, [][]string{nil, nil}, []int{0, 40}},
-		{"a conversation that fails holds the others back until it is read", 2, [][]string{{"D01"}, nil}, []int{0, 2}},
+		{"few conversations are read at once", args{3, "1893456100.000001", []dmRun{{}}}, want{[]int{3}, 1}},
+		{"many conversations are read at once", args{41, "1893456100.000001", []dmRun{{}}}, want{[]int{41}, 1}},
+		{
+			"a conversation that fails comes once it is read and holds no other back",
+			args{2, "1893456100.000001", []dmRun{{0, []string{"D01"}}, {time.Minute, nil}}}, want{[]int{1, 2}, 1},
+		},
+		{
+			"a quiet conversation is read again after a while",
+			args{1, "1893300000.000001", []dmRun{{}, {time.Minute, nil}, {11 * time.Minute, nil}}}, want{[]int{1, 0, 1}, 1},
+		},
+		{"the conversations are listed again after an hour", args{1, "1893456100.000001", []dmRun{{}, {61 * time.Minute, nil}}}, want{[]int{1, 1}, 2}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			failing := &sync.Map{}
-			t.Setenv(slackAPIEnv, fakeDMs(t, tc.n, failing).URL)
+			lists := &atomic.Int32{}
+			t.Setenv(slackAPIEnv, fakeDMs(t, tc.args.n, tc.args.ts, failing, lists).URL)
 			data := t.TempDir()
 			now := time.Unix(1893456400, 0)
 			mustRun(t, data, "s1", now, step{"slack", []string{"token"}, "xoxp-good"})
-			got := []int{}
-			for i, fail := range tc.failing {
+			got := want{msgs: []int{}}
+			for _, r := range tc.args.runs {
 				failing.Clear()
-				for _, id := range fail {
+				for _, id := range r.failing {
 					failing.Store(id, true)
 				}
-				out := mustRun(t, data, "s1", now.Add(time.Duration(i)*time.Minute), step{"slack", []string{"dms", "--after", "1893456000"}, ""})
+				out := mustRun(t, data, "s1", now.Add(r.at), step{"slack", []string{"dms", "--after", "1893200000"}, ""})
 				var msgs []slackMessage
 				require.NoError(t, json.Unmarshal([]byte(out), &msgs))
-				got = append(got, len(msgs))
+				got.msgs = append(got.msgs, len(msgs))
 			}
+			got.lists = lists.Load()
 			assert.Equal(t, tc.want, got)
 		})
 	}

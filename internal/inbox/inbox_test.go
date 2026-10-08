@@ -22,10 +22,15 @@ const (
 	other = "https://w.slack.com/archives/C1/p2"
 )
 
+// Stores a request the way a delegation without limits would
+func add(s inbox.Store, it inbox.Item, at time.Time) (inbox.Item, bool, error) {
+	return s.AddLimited(it, inbox.Limits{}, at)
+}
+
 // Stores a request and brings it to status the way session s1 would
 func seed(t *testing.T, s inbox.Store, it inbox.Item, status inbox.Status, at time.Time) inbox.Item {
 	t.Helper()
-	stored, _, err := s.Add(it, at)
+	stored, _, err := add(s, it, at)
 	require.NoError(t, err)
 	switch status {
 	case inbox.StatusTaken:
@@ -164,7 +169,7 @@ func TestStoreAdd(t *testing.T) {
 			seed(t, s, tc.first.item, tc.first.status, now.Add(-time.Minute))
 			require.NoError(t, s.SetPaused(tc.paused))
 
-			it, added, err := s.Add(tc.add, now)
+			it, added, err := add(s, tc.add, now)
 
 			items, lerr := s.List()
 			require.NoError(t, lerr)
@@ -218,7 +223,7 @@ func TestStoreAdd_Thread(t *testing.T) {
 			s := inbox.New(t.TempDir())
 			seed(t, s, first, inbox.StatusOpen, now)
 
-			it, _, err := s.Add(tc.add, now)
+			it, _, err := add(s, tc.add, now)
 
 			require.NoError(t, err)
 			items, lerr := s.List()
@@ -233,14 +238,14 @@ func TestStoreAdd_OlderScanAfterDone(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	s := inbox.New(t.TempDir())
-	_, _, err := s.Add(inbox.Item{Link: link, Ts: "1"}, now)
+	_, _, err := add(s, inbox.Item{Link: link, Ts: "1"}, now)
 	require.NoError(t, err)
-	_, _, err = s.Add(inbox.Item{Link: link, Ts: "2"}, now)
+	_, _, err = add(s, inbox.Item{Link: link, Ts: "2"}, now)
 	require.NoError(t, err)
 	_, err = s.Done(inbox.IdOf(link), "s1", now)
 	require.NoError(t, err)
 
-	_, added, err := s.Add(inbox.Item{Link: link, Ts: "1"}, now)
+	_, added, err := add(s, inbox.Item{Link: link, Ts: "1"}, now)
 
 	require.NoError(t, err)
 	it, err := s.Get(inbox.IdOf(link))
@@ -288,7 +293,7 @@ func TestStoreAdd_WhileTaken(t *testing.T) {
 			t.Parallel()
 			s := inbox.New(t.TempDir())
 			id := seed(t, s, inbox.Item{Link: link, Ts: "1"}, inbox.StatusTaken, now).Id
-			_, _, err := s.Add(inbox.Item{Link: link, Ts: "2", Followup: true}, now)
+			_, _, err := add(s, inbox.Item{Link: link, Ts: "2", Followup: true}, now)
 			require.NoError(t, err)
 			taken, err := s.Get(id)
 			require.NoError(t, err)
@@ -428,7 +433,7 @@ func TestStoreTake(t *testing.T) {
 func TestStoreTake_Paused(t *testing.T) {
 	t.Parallel()
 	s := inbox.New(t.TempDir())
-	_, _, err := s.Add(inbox.Item{Link: link}, time.Now())
+	_, _, err := add(s, inbox.Item{Link: link}, time.Now())
 	require.NoError(t, err)
 	require.NoError(t, s.SetPaused(true))
 
@@ -445,7 +450,7 @@ func TestStoreTake_Race(t *testing.T) {
 	for i := range 50 {
 		s := inbox.New(t.TempDir())
 		l := fmt.Sprintf("https://w.slack.com/archives/C1/p%d", i)
-		it, _, err := s.Add(inbox.Item{Link: l}, now)
+		it, _, err := add(s, inbox.Item{Link: l}, now)
 		require.NoError(t, err)
 		var wg sync.WaitGroup
 		var mu sync.Mutex
@@ -610,7 +615,7 @@ func TestStoreDone_Session(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := inbox.New(t.TempDir())
-			_, _, err := s.Add(inbox.Item{Link: link}, now)
+			_, _, err := add(s, inbox.Item{Link: link}, now)
 			require.NoError(t, err)
 			for i, session := range tc.takes {
 				_, err := s.Take(inbox.IdOf(link), session, now.Add(time.Duration(i)*tc.takeover))
@@ -779,9 +784,10 @@ func TestStoreWaiting(t *testing.T) {
 				seed(t, s, inbox.Item{Link: st.link}, st.status, now.Add(st.at))
 			}
 
-			items, err := s.Waiting(now.Add(tc.after))
+			all, err := s.List()
 
 			require.NoError(t, err)
+			items := inbox.Waiting(all, now.Add(tc.after))
 			got := make([]string, 0, len(items))
 			for _, it := range items {
 				got = append(got, it.Link+" "+string(it.Status)+" "+it.Reason)
@@ -797,7 +803,7 @@ func TestStoreList_Removed(t *testing.T) {
 	dir := t.TempDir()
 	s := inbox.New(dir)
 	for i := range 200 {
-		_, _, err := s.Add(inbox.Item{Link: fmt.Sprintf("x%d", i)}, now)
+		_, _, err := add(s, inbox.Item{Link: fmt.Sprintf("x%d", i)}, now)
 		require.NoError(t, err)
 	}
 	items, err := s.List()
@@ -942,29 +948,4 @@ func TestStoreCursor_Paused(t *testing.T) {
 	_, err := s.Cursor("mention", time.Now())
 
 	assert.ErrorIs(t, err, inbox.ErrPaused)
-}
-
-func TestStoreAdd_PrunesOldDone(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	s := inbox.New(t.TempDir())
-	_, _, err := s.Add(inbox.Item{Link: link}, now.Add(-10*24*time.Hour))
-	require.NoError(t, err)
-	_, err = s.Done(inbox.IdOf(link), "s1", now.Add(-8*24*time.Hour))
-	require.NoError(t, err)
-	_, _, err = s.Add(inbox.Item{Link: "https://w.slack.com/archives/C1/p9"}, now.Add(-24*time.Hour))
-	require.NoError(t, err)
-	_, err = s.Done(inbox.IdOf("https://w.slack.com/archives/C1/p9"), "s1", now.Add(-24*time.Hour))
-	require.NoError(t, err)
-
-	_, _, err = s.Add(inbox.Item{Link: other}, now)
-	require.NoError(t, err)
-
-	items, err := s.List()
-	require.NoError(t, err)
-	ids := make([]string, 0, len(items))
-	for _, it := range items {
-		ids = append(ids, it.Id)
-	}
-	assert.ElementsMatch(t, []string{inbox.IdOf(other), inbox.IdOf("https://w.slack.com/archives/C1/p9")}, ids)
 }

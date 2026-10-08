@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/jeon-jihyeon/meetproxy/internal/inbox"
-	"github.com/jeon-jihyeon/meetproxy/internal/locmap"
 	"github.com/jeon-jihyeon/meetproxy/internal/posts"
 	"github.com/jeon-jihyeon/meetproxy/internal/relay"
 )
@@ -108,15 +107,6 @@ func (c cli) postsRetract(reply string) error {
 }
 
 func (c cli) watchSeen(request, ts string) error { return posts.New(c.data).Seen(request, ts) }
-
-// Halves how much the answer of a relay counts in the location map
-func (c cli) correct(relayId string) error {
-	e, err := locmap.New(c.data).Correct(relayId, c.now)
-	if err == nil {
-		fmt.Fprintf(c.out, "%s weighs %g\n", e.RelayId, e.Weight)
-	}
-	return err
-}
 
 // Records a message read and not queued and moves the cursor past it
 func (c cli) inboxIgnore(link string, f flags) error {

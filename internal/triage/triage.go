@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/jeon-jihyeon/meetproxy/internal/fileio"
@@ -205,12 +204,11 @@ func runCommand(ctx context.Context, line string, in Input) (string, error) {
 // How long output is still read after a timeout before the pipes are closed
 const waitDelay = time.Second
 
-// Kills the whole process group on timeout
 // A child left holding the output would otherwise keep the run waiting past the timeout
+// WaitDelay closes the pipes where the whole group cannot be killed
 func command(ctx context.Context, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	killGroup(cmd)
 	cmd.WaitDelay = waitDelay
 	return cmd
 }

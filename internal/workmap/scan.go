@@ -6,14 +6,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 )
 
-// Every place a case happened in and the names a message may use for it
-// 1. the directory name
-// 2. the last part of the git remote, the Go module and the package.json name
+// Every place a case happened in
 func scanPlaces(cases []Case) []Place {
 	counts := map[string]int{}
 	for _, c := range cases {
@@ -26,65 +23,10 @@ func scanPlaces(cases []Case) []Place {
 		if _, err := os.Stat(root); err != nil || temporary(root) {
 			continue
 		}
-		name := filepath.Base(root)
-		out = append(out, Place{Root: root, Name: name, Aliases: aliases(root, name), Cases: n})
+		out = append(out, Place{Root: root, Name: filepath.Base(root), Cases: n})
 	}
 	slices.SortFunc(out, func(a, b Place) int { return cmp.Or(cmp.Compare(b.Cases, a.Cases), strings.Compare(a.Root, b.Root)) })
 	return out
-}
-
-var goModule = regexp.MustCompile(`(?m)^module\s+(\S+)`)
-
-func aliases(root, name string) []string {
-	seen := map[string]bool{strings.ToLower(name): true}
-	var out []string
-	add := func(v string) {
-		v = strings.ToLower(strings.TrimSpace(v))
-		if len(v) >= 3 && !seen[v] {
-			seen[v] = true
-			out = append(out, v)
-		}
-	}
-	if b, err := os.ReadFile(filepath.Join(root, ".git", "config")); err == nil {
-		add(remoteName(string(b)))
-	}
-	if b, err := os.ReadFile(filepath.Join(root, "go.mod")); err == nil {
-		if m := goModule.FindSubmatch(b); m != nil {
-			add(filepath.Base(string(m[1])))
-		}
-	}
-	var pkg struct {
-		Name string `json:"name"`
-	}
-	if b, err := os.ReadFile(filepath.Join(root, "package.json")); err == nil && json.Unmarshal(b, &pkg) == nil {
-		add(filepath.Base(pkg.Name))
-	}
-	return out
-}
-
-// The repository name in the url of the origin remote or else of the first remote
-func remoteName(gitConfig string) string {
-	first, section := "", ""
-	for _, line := range strings.Split(gitConfig, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "[") {
-			section = line
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		if !ok || strings.TrimSpace(k) != "url" || !strings.HasPrefix(section, `[remote "`) {
-			continue
-		}
-		url := strings.TrimSuffix(strings.TrimRight(strings.TrimSpace(v), "/"), ".git")
-		name := url[strings.LastIndexAny(url, "/:")+1:]
-		if section == `[remote "origin"]` {
-			return name
-		}
-		if first == "" {
-			first = name
-		}
-	}
-	return first
 }
 
 // Skills and commands of the user and of installed plugins

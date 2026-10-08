@@ -5,11 +5,10 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/jeon-jihyeon/meetproxy/internal/locmap"
 )
 
 // The part of a transcript line a case and an example need
@@ -92,8 +91,8 @@ func (b *caseBuilder) add(line []byte, offset int64) {
 	}
 	switch r.Type {
 	case "user":
-		if prompt, ok := typed(r); ok {
-			b.start(prompt, r.Cwd, r.Timestamp, offset)
+		if typed(r) {
+			b.start(r.Cwd, r.Timestamp, offset)
 			return
 		}
 		b.settle(r)
@@ -133,13 +132,13 @@ func (b *caseBuilder) settle(r record) {
 	}
 }
 
-func (b *caseBuilder) start(prompt, cwd string, at time.Time, offset int64) {
+func (b *caseBuilder) start(cwd string, at time.Time, offset int64) {
 	b.finish()
 	root := b.rootOf(cwd)
 	if root == "" {
 		return
 	}
-	b.open = &Case{Prompt: clip(prompt, 500), Root: root, At: at.UTC(), Source: b.source, Offset: offset}
+	b.open = &Case{Root: root, At: at.UTC(), Source: b.source, Offset: offset}
 }
 
 // The repository of the place cwd belongs to or that place itself outside any
@@ -148,10 +147,44 @@ func (b *caseBuilder) rootOf(cwd string) string {
 	if root == "" {
 		return ""
 	}
-	if p, ok := locmap.Resolve(root); ok {
-		return p.Root
+	if repo, ok := repoRoot(root); ok {
+		return repo
 	}
 	return root
+}
+
+// The main checkout of the repository dir is in
+// A worktree names the main checkout in its .git file as a path into .git/worktrees
+func repoRoot(dir string) (string, bool) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", false
+	}
+	for d := abs; ; d = filepath.Dir(d) {
+		git := filepath.Join(d, ".git")
+		info, err := os.Stat(git)
+		if err == nil && info.IsDir() {
+			return d, true
+		}
+		if err == nil {
+			b, err := os.ReadFile(git)
+			if err != nil {
+				return "", false
+			}
+			gitdir := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(b)), "gitdir:"))
+			if !filepath.IsAbs(gitdir) {
+				gitdir = filepath.Join(d, gitdir)
+			}
+			sep := string(filepath.Separator)
+			if main, _, ok := strings.Cut(filepath.Clean(gitdir), sep+".git"+sep+"worktrees"); ok {
+				return main, true
+			}
+			return d, true
+		}
+		if d == filepath.Dir(d) {
+			return "", false
+		}
+	}
 }
 
 // A session working in a scratch folder still belongs to the place it started in
@@ -197,30 +230,24 @@ func (b *caseBuilder) done() []Case {
 	return b.out
 }
 
-// A prompt the user typed
-// For a slash command its arguments
+// Whether the user typed r as a prompt
+// A slash command counts when it has arguments
 // Prompts the harness or another session added and built-in commands are not the user's requests
-func typed(r record) (prompt string, ok bool) {
+func typed(r record) bool {
 	// A compaction summary sits where a prompt would but the user never typed it
 	if r.IsMeta || r.IsCompactSummary || (r.PromptSource != "" && r.PromptSource != "typed") {
-		return "", false
+		return false
 	}
 	var s string
 	if json.Unmarshal(r.Message.Content, &s) != nil {
-		return "", false
+		return false
 	}
 	s = strings.TrimSpace(s)
 	if m := command.FindStringSubmatch(s); m != nil {
 		name := strings.TrimSpace(m[1])
 		// meetproxy hands requests to sessions through its own commands
 		// Those are not requests the user typed
-		if builtins[name] || strings.HasPrefix(name, "meetproxy:") || strings.TrimSpace(m[2]) == "" {
-			return "", false
-		}
-		return strings.TrimSpace(m[2]), true
+		return !builtins[name] && !strings.HasPrefix(name, "meetproxy:") && strings.TrimSpace(m[2]) != ""
 	}
-	if s == "" || strings.HasPrefix(s, "<") || len([]rune(s)) < 4 {
-		return "", false
-	}
-	return s, true
+	return s != "" && !strings.HasPrefix(s, "<") && len([]rune(s)) >= 4
 }

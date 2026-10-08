@@ -21,7 +21,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|mcp__.*|Write|Edit|NotebookEdit",
+        "matcher": "Bash|PowerShell|mcp__.*|Write|Edit|NotebookEdit",
         "hooks": [
           {
             "type": "command",
@@ -46,17 +46,6 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy hook end"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Read|Edit|Write|Grep",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/meetproxy hook path"
           }
         ]
       }

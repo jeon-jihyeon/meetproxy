@@ -41,78 +41,6 @@ func denyReason(t *testing.T, out []byte) string {
 	return d.HookSpecificOutput.PermissionDecisionReason
 }
 
-func TestRunHookPath(t *testing.T) {
-	t.Parallel()
-	repo := gitRepo(t, "svc", "pkg/alloc.go")
-	file := filepath.Join(repo, "pkg", "alloc.go")
-
-	type args struct {
-		open  bool
-		input map[string]any
-	}
-	tcs := []struct {
-		name string
-		args args
-		want []string
-	}{
-		{
-			"records an absolute Read path",
-			args{true, map[string]any{"session_id": "s1", "tool_name": "Read", "tool_input": map[string]any{"file_path": file}}},
-			[]string{filepath.Join("pkg", "alloc.go")},
-		},
-		{
-			"resolves a relative Grep path against cwd",
-			args{true, map[string]any{
-				"session_id": "s1", "tool_name": "Grep", "cwd": repo,
-				"tool_input": map[string]any{"pattern": "x", "path": "pkg"},
-			}},
-			[]string{"pkg"},
-		},
-		{
-			"ignores Grep without a path",
-			args{true, map[string]any{"session_id": "s1", "tool_name": "Grep", "tool_input": map[string]any{"pattern": "x"}}},
-			[]string{},
-		},
-		{
-			"ignores paths outside a repository",
-			args{true, map[string]any{"session_id": "s1", "tool_name": "Read", "tool_input": map[string]any{"file_path": "/nowhere/x.go"}}},
-			[]string{},
-		},
-		{
-			"ignores input without a session id",
-			args{true, map[string]any{"tool_name": "Read", "tool_input": map[string]any{"file_path": file}}},
-			[]string{},
-		},
-		{
-			"ignores sessions without an open relay",
-			args{false, map[string]any{"session_id": "s1", "tool_name": "Read", "tool_input": map[string]any{"file_path": file}}},
-			[]string{},
-		},
-	}
-	for _, tc := range tcs {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			data := t.TempDir()
-			store := relay.New(data)
-			var id string
-			if tc.args.open {
-				r, err := store.Open("s1", "o", "", time.Now())
-				require.NoError(t, err)
-				id = r.Id
-			}
-			err := runHook(data, []string{"path"}, time.Now(), strings.NewReader(hookJSON(t, tc.args.input)), &bytes.Buffer{})
-			require.NoError(t, err)
-			ps, err := store.Observed(id)
-			require.NoError(t, err)
-			got := []string{}
-			for _, p := range ps {
-				got = append(got, p.Rel)
-			}
-			assert.Equal(t, tc.want, got)
-		})
-	}
-}
-
 // Which locations a call names and which the relay lets through is covered in the guard package
 // These cases cover the hook plumbing around it
 func TestRunHookGuard(t *testing.T) {
@@ -125,6 +53,9 @@ func TestRunHookGuard(t *testing.T) {
 			"session_id": "s1", "tool_name": "mcp__plugin_slack_slack__" + tool,
 			"tool_input": map[string]any{"channel_id": channel, "message": "m"},
 		}
+	}
+	powershell := map[string]any{
+		"session_id": "s1", "tool_name": "PowerShell", "tool_input": map[string]any{"command": "Get-ChildItem"},
 	}
 
 	type args struct {
@@ -152,6 +83,23 @@ func TestRunHookGuard(t *testing.T) {
 		{"fails closed on a post without a session", args{true, "", bash("", "gh pr comment 1 -R x/r -b hi")}, "names no session"},
 		{"lets other commands run without a session", args{true, "", bash("", "ls -al")}, ""},
 		{"fails closed on tool input that is no object", args{true, "", map[string]any{"session_id": "s1", "tool_name": "Bash", "tool_input": "gh"}}, "posting check failed"},
+		{
+			"denies PowerShell while a request is handled",
+			args{true, "", powershell}, "a PowerShell call the guard cannot read",
+		},
+		{"lets PowerShell run when nothing is handled", args{false, "", powershell}, ""},
+		{
+			"denies a network write while a request is handled",
+			args{true, "", bash("s1", "curl -d a=1 https://gitlab.com/api")}, "a curl write to gitlab.com",
+		},
+		{
+			"lets a network write run when nothing is handled",
+			args{false, "", bash("s1", "curl -d a=1 https://gitlab.com/api")}, "",
+		},
+		{
+			"allows a network read while a request is handled",
+			args{true, "", bash("s1", "curl -s https://gitlab.com/api")}, "",
+		},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,7 +144,7 @@ func TestRunHookGuard_Scope(t *testing.T) {
 	queued := step{"inbox", []string{"add", link, "--target", target}, ""}
 	taken := []step{queued, {"inbox", []string{"take", id}, ""}}
 	opened := append(slices.Clone(taken), step{"open", []string{link}, ""})
-	closed := append(slices.Clone(opened), step{"close", []string{"--topic", "t"}, ""})
+	closed := append(slices.Clone(opened), step{"close", nil, ""})
 
 	type args struct {
 		setup []step
@@ -279,7 +227,7 @@ func TestRunHook_BadInput(t *testing.T) {
 		want want
 	}{
 		{"rejects an unknown hook", args{true, "nope", "{}"}, want{true, ""}},
-		{"path hook errors without a data dir", args{false, "path", "{}"}, want{true, ""}},
+		{"path hook is gone", args{true, "path", "{}"}, want{true, ""}},
 		{"start hook is gone", args{true, "start", "{}"}, want{true, ""}},
 		{"end hook errors without a data dir", args{false, "end", "{}"}, want{true, ""}},
 		{"end hook errors on broken input", args{true, "end", "{"}, want{true, ""}},
