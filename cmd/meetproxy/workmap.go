@@ -36,7 +36,7 @@ func (c cli) mapShow() error {
 		return err
 	}
 	for _, p := range places {
-		fmt.Fprintf(c.out, "%d\t%s\t%s\t%v\n", p.Cases, p.Name, p.Root, p.Aliases)
+		fmt.Fprintf(c.out, "%d\t%s\t%s\n", p.Cases, p.Name, p.Root)
 	}
 	fmt.Fprintf(c.out, "%d skills and commands\n", len(methods))
 	formats, err := store.Formats()

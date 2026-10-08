@@ -18,14 +18,15 @@ func TestStoreList_Corrupt(t *testing.T) {
 	now := time.Now()
 	dir := t.TempDir()
 	s := inbox.New(dir)
-	_, _, err := s.Add(inbox.Item{Link: link}, now)
+	_, _, err := add(s, inbox.Item{Link: link}, now)
 	require.NoError(t, err)
 	broken := filepath.Join(dir, "inbox", inbox.IdOf(other)+".json")
 	require.NoError(t, os.WriteFile(broken, []byte(`{"link":`), 0o600))
 
-	waiting, err := s.Waiting(now)
+	all, err := s.List()
 
 	require.NoError(t, err)
+	waiting := inbox.Waiting(all, now)
 	corrupt, cerr := s.Corrupt()
 	require.NoError(t, cerr)
 	_, statErr := os.Stat(broken)

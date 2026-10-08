@@ -32,7 +32,7 @@ func TestStoreHold_Until(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := inbox.New(t.TempDir())
-			_, _, err := s.Add(inbox.Item{Link: link}, now)
+			_, _, err := add(s, inbox.Item{Link: link}, now)
 			require.NoError(t, err)
 			_, err = s.Hold(inbox.IdOf(link), "s1", tc.until, now)
 			require.NoError(t, err)
@@ -69,9 +69,10 @@ func TestStoreQuestion(t *testing.T) {
 			it := seed(t, s, inbox.Item{Link: link}, inbox.StatusQuestion, now)
 
 			at := now.Add(tc.after)
-			waiting, err := s.Waiting(at)
+			all, err := s.List()
 
 			require.NoError(t, err)
+			waiting := inbox.Waiting(all, at)
 			require.Len(t, waiting, 1)
 			assert.Equal(t, tc.want, want{it.Open(at), waiting[0].Status, waiting[0].Reason})
 		})
@@ -126,11 +127,11 @@ func TestStoreAdd_Reopens(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := inbox.New(t.TempDir())
-			_, _, err := s.Add(inbox.Item{Link: link, Ts: "100"}, now)
+			_, _, err := add(s, inbox.Item{Link: link, Ts: "100"}, now)
 			require.NoError(t, err)
 			require.NoError(t, tc.settle(s))
 
-			_, created, err := s.Add(inbox.Item{Link: link, Ts: tc.ts, Followup: true}, now)
+			_, created, err := add(s, inbox.Item{Link: link, Ts: tc.ts, Followup: true}, now)
 
 			require.NoError(t, err)
 			it, gerr := s.Get(inbox.IdOf(link))
@@ -145,32 +146,38 @@ func TestStoreAddLimited(t *testing.T) {
 	now := time.Now()
 	const next = "https://w.slack.com/archives/C1/p9"
 	tcs := []struct {
-		name string
-		lim  inbox.Limits
-		item inbox.Item
-		want error
+		name  string
+		lim   inbox.Limits
+		item  inbox.Item
+		after time.Duration
+		want  error
 	}{
 		{"a request under the limits is queued", inbox.Limits{PerHour: 3, Dedupe: time.Minute},
-			inbox.Item{Link: next, Delegation: "ops", Digest: "b"}, nil},
+			inbox.Item{Link: next, Delegation: "ops", Digest: "b"}, 0, nil},
 		{"the limit of the hour refuses one more", inbox.Limits{PerHour: 2},
-			inbox.Item{Link: next, Delegation: "ops", Digest: "b"}, inbox.ErrLimited},
+			inbox.Item{Link: next, Delegation: "ops", Digest: "b"}, 0, inbox.ErrLimited},
+		{"requests past the hour no longer count", inbox.Limits{PerHour: 2},
+			inbox.Item{Link: next, Delegation: "ops", Digest: "b"}, 55 * time.Minute, nil},
 		{"the same digest within the window is a duplicate", inbox.Limits{Dedupe: time.Hour},
-			inbox.Item{Link: next, Delegation: "ops", Digest: "a"}, inbox.ErrDuplicate},
+			inbox.Item{Link: next, Delegation: "ops", Digest: "a"}, 0, inbox.ErrDuplicate},
+		{"the same digest past the window is queued", inbox.Limits{Dedupe: 5 * time.Minute},
+			inbox.Item{Link: next, Delegation: "ops", Digest: "a"}, 0, nil},
 		{"another delegation counts on its own", inbox.Limits{PerHour: 2, Dedupe: time.Hour},
-			inbox.Item{Link: next, Delegation: "dev", Digest: "a"}, nil},
+			inbox.Item{Link: next, Delegation: "dev", Digest: "a"}, 0, nil},
 		{"a thread seen before is never limited", inbox.Limits{PerHour: 1, Dedupe: time.Hour},
-			inbox.Item{Link: link, Delegation: "ops", Digest: "a", Ts: "5"}, nil},
+			inbox.Item{Link: link, Delegation: "ops", Digest: "a", Ts: "5"}, 0, nil},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := inbox.New(t.TempDir())
 			for _, l := range []string{link, other} {
-				_, _, err := s.Add(inbox.Item{Link: l, Delegation: "ops", Digest: "a"}, now.Add(-10*time.Minute))
+				it := inbox.Item{Link: l, Delegation: "ops", Digest: "a"}
+				_, _, err := s.AddLimited(it, inbox.Limits{PerHour: 100}, now.Add(-10*time.Minute))
 				require.NoError(t, err)
 			}
 
-			_, _, err := s.AddLimited(tc.item, tc.lim, now)
+			_, _, err := s.AddLimited(tc.item, tc.lim, now.Add(tc.after))
 
 			assert.ErrorIs(t, err, tc.want)
 			if tc.want == nil {
@@ -178,6 +185,21 @@ func TestStoreAddLimited(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Each request queued under limits counts toward the next one
+func TestStoreAddLimited_Counts(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	s := inbox.New(t.TempDir())
+	lim := inbox.Limits{PerHour: 2}
+	got := []error{}
+	for i, l := range []string{link, other, "https://w.slack.com/archives/C1/p9"} {
+		_, _, err := s.AddLimited(inbox.Item{Link: l, Delegation: "ops"}, lim, now.Add(time.Duration(i)*time.Minute))
+		got = append(got, err)
+	}
+
+	assert.Equal(t, []error{nil, nil, inbox.ErrLimited}, got)
 }
 
 func TestStoreIgnored(t *testing.T) {
@@ -221,7 +243,7 @@ func TestStoreAck(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := inbox.New(t.TempDir())
-			_, _, err := s.Add(inbox.Item{Link: link}, time.Now())
+			_, _, err := add(s, inbox.Item{Link: link}, time.Now())
 			require.NoError(t, err)
 			var failed bool
 			for _, r := range tc.reacts {

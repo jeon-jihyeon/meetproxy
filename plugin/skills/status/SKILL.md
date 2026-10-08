@@ -21,7 +21,7 @@ allowed-tools: Bash(meetproxy status), Bash(meetproxy status *), Bash(meetproxy 
    - ignored: `history.ignored` messages read and not queued in 3 days
    - relays open: `relays_open`
    - hook failures: how many `hooks` holds and the newest one's hook and error
-   - kept: `bytes.map`, `bytes.closed` and `bytes.observed` in KB
+   - kept: `bytes.closed` in KB
 3. Then run `meetproxy posts list --data "${CLAUDE_PLUGIN_DATA}" --limit 5` and list the replies numbered from 1, one line each: when, `mode`, `kind`, the `reply` link and retracted when `retracted_at` is set. Never quote `body`
 4. Under that, one line per problem with its fix and nothing when there is none
    - Slack read through the connector: `/meetproxy:slack setup` sets up a token so Slack is read in the background and not only when the inbox is opened

@@ -1,45 +1,100 @@
 // Runs the watcher against fake Slack and GitHub answers and the real binary
 // MEETPROXY_BIN names the binary
 // The Go test of the plugin sets it
+// The binary reaches GitHub through gh so a fake gh on its PATH answers from the session's fixtures
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { register, testing } from './meetproxy.js'
+import { threadMessages } from './slack.js'
 
 const BIN = process.env.MEETPROXY_BIN
 const integration = { skip: BIN ? false : 'MEETPROXY_BIN is not set' }
 const NOW = Date.parse('2030-01-01T00:10:00Z')
+const HERE = dirname(fileURLToPath(import.meta.url))
+
+// A gh that answers an api path from gh.json in MEETPROXY_FAKE_GH and logs every call to gh.log there
+// 1. A POST with content= is a reaction, any other POST a comment answered with a fixed link
+// 2. PATCH and DELETE are edits
+// 3. user answers the login me
+const FAKE_GH = `#!/usr/bin/env node
+const fs = require('fs')
+const dir = process.env.MEETPROXY_FAKE_GH
+const { answers, sendFails } = JSON.parse(fs.readFileSync(dir + '/gh.json', 'utf8'))
+const args = process.argv.slice(2)
+const log = x => fs.appendFileSync(dir + '/gh.log', JSON.stringify(x) + '\\n')
+const stdin = () => { try { return JSON.parse(fs.readFileSync(0, 'utf8')).body } catch { return undefined } }
+const out = (x, code = 0) => { process.stdout.write(typeof x === 'string' ? x : JSON.stringify(x)); process.exit(code) }
+if (args.includes('POST')) {
+  if (sendFails) { process.stderr.write('HTTP 404'); process.exit(1) }
+  const content = args.find(a => a.startsWith('content='))
+  if (content) { log({ react: [args[3], content] }); out('{}') }
+  log({ sent: { path: args[3], body: stdin() } })
+  out({ html_url: 'https://github.com/o/svc/pull/7#issuecomment-900' })
+}
+if (args.includes('PATCH') || args.includes('DELETE')) {
+  log({ edit: [args[2], args[3], args.includes('PATCH') ? stdin() : undefined] })
+  out('{}')
+}
+const path = args.find(a => a.startsWith('repos/') || a.startsWith('https://') || a === 'notifications' || a === 'user')
+log({ call: path })
+if (path === 'user') out('me\\n')
+if (answers[path] === undefined) { process.stderr.write('no fake for ' + path); process.exit(1) }
+out(answers[path])
+`
+const FAKE_DIR = mkdtempSync(join(tmpdir(), 'meetproxy-gh-'))
+writeFileSync(join(FAKE_DIR, 'gh'), FAKE_GH)
+chmodSync(join(FAKE_DIR, 'gh'), 0o755)
 
 // A session with fake sources
-// 1. gh maps an api path to its answer
+// 1. gh maps an api path to its answer for the fake gh the binary runs
 // 2. slack maps a tool name to a function of its arguments and lists the connector's tools when it holds any
 // 3. token maps a meetproxy slack command such as mentions to a function of its arguments and stdin
 //    It also stores a token so the binary's tick reports one
 // 4. fail picks binary calls that fail
 // 5. sendFails makes every post fail
-function session({ gh = {}, slack = {}, token, fail = () => false, sendFails = false, now = NOW } = {}) {
+// 6. sentLink is what the connector names when it sends a Slack message
+function session({ gh = {}, slack = {}, token, fail = () => false, sendFails = false, now = NOW, sentLink } = {}) {
   testing.failures.clear()
   testing.sorted.clear()
   testing.reset()
   for (const k of Object.keys(testing.reached)) delete testing.reached[k]
   const data = mkdtempSync(join(tmpdir(), 'meetproxy-mod-'))
   const store = {}
-  const env = { data, now, ran: [], sent: [], reactions: [], edits: [], asked: [], logs: [], toasts: [], statuses: [], calls: [], ticks: [], mcp: [], ghCalls: [], triaged: 0 }
+  const env = { data, now, store, ran: [], sent: [], reactions: [], edits: [], asked: [], logs: [], toasts: [], statuses: [], calls: [], ticks: [], mcp: [], ghCalls: [], modGh: [], triaged: 0 }
   env.tools = Object.keys(slack).length ? Object.keys(slack).map(t => ({ name: 'mcp__plugin_slack_slack__' + t, mcp: true })) : []
   if (token) {
     mkdirSync(join(data, 'slack'), { recursive: true })
     writeFileSync(join(data, 'slack', 'token'), 'xoxp-test\n', { mode: 0o600 })
     writeFileSync(join(data, 'slack', 'auth.json'), JSON.stringify({ user: 'ME', team: 'T1', host: 'w.slack.com', scopes: [] }))
   }
+  // What the fake gh logged moves into the session's lists after every call of the binary
+  const drain = () => {
+    const file = join(data, 'gh.log')
+    if (!existsSync(file)) return
+    for (const line of readFileSync(file, 'utf8').split('\n').filter(Boolean)) {
+      const x = JSON.parse(line)
+      if (x.react) env.reactions.push(x.react)
+      if (x.sent) env.sent.push(x.sent)
+      if (x.edit) env.edits.push(x.edit)
+      if ('call' in x) env.ghCalls.push(x.call)
+    }
+    rmSync(file)
+  }
   const bin = (args, stdin) => {
+    writeFileSync(join(data, 'gh.json'), JSON.stringify({ answers: gh, sendFails }))
+    const opts = { input: stdin ?? '', env: { ...process.env, PATH: FAKE_DIR + ':' + process.env.PATH, MEETPROXY_FAKE_GH: data } }
     try {
-      return { exitCode: 0, stdout: execFileSync(BIN, [...args, '--data', data], { input: stdin ?? '' }).toString(), stderr: '' }
+      return { exitCode: 0, stdout: execFileSync(BIN, [...args, '--data', data], opts).toString(), stderr: '' }
     } catch (e) {
       return { exitCode: e.status ?? 1, stdout: e.stdout?.toString() ?? '', stderr: e.stderr?.toString() ?? '' }
+    } finally {
+      drain()
     }
   }
   env.bin = bin
@@ -60,26 +115,10 @@ function session({ gh = {}, slack = {}, token, fail = () => false, sendFails = f
     },
     process: {
       run: async (argv, init) => {
+        // The mod reaches GitHub through the binary alone
         if (argv[0] === 'gh') {
-          const args = argv.slice(1)
-          if (args.includes('POST')) {
-            if (sendFails) return { exitCode: 1, stdout: '', stderr: 'HTTP 404' }
-            if (args.includes('content=eyes') || args.includes('content=hooray')) {
-              env.reactions.push([args[3], args.at(-1)])
-              return { exitCode: 0, stdout: '{}', stderr: '' }
-            }
-            env.sent.push({ path: args[3], body: JSON.parse(init.stdin).body })
-            return { exitCode: 0, stdout: JSON.stringify({ html_url: 'https://github.com/o/svc/pull/7#issuecomment-900' }), stderr: '' }
-          }
-          if (args.includes('PATCH') || args.includes('DELETE')) {
-            env.edits.push([args[2], args[3], init?.stdin ? JSON.parse(init.stdin).body : undefined])
-            return { exitCode: 0, stdout: '{}', stderr: '' }
-          }
-          const path = args.find(a => a.startsWith('repos/') || a.startsWith('https://') || a === 'notifications' || a === 'user')
-          env.ghCalls.push(path)
-          const answer = path === 'user' ? 'me' : gh[path]
-          if (answer === undefined) return { exitCode: 1, stdout: '', stderr: 'no fake for ' + path }
-          return { exitCode: 0, stdout: typeof answer === 'string' ? answer : JSON.stringify(answer), stderr: '' }
+          env.modGh.push(argv)
+          return { exitCode: 1, stdout: '', stderr: 'the mod ran gh' }
         }
         const args = argv.slice(1).filter((a, i, all) => a !== '--root' && all[i - 1] !== '--root')
         env.calls.push(args)
@@ -97,7 +136,7 @@ function session({ gh = {}, slack = {}, token, fail = () => false, sendFails = f
         if (tool === 'slack_send_message') {
           if (sendFails) return { isError: true, content: [{ type: 'text', text: 'channel_not_found' }] }
           env.sent.push(args)
-          return { content: [] }
+          return { content: sentLink ? [{ type: 'text', text: 'Sent: ' + sentLink }] : [] }
         }
         const fn = slack[tool]
         if (!fn) throw new Error('slack is not connected')
@@ -128,9 +167,10 @@ function session({ gh = {}, slack = {}, token, fail = () => false, sendFails = f
 const at = iso => String(Date.parse(iso) / 1000)
 const githubCursor = env => env.bin(['inbox', 'cursor', '--key', 'github']).stdout.trim()
 const opsDelegation = { id: 'ops', when: 'channel', channel: 'C9', host: 'w.slack.com', words: ['Triggered'], do: 'investigate' }
-// Columns of inbox list: id, status, source, author, link, summary
+// Columns of inbox list: id, status, source, author, link, summary, added, last
 const rows = env => env.bin(['inbox', 'list']).stdout.trim().split('\n').filter(Boolean).map(l => l.split('\t'))
 const tick = env => JSON.parse(env.bin(['tick']).stdout)
+const called = (env, ...words) => env.calls.filter(a => words.every((w, i) => a[i] === w))
 const item = (env, id) => JSON.parse(readFileSync(join(env.data, 'inbox', id + '.json'), 'utf8'))
 // A check the user's own turn runs so the Slack connector may be called
 const interactive = env => testing.check(env.$, undefined, true)
@@ -163,7 +203,7 @@ test('slackLink reads the thread of a reply link', () => {
 })
 
 test('githubLink reads a review thread', () => {
-  assert.deepEqual(testing.githubLink('https://github.com/o/r/pull/3#discussion_r55'), { owner: 'o', repo: 'r', number: '3', pull: true, discussion: '55' })
+  assert.deepEqual(testing.githubLink('https://github.com/o/r/pull/3#discussion_r55'), { owner: 'o', repo: 'r', number: '3', pull: true, discussion: '55', comment: undefined })
   assert.equal(testing.githubLink('https://github.com/o/r/pull/3').discussion, undefined)
   assert.equal(testing.githubLink('https://github.com/o/r/issues/3').pull, false)
 })
@@ -174,6 +214,7 @@ for (const tc of [
   { name: 'a GitHub comment', link: 'https://github.com/o/r/pull/3#issuecomment-9', want: 'github:o/r#3' },
   { name: 'a GitHub issue', link: 'https://github.com/o/r/issues/4', want: 'github:o/r#4' },
   { name: 'a GitHub review thread', link: 'https://github.com/o/r/pull/3#discussion_r55', want: 'github:o/r#3:55' },
+  { name: 'a Slack direct message', link: 'https://w.slack.com/archives/D1/p1790000000000200?thread_ts=1790000000.000100&cid=D1', want: 'slack:D1' },
   { name: 'another link', link: 'https://example.com/x', want: 'https://example.com/x' },
 ]) {
   test('threadOf keys ' + tc.name, () => {
@@ -229,7 +270,7 @@ test('a review request is queued with its summary', integration, async () => {
   const env = session({ gh: reviewRequest('2030-01-01T00:05:00Z') })
   env.bin(['inbox', 'advance', at('2030-01-01T00:00:00Z'), '--key', 'github'])
   await testing.check(env.$)
-  assert.deepEqual(rows(env).map(r => r.slice(1)), [['open', 'github', 'green', 'https://github.com/o/web/pull/3', 'Review requested: Add page']])
+  assert.deepEqual(rows(env).map(r => r.slice(1, 6)), [['open', 'github', 'green', 'https://github.com/o/web/pull/3', 'Review requested: Add page']])
   assert.equal(githubCursor(env), at('2030-01-01T00:05:00Z'))
 })
 
@@ -314,14 +355,16 @@ test('a failing source gives up its lease so another session can read it', integ
 })
 
 test('post checks its input and its destination before sending', integration, async () => {
-  const env = session()
+  const env = session({ gh: { 'repos/o/svc/pulls/comments/55': { id: 55, html_url: 'https://github.com/o/svc/pull/7#discussion_r55' } } })
   assert.equal(await testing.post(env.$, 'https://github.com/o/svc/pull/7', ''), 'post needs a link and a text')
   assert.equal(await testing.post(env.$, 'https://example.com', 'hi'), 'meetproxy cannot post to https://example.com')
   assert.match(await testing.post(env.$, 'https://github.com/x/y/pull/1', 'hi'), /^denied/)
   env.bin(['open', 'https://github.com/o/svc/pull/7#discussion_r55', '--session', 'S1'])
+  // The binary replies to the root of the review thread so it reads the comment first
   assert.equal(await testing.post(env.$, 'https://github.com/o/svc/pull/7#discussion_r55', 'reply'), 'posted to https://github.com/o/svc/pull/7#discussion_r55')
   assert.deepEqual(env.sent, [{ path: 'repos/o/svc/pulls/7/comments/55/replies', body: 'reply' }])
   assert.match(await testing.post(env.$, 'https://w.slack.com/archives/C7/p1790000000000001', 'hi'), /^denied/)
+  assert.deepEqual(env.modGh, [])
 })
 
 test('a post whose check fails is denied and nothing is sent', integration, async () => {
@@ -401,7 +444,7 @@ test('two mentions in one Slack thread make one request whose summary is the new
   })
   env.bin(['inbox', 'advance', '1893456000', '--key', 'mention'])
   await interactive(env)
-  assert.deepEqual(rows(env).map(r => r.slice(1)), [['open', 'slack', 'P2', link(0), '<@ME> and the timeout?']])
+  assert.deepEqual(rows(env).map(r => r.slice(1, 6)), [['open', 'slack', 'P2', link(0), '<@ME> and the timeout?']])
   assert.equal(item(env, rows(env)[0][0]).thread, 'slack:C1:' + thread)
 })
 
@@ -420,7 +463,7 @@ test('a failing source leaves a lease another session took over', integration, a
   const env = session()
   const real = env.$.process.run
   env.$.process.run = async (argv, init) => {
-    if (!argv.includes('notifications')) return real(argv, init)
+    if (!argv.includes('mentions')) return real(argv, init)
     // S2 takes the lease over while the read of S1 hangs
     env.bin(['lease', 'drop', 'github', '--session', 'S1'])
     env.bin(['lease', 'hold', 'github', '--session', 'S2'])
@@ -472,7 +515,8 @@ test('a message that shows up after the cursor moved past it is still queued onc
   gh.notifications[0][0].updated_at = '2030-01-01T00:07:00Z'
   await testing.check(env.$)
   assert.deepEqual(rows(env).map(r => [r[1], r[2], r[4]]), [['open', 'github', 'https://github.com/o/svc/pull/7#issuecomment-1']])
-  assert.equal(env.triaged, 2)
+  // The inbox already holds the message so the other session costs no second triage
+  assert.equal(env.triaged, 1)
   assert.equal(githubCursor(env), at('2030-01-01T00:07:00Z'))
 })
 
@@ -542,13 +586,21 @@ test('a post that fails to send says so', integration, async () => {
   assert.deepEqual(env.sent, [])
 })
 
-test('a post to an allowed Slack channel goes to the thread of the link', integration, async () => {
-  const env = session()
-  env.bin(['allow', 'slack:C7'])
-  const link = 'https://w.slack.com/archives/C7/p1790000000000200?thread_ts=1790000000.000100&cid=C7'
-  assert.equal(await testing.post(env.$, link, 'hi'), 'posted to ' + link)
-  assert.deepEqual(env.sent, [{ channel_id: 'C7', thread_ts: '1790000000.000100', message: 'hi' }])
-})
+for (const tc of [
+  { name: 'a post the connector names a link for is posted and kept', sentLink: 'https://w.slack.com/archives/C7/p1790000000000300?thread_ts=1790000000.000100', want: { posted: true, ledger: 1 } },
+  { name: 'a post the connector names no link for never reads as posted', sentLink: undefined, want: { posted: false, ledger: 0 } },
+]) {
+  test(tc.name, integration, async () => {
+    const env = session({ sentLink: tc.sentLink, slack: { slack_read_user_profile: () => ({ result: 'User ID: ME\n' }) } })
+    const link = 'https://w.slack.com/archives/C7/p1790000000000200?thread_ts=1790000000.000100&cid=C7'
+    env.bin(['inbox', 'add', link, '--thread', 'slack:C7:1790000000.000100', '--source', 'slack'])
+    env.bin(['open', link, '--session', 'S1'])
+    const r = await testing.post(env.$, link, 'hi')
+    assert.deepEqual(env.sent, [{ channel_id: 'C7', thread_ts: '1790000000.000100', message: 'hi' }])
+    assert.deepEqual({ posted: r === 'posted to ' + link, ledger: JSON.parse(env.bin(['posts', 'list']).stdout).length }, tc.want)
+    if (!tc.want.posted) assert.match(r, /^sent to .* not in the ledger/)
+  })
+}
 
 // The handlers register gives with the binary answering the given commands with an older protocol
 // The catch of a hook registered on one tool is kept under that tool
@@ -591,6 +643,14 @@ for (const tc of [
     }, tc.want)
   })
 }
+
+test('a session start forgets the GitHub notifications older watchers kept', integration, async () => {
+  const env = session()
+  env.store['ghseen:1'] = { updated: 'x', at: NOW }
+  env.store.githubUser = 'me'
+  await started(env, {})
+  assert.deepEqual(Object.keys(env.store), ['githubUser'])
+})
 
 test('the post tool goes through the tool call and other tools pass on', integration, async () => {
   const env = session()
@@ -789,16 +849,14 @@ test('a notification whose updated_at did not change costs no read of its pull r
   await testing.check(env.$)
   const again = env.ghCalls.slice(first)
   assert.ok(env.ghCalls.slice(0, first).includes('https://api.github.com/repos/o/web/pulls/3'))
-  assert.deepEqual(again.filter(p => p !== 'notifications'), [])
+  // Only the recheck of the open request reads its comments
+  assert.deepEqual(again.filter(p => p === 'https://api.github.com/repos/o/web/pulls/3' || p.endsWith('/timeline')), [])
   assert.equal(githubCursor(env), at('2030-01-01T00:05:00Z'))
-  // A day without the notification forgets it
-  env.now += 25 * 60 * 60_000
-  await env.$.store.set('ghseen:x', { updated: 'y', at: NOW })
-  await testing.check(env.$)
-  assert.equal(await env.$.store.get('ghseen:x'), undefined)
+  // The binary remembers what it read so the mod keeps nothing of it
+  assert.deepEqual(Object.keys(env.store).filter(k => k.startsWith('ghseen:')), [])
 })
 
-test('the lease is renewed after each message of a long check', integration, async () => {
+test('the lease is held once per check and renewed only when it runs short', integration, async () => {
   const gh = githubMention()
   gh['repos/o/svc/issues/7/comments'][0][1] = { html_url: 'https://github.com/o/svc/pull/7#issuecomment-2', body: '@me and this?', user: { login: 'lee' }, author_association: 'MEMBER', created_at: '2030-01-01T00:05:00Z' }
   const env = session({ gh })
@@ -806,7 +864,13 @@ test('the lease is renewed after each message of a long check', integration, asy
   await testing.check(env.$)
   // Both comments sit on one pull request so they make one request
   assert.deepEqual(rows(env).map(r => [r[3], r[4], r[5]]), [['lee', 'https://github.com/o/svc/pull/7#issuecomment-1', '@me and this?']])
-  assert.equal(env.calls.filter(a => a[0] === 'lease' && a[1] === 'hold' && a[2] === 'github').length, 3)
+  assert.equal(called(env, 'lease', 'hold', 'github').length, 1)
+  env.now += 60_000
+  await testing.check(env.$)
+  assert.equal(called(env, 'lease', 'hold', 'github').length, 1)
+  env.now += 90_000
+  await testing.check(env.$)
+  assert.equal(called(env, 'lease', 'hold', 'github').length, 2)
 })
 
 test('the token tool hands the token to the binary and answers without it', integration, async () => {
@@ -838,7 +902,7 @@ async function answered(env) {
   env.bin([...add, '--ts', at('2030-01-01T00:02:00Z'), '--key', 'github'])
   env.bin(['open', origin, '--session', 'S1'])
   assert.equal(await testing.post(env.$, origin, 'retry is in config.go\n\n_Written by Claude on behalf of the user_'), 'posted to ' + origin)
-  env.bin(['close', '--topic', 'retry', '--session', 'S1'])
+  env.bin(['close', '--session', 'S1'])
 }
 
 test('post writes the ledger with the permalink of the reply', integration, async () => {
@@ -871,7 +935,7 @@ test('a follow-up in a watched thread reopens the same request', integration, as
   assert.equal(env.triaged, 1)
 })
 
-test('a follow-up that says the answer was wrong records a correction', integration, async () => {
+test('a follow-up that says the answer was wrong is queued as a correction', integration, async () => {
   const env = session({
     gh: {
       notifications: [[]],
@@ -883,7 +947,7 @@ test('a follow-up that says the answer was wrong records a correction', integrat
   await answered(env)
   await testing.check(env.$)
   assert.deepEqual(rows(env).map(r => [r[1], r[4]]), [['open', origin]])
-  assert.ok(env.calls.some(a => a[0] === 'correct'))
+  assert.equal(env.calls.some(a => a[0] === 'correct'), false)
   const taken = env.bin(['inbox', 'take', rows(env)[0][0], '--session', 'S1']).stdout.trim().split('\t')
   assert.deepEqual(taken.slice(4), ['quick', 'followup,correction'])
 })
@@ -964,7 +1028,7 @@ test('with a token a Slack follow-up is read through the binary', integration, a
   })
   env.bin(['open', thread, '--session', 'S1'])
   assert.equal(await testing.post(env.$, thread, 'in config.go'), 'posted to ' + thread)
-  env.bin(['close', '--topic', 'retry', '--session', 'S1'])
+  env.bin(['close', '--session', 'S1'])
   await testing.check(env.$)
   assert.deepEqual(rows(env).map(r => [r[1], r[4]]), [['open', thread]])
   assert.deepEqual(env.mcp, [])
@@ -1013,4 +1077,280 @@ test('retract refuses a reply outside the ledger and edits one in it', integrati
   assert.deepEqual(env.edits, [['PATCH', 'repos/o/svc/issues/comments/900', 'it is in retry.go\n\n_Written by Claude on behalf of the user_']])
   assert.ok(JSON.parse(env.bin(['posts', 'list']).stdout)[0].retracted_at)
   assert.match(await testing.retract(env.$, reply), /already retracted/)
+})
+
+// The links both the Go parser and these regexes are checked against
+const LINKS = JSON.parse(readFileSync(join(HERE, 'testdata', 'links.json'), 'utf8'))
+
+for (const tc of LINKS) {
+  test('the link parsers read the corpus link: ' + tc.name, () => {
+    const s = testing.slackLink(tc.link)
+    const g = testing.githubLink(tc.link)
+    let got = { source: '' }
+    if (s) got = { source: 'slack', channel: s.channel, ts: s.ts, thread_ts: s.thread, thread: testing.threadOf(tc.link) }
+    if (g) {
+      got = { source: 'github', repo: `${g.owner}/${g.repo}`, number: Number(g.number), pull: g.pull || undefined, discussion: g.discussion, comment: g.comment, thread: testing.threadOf(tc.link) }
+    }
+    const want = Object.fromEntries(Object.keys(got).map(k => [k, tc[k]]))
+    assert.deepEqual(JSON.parse(JSON.stringify(got)), JSON.parse(JSON.stringify(want)))
+  })
+}
+
+test('every dispatcher has a case for every source and throws on any other', async () => {
+  const links = { slack: 'https://w.slack.com/archives/C1/p1790000000000100', github: 'https://github.com/o/r/pull/1', jira: 'https://jira.example.com/browse/X-1' }
+  const $ = {
+    plugin: { root: '/plugin' },
+    session: { id: async () => 'S1' },
+    clock: { now: async () => NOW },
+    store: { get: async () => undefined, set: async () => {} },
+    tool: { list: async () => [] },
+    process: { run: async () => ({ exitCode: 1, stdout: '', stderr: 'offline' }) },
+    mcp: { call: async () => { throw new Error('offline') } },
+    ui: { log: () => {} },
+  }
+  const dispatchers = {
+    owner: s => testing.owner(links[s]),
+    ready: s => testing.ready($, s, 'token'),
+    receive: s => testing.receive($, s, {}, 'token'),
+    received: s => testing.received($, s),
+    covered: s => testing.covered($, { source: s, link: links[s], ts: '1790000000' }, 'token'),
+    send: s => testing.send($, s, links[s], 'hi'),
+    replies: s => testing.replies($, s, { thread: links[s], seen: '1790000000' }, 'token'),
+    react: s => testing.react($, s, links[s], 'eyes', 'token'),
+    unsay: s => testing.unsay($, s, { reply: links[s] }, 'hi'),
+  }
+  assert.deepEqual(testing.SOURCES, ['slack', 'github'])
+  const unknown = /knows no source/
+  for (const [name, call] of Object.entries(dispatchers)) {
+    for (const source of testing.SOURCES) {
+      const err = await (async () => call(source))().then(() => undefined, e => e)
+      assert.doesNotMatch(String(err?.message ?? ''), unknown, `${name} has no case for ${source}`)
+    }
+    await assert.rejects(async () => call('jira'), unknown, `${name} answers for an unknown source`)
+  }
+})
+
+test('the timer beats with its session and reads one tick and no engine when nothing changed', integration, async () => {
+  const env = session({ gh: { notifications: [[]] } })
+  await started(env, {})
+  for (const fn of env.ticks) await fn()
+  assert.deepEqual(called(env, 'tick').map(a => a.slice(1)), [['--session', 'S1']])
+  assert.ok(existsSync(join(env.data, 'inbox', 'beat', 'S1')))
+  assert.deepEqual(called(env, 'triage'), [])
+})
+
+test('a timer run that queued a request reads the tick again for the status line', integration, async () => {
+  const { env } = tokenSession()
+  await started(env, {})
+  for (const fn of env.ticks) await fn()
+  assert.equal(called(env, 'tick').length, 2)
+  assert.deepEqual(env.statuses, ['meetproxy: 1 open, /meetproxy:inbox'])
+})
+
+test('a lease that lasts is not held again and one another session holds is left without asking', integration, async () => {
+  const env = session({ gh: { notifications: [[]] }, now: Date.now() })
+  await testing.check(env.$)
+  // The tick alone tells the next check that the lease still lasts
+  for (const k of Object.keys(testing.holding)) delete testing.holding[k]
+  await testing.check(env.$)
+  assert.equal(called(env, 'lease', 'hold', 'github').length, 1)
+  const other = session({ gh: { notifications: [[]] }, now: Date.now() })
+  other.bin(['lease', 'hold', 'github', '--session', 'S2', '--ttl', '180s'])
+  await testing.check(other.$)
+  assert.deepEqual(called(other, 'lease', 'hold'), [])
+  assert.deepEqual(called(other, 'github', 'mentions'), [])
+})
+
+test('a nag that is not due costs no call of the binary', integration, async () => {
+  const env = session()
+  env.store['nag:slack'] = NOW
+  env.store['nag:github'] = NOW
+  await testing.nag(env.$, tick(env))
+  assert.deepEqual(env.calls, [])
+  assert.deepEqual(env.asked, [])
+})
+
+test('a message the inbox already holds costs no triage and no add', integration, async () => {
+  const env = session({ gh: githubMention() })
+  env.bin(['inbox', 'advance', at('2030-01-01T00:00:00Z'), '--key', 'github'])
+  const add = ['inbox', 'add', 'https://github.com/o/svc/pull/7#issuecomment-1', '--thread', 'github:o/svc#7', '--source', 'github']
+  env.bin([...add, '--ts', at('2030-01-01T00:04:00Z')])
+  await testing.check(env.$)
+  assert.equal(env.triaged, 0)
+  assert.deepEqual(called(env, 'inbox', 'add'), [])
+  assert.deepEqual(called(env, 'delegation', 'match').map(a => a.slice(3)), [['--thread', 'github:o/svc#7', '--ts', at('2030-01-01T00:04:00Z')]])
+  assert.equal(githubCursor(env), at('2030-01-01T00:05:00Z'))
+})
+
+test('the GitHub notifications are remembered only once every message is settled', integration, async () => {
+  const env = session({ gh: githubMention(), fail: args => args[0] === 'inbox' && args[1] === 'add' })
+  env.bin(['inbox', 'advance', at('2030-01-01T00:00:00Z'), '--key', 'github'])
+  await testing.check(env.$)
+  assert.deepEqual(called(env, 'github', 'seen'), [])
+  const ok = session({ gh: githubMention() })
+  ok.bin(['inbox', 'advance', at('2030-01-01T00:00:00Z'), '--key', 'github'])
+  await testing.check(ok.$)
+  assert.equal(called(ok, 'github', 'seen').length, 1)
+  assert.deepEqual(ok.modGh, [])
+})
+
+test('a direct message keeps the thread the binary names and is read from before the cursor', integration, async () => {
+  const link = 'https://w.slack.com/archives/D5/p1893455000000001'
+  const dm = { author: 'Kai', channel: 'D5', from: 'U2', ts: '1893455000.000001', link, text: 'can you look', thread: 'slack:D5' }
+  const { env } = tokenSession({ mentions: () => ({ out: [] }), dms: () => ({ out: [dm] }) })
+  await testing.check(env.$)
+  assert.deepEqual(rows(env).map(r => r[4]), [link])
+  assert.equal(item(env, rows(env)[0][0]).thread, 'slack:D5')
+})
+
+test('the lease holder rechecks five open requests at a time and drops the answered ones', integration, async () => {
+  const gh = { notifications: [[]] }
+  for (let n = 1; n <= 7; n++) gh[`repos/o/svc/issues/${n}/comments`] = [[]]
+  gh['repos/o/svc/issues/1/comments'] = [[{ ...comment(30, 'me', 'done by hand', '2030-01-01T00:05:00Z'), html_url: 'https://github.com/o/svc/issues/1#issuecomment-30' }]]
+  const env = session({ gh })
+  for (let n = 1; n <= 7; n++) {
+    env.bin(['inbox', 'add', `https://github.com/o/svc/issues/${n}`, '--thread', `github:o/svc#${n}`, '--source', 'github', '--ts', at(`2030-01-01T00:00:0${n}Z`)])
+  }
+  const rechecks = () => called(env, 'github', 'covered').length
+  await testing.check(env.$)
+  assert.equal(rechecks(), 5)
+  assert.equal(rows(env).length, 6)
+  assert.equal(rows(env).some(r => r[4].endsWith('/issues/1')), false)
+  env.now += 60_000
+  await testing.check(env.$)
+  assert.equal(rechecks(), 7)
+  env.now += 10 * 60_000
+  await testing.check(env.$)
+  assert.equal(rechecks(), 12)
+})
+
+test('channelMessages keeps the first line of a message and drops the thread line', () => {
+  const answer = {
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify({
+          messages:
+            'Channel: #ops (C9)\n\n=== Message from Kai (K), Team <kai@x.com> (U2) at 2030-01-01 12:10:15 KST === \nMessage TS: 1893456100.000001\n' +
+            '<!subteam^S1> review please\nPR: link\n\nmore context\nThread: 3 replies (latest: 2030-01-01 12:25:56 KST)',
+        }),
+      },
+    ],
+  }
+  assert.deepEqual(testing.channelMessages(answer, 'C9', 'w.slack.com'), [
+    {
+      author: 'Kai',
+      from: 'U2',
+      channel: 'C9',
+      ts: '1893456100.000001',
+      link: 'https://w.slack.com/archives/C9/p1893456100000001',
+      text: '<!subteam^S1> review please\nPR: link\n\nmore context',
+    },
+  ])
+})
+
+test('threadMessages reads the detailed thread answer of the connector', () => {
+  const answer = {
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify({
+          messages:
+            '=== THREAD PARENT MESSAGE ===\nFrom: Kai (K) <kai@x.com> (U2)\nTime: 2030-01-01 09:44:06 KST\nMessage TS: 1893456100.000001\n' +
+            '<@ME> where is retry\nReactions: eyes (1)\n\n=== THREAD REPLIES (1 total) ===\n\n--- Reply 1 of 1 ---\n' +
+            'From: Ann <ann@x.com> (U3)\nTime: 2030-01-01 09:55:19 KST\nMessage TS: 1893456200.000001\nin config.go\nline two\n',
+          pagination_info: 'There are no more messages in this thread.\n',
+        }),
+      },
+    ],
+  }
+  assert.deepEqual(threadMessages(answer, 'C7', 'w.slack.com'), [
+    { author: 'Kai', from: 'U2', channel: 'C7', ts: '1893456100.000001', link: 'https://w.slack.com/archives/C7/p1893456100000001', text: '<@ME> where is retry' },
+    { author: 'Ann', from: 'U3', channel: 'C7', ts: '1893456200.000001', link: 'https://w.slack.com/archives/C7/p1893456200000001', text: 'in config.go\nline two' },
+  ])
+})
+
+test('without a token the inbox reads a watched Slack thread so a reply to a question reopens the request', integration, async () => {
+  const link = 'https://w.slack.com/archives/C7/p1893456100000001'
+  const reply = 'https://w.slack.com/archives/C7/p1893456150000001?thread_ts=1893456100.000001'
+  // The detailed form of the connector's thread reader as it answers today
+  const block = (head, who, id, ts, body) => ({
+    ts,
+    text: `${head}\nFrom: ${who} <x@x.com> (${id})\nTime: 2030-01-01 00:00:00 UTC\nMessage TS: ${ts}\n${body}\nReactions: eyes (1)\n\n`,
+  })
+  const thread = [
+    block('=== THREAD PARENT MESSAGE ===', 'Kai', 'U2', '1893456100.000001', '<@ME> where is retry'),
+    block('--- Reply 1 of 2 ---', 'Me', 'ME', '1893456150.000001', 'which service?\n\n_Written by Claude on behalf of the user_'),
+    block('--- Reply 2 of 2 ---', 'Kai', 'U2', '1893456200.000001', 'the billing one'),
+  ]
+  const env = session({
+    sentLink: reply,
+    slack: {
+      slack_read_user_profile: () => ({ result: 'User ID: ME\nEmail: me@x.com\n' }),
+      slack_search_public_and_private: () => ({ results: '' }),
+      slack_read_channel: () => ({ messages: '' }),
+      slack_read_thread: args => ({
+        messages: thread
+          .filter(b => Number(b.ts) >= Number(args.oldest ?? 0))
+          .map((b, i) => (i === 1 ? '=== THREAD REPLIES (2 total) ===\n\n' : '') + b.text)
+          .join(''),
+      }),
+    },
+  })
+  env.bin(['inbox', 'add', link, '--thread', 'slack:C7:1893456100.000001', '--source', 'slack', '--author', 'Kai', '--ts', '1893456100.000001'])
+  env.bin(['inbox', 'advance', '1893456300', '--key', 'mention'])
+  const id = rows(env)[0][0]
+  env.bin(['inbox', 'take', id, '--session', 'S1'])
+  env.bin(['open', link, '--session', 'S1'])
+  assert.equal(await testing.post(env.$, link, 'which service?', 'question'), 'posted to ' + link)
+  assert.equal(env.bin(['inbox', 'question', id, '--session', 'S1']).exitCode, 0)
+  await testing.check(env.$)
+  assert.deepEqual(env.mcp.filter(t => t === 'slack_read_thread'), [])
+  assert.deepEqual(rows(env).map(r => r[1]), ['question'])
+  await interactive(env)
+  assert.deepEqual(rows(env).map(r => [r[0], r[1], r[5]]), [[id, 'open', 'the billing one']])
+})
+
+for (const tc of [
+  { name: 'a watch younger than an hour is read every check', ahead: 0, want: 2 },
+  { name: 'a watch quiet for an hour is read every ten minutes', ahead: 2 * 60 * 60_000, want: 1 },
+]) {
+  test(tc.name, integration, async () => {
+    const env = session({ now: Date.now() + tc.ahead, gh: { notifications: [[]], 'repos/o/svc/issues/7/comments': [[]], 'repos/o/svc/pulls/7/reviews': [[]] } })
+    await answered(env)
+    await testing.check(env.$)
+    env.now += 60_000
+    await testing.check(env.$)
+    assert.equal(called(env, 'github', 'replies').length, tc.want)
+    env.now += 10 * 60_000
+    await testing.check(env.$)
+    assert.equal(called(env, 'github', 'replies').length, tc.want + 1)
+  })
+}
+
+test('the inbox lists open requests first and the newest message first and takes a filter', integration, async () => {
+  const now = Date.now()
+  const gh = { notifications: [[]] }
+  for (const n of [2, 3, 4]) gh[`repos/o/svc/issues/${n}/comments`] = [[]]
+  const env = session({ now, gh })
+  env.bin(['delegation', 'put'], JSON.stringify(opsDelegation))
+  const add = (link, source, delegation, hoursAgo) => {
+    const args = ['inbox', 'add', link, '--thread', link, '--source', source, '--delegation', delegation, '--summary', 'request ' + link.slice(-1)]
+    env.bin([...args, '--ts', String(Math.floor(now / 1000) - hoursAgo * 3600)])
+  }
+  add('https://w.slack.com/archives/C1/p1790000000000001', 'slack', 'default', 3)
+  add('https://github.com/o/svc/issues/2', 'github', 'default', 1)
+  add('https://github.com/o/svc/issues/3', 'github', 'ops', 2)
+  add('https://github.com/o/svc/issues/4', 'github', 'default', 0)
+  const held = rows(env).find(r => r[4].endsWith('/4'))[0]
+  env.bin(['inbox', 'hold', held, '--until', '2999-01-01T00:00:00Z', '--session', 'S1'])
+  const links = listed => listed.split('\n').filter(l => l.startsWith('  https')).map(l => l.trim().split('/').at(-1))
+  const all = await testing.listInbox(env.$)
+  assert.deepEqual(links(all), ['2', '3', 'p1790000000000001', '4'])
+  assert.ok(all.includes(' · github · - · 1h ago · '))
+  assert.deepEqual(links(await testing.listInbox(env.$, 'github')), ['2', '3', '4'])
+  assert.deepEqual(links(await testing.listInbox(env.$, undefined, 'ops')), ['3'])
+  const two = await testing.listInbox(env.$, undefined, undefined, 2)
+  assert.deepEqual(links(two), ['2', '3'])
+  assert.equal(two.split('\n').at(-1), 'and 2 more, a larger limit or a filter lists them')
 })

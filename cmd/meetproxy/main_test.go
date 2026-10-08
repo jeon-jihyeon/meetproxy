@@ -39,8 +39,6 @@ type step struct {
 func TestRun(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
-	repo := gitRepo(t, "svc", "pkg/alloc.go")
-	inRepo := filepath.Join(repo, "pkg", "alloc.go")
 	link := "https://w.slack.com/archives/C1/p1"
 	later := "https://w.slack.com/archives/C1/p2"
 	id := inbox.IdOf(link)
@@ -59,9 +57,22 @@ func TestRun(t *testing.T) {
 		`{"id":"default","when":"mention","do":"answer"}]`
 	recorded := []step{
 		{"open", []string{"o"}, ""},
-		{"close", []string{"--topic", "할당 원인", "--keywords", "할당", "--paths", inRepo}, ""},
+		{"close", nil, ""},
 	}
 	long := strings.Repeat("가", 250)
+	added := "\t" + now.UTC().Format(time.RFC3339)
+	// Times a list row ends with for a request without a timestamp and for a thread at 1800000000
+	plain, threaded := added+added, added+"\t"+time.Unix(1800000000, 0).UTC().Format(time.RFC3339)
+	matchAt := func(thread, ts string) step {
+		return step{
+			"delegation", []string{"match", "mention", "--thread", thread, "--ts", ts},
+			`{"link":"` + later + `","text":"where is alloc","from":"U2"}`,
+		}
+	}
+	matchOut := func(seen string) string {
+		return `{"delegation":"default","task":"answer","triage":true,"depth":"quick","digest":"` +
+			delegation.Digest("where is alloc") + `"` + seen + `}`
+	}
 
 	type want struct {
 		code   int
@@ -76,7 +87,7 @@ func TestRun(t *testing.T) {
 		run     step
 		want    want
 	}{
-		{"usage error without --data", "s1", true, nil, step{"locate", []string{"x"}, ""}, want{exitUsage, "", true}},
+		{"usage error without --data", "s1", true, nil, step{"allowed", nil, ""}, want{exitUsage, "", true}},
 		{"usage error for open without a session", "", false, nil, step{"open", []string{"o"}, ""}, want{exitUsage, "", true}},
 		{"usage error for an unknown command", "s1", false, nil, step{"nope", nil, ""}, want{exitUsage, "", true}},
 		{"dest denies without an allow list", "s1", false, nil, step{"dest", []string{"slack:C1"}, ""}, want{1, "denied", false}},
@@ -91,43 +102,35 @@ func TestRun(t *testing.T) {
 			step{"allow", []string{"https://example.com"}, ""}, want{1, "", true},
 		},
 		{
-			"usage error for close without --topic", "s1", false,
-			[]step{{"open", []string{"o"}, ""}}, step{"close", nil, ""}, want{exitUsage, "", true},
+			"usage error for close with --topic", "s1", false,
+			[]step{{"open", []string{"o"}, ""}}, step{"close", []string{"--topic", "t"}, ""}, want{exitUsage, "", true},
 		},
-		{"close fails without an open relay", "s1", false, nil, step{"close", []string{"--topic", "t"}, ""}, want{1, "", true}},
-		{
-			"close skips evidence outside a repository and still closes", "s1", false,
-			[]step{{"open", []string{"o"}, ""}, {"close", []string{"--topic", "t", "--paths", "/nowhere/x.go"}, ""}},
-			step{"close", []string{"--topic", "t"}, ""},
-			want{1, "", true},
-		},
-		{
-			"locate finds what close recorded", "s1", false,
-			recorded,
-			step{"locate", []string{"할당이"}, ""},
-			want{0, "1\tsvc\t" + inRepo + "\t할당 원인", false},
-		},
+		{"close fails without an open relay", "s1", false, nil, step{"close", nil, ""}, want{1, "", true}},
+		{"close fails once the relay closed", "s1", false, recorded, step{"close", nil, ""}, want{1, "", true}},
+		{"locate is gone", "s1", false, recorded, step{"locate", []string{"할당이"}, ""}, want{exitUsage, "", true}},
+		{"correct is gone", "s1", false, recorded, step{"correct", []string{"r1"}, ""}, want{exitUsage, "", true}},
 		{"route is gone", "s1", false, recorded, step{"route", []string{"할당이"}, ""}, want{exitUsage, "", true}},
 		{"usage error for open with two origins", "s1", false, nil, step{"open", []string{"o", "p"}, ""}, want{exitUsage, "", true}},
 		{
 			"usage error for close with an argument", "s1", false, []step{{"open", []string{"o"}, ""}},
-			step{"close", []string{"foo", "--topic", "t"}, ""}, want{exitUsage, "", true},
+			step{"close", []string{"foo"}, ""}, want{exitUsage, "", true},
 		},
 		{"usage error for allowed with an argument", "s1", false, nil, step{"allowed", []string{"x"}, ""}, want{exitUsage, "", true}},
 		{
 			"usage error for a flag that does not parse", "s1", false, nil,
-			step{"locate", []string{"x", "--limit", "many"}, ""}, want{exitUsage, "", true},
+			step{"inbox", []string{"list", "--limit", "many"}, ""}, want{exitUsage, "", true},
 		},
-		{"usage error for an unknown flag", "s1", false, nil, step{"locate", []string{"x", "--nope", "1"}, ""}, want{exitUsage, "", true}},
+		{"usage error for an unknown flag", "s1", false, nil, step{"allowed", []string{"--nope"}, ""}, want{exitUsage, "", true}},
 		{
 			"usage error for a flag the command does not read", "s1", false, nil,
-			step{"allowed", []string{"--topic", "t"}, ""}, want{exitUsage, "", true},
+			step{"allowed", []string{"--target", "t"}, ""}, want{exitUsage, "", true},
 		},
 		{"protocol needs no data directory", "s1", true, nil, step{"protocol", nil, ""}, want{0, strconv.Itoa(protocol), false}},
 		{"usage error for tick with --cwd", "s1", false, nil, step{"tick", []string{"--cwd", "/tmp"}, ""}, want{exitUsage, "", true}},
 		{
 			"tick prints an empty list when nothing waits", "s1", false, nil, step{"tick", nil, ""},
-			want{0, `{"protocol":` + strconv.Itoa(protocol) + `,"waiting":[],"slack":{"token":false},"watch":[],"acks":[]}`, false},
+			want{0, `{"protocol":` + strconv.Itoa(protocol) + `,"waiting":[],"slack":{"token":false},"watch":[],"acks":[],` +
+				`"leases":{}}`, false},
 		},
 		{"allowed lists the patterns", "s1", false, []step{allowed}, step{"allowed", nil, ""}, want{0, "slack:C1", false}},
 		{
@@ -163,27 +166,28 @@ func TestRun(t *testing.T) {
 		{
 			"inbox list shows the first link and the newest summary of a thread", "s1", false,
 			[]step{inThread(link, "1800000000.0001", "first"), inThread(later, "1800000000.0002", "second")},
-			step{"inbox", []string{"list"}, ""}, want{0, thread + "\topen\t-\t-\t" + link + "\tsecond", false},
+			step{"inbox", []string{"list"}, ""}, want{0, thread + "\topen\t-\t-\t" + link + "\tsecond" + threaded, false},
 		},
 		{
 			"inbox list keeps the summary of a newer message over an older one", "s1", false,
 			[]step{inThread(later, "1800000000.0002", "second"), inThread(link, "1800000000.0001", "first")},
-			step{"inbox", []string{"list"}, ""}, want{0, thread + "\topen\t-\t-\t" + later + "\tsecond", false},
+			step{"inbox", []string{"list"}, ""}, want{0, thread + "\topen\t-\t-\t" + later + "\tsecond" + threaded, false},
 		},
 		{
 			"inbox add keeps the first non empty line of the summary with spaces collapsed", "s1", false,
 			[]step{{"inbox", []string{"add", link, "--summary", "\n  where   is\talloc \nsecond line"}, ""}},
-			step{"inbox", []string{"list"}, ""}, want{0, id + "\topen\t-\t-\t" + link + "\twhere is alloc", false},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\topen\t-\t-\t" + link + "\twhere is alloc" + plain, false},
 		},
 		{
 			"inbox add cuts a long summary", "s1", false,
 			[]step{{"inbox", []string{"add", link, "--summary", long}, ""}},
-			step{"inbox", []string{"list"}, ""}, want{0, id + "\topen\t-\t-\t" + link + "\t" + long[:199*3] + "…", false},
+			step{"inbox", []string{"list"}, ""},
+			want{0, id + "\topen\t-\t-\t" + link + "\t" + long[:199*3] + "…" + plain, false},
 		},
 		{
 			"inbox list prints the source and the author", "s1", false,
 			[]step{{"inbox", []string{"add", link, "--source", "slack", "--author", "Kai", "--summary", "hi"}, ""}},
-			step{"inbox", []string{"list"}, ""}, want{0, id + "\topen\tslack\tKai\t" + link + "\thi", false},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\topen\tslack\tKai\t" + link + "\thi" + plain, false},
 		},
 		{
 			"inbox add marks a taken request asked again", "s1", false,
@@ -196,7 +200,7 @@ func TestRun(t *testing.T) {
 				inThread(link, "1800000000.0001", "first"), {"inbox", []string{"take", thread}, ""},
 				inThread(later, "1800000000.0002", "second"), {"inbox", []string{"done", thread}, ""},
 			},
-			step{"inbox", []string{"list"}, ""}, want{0, thread + "\topen\t-\t-\t" + link + "\tsecond", false},
+			step{"inbox", []string{"list"}, ""}, want{0, thread + "\topen\t-\t-\t" + link + "\tsecond" + threaded, false},
 		},
 		{
 			"inbox cursor moves with the newest request", "s1", false,
@@ -229,16 +233,16 @@ func TestRun(t *testing.T) {
 		{
 			"inbox list hides a done request", "s1", false,
 			[]step{queued, {"inbox", []string{"add", later}, ""}, {"inbox", []string{"done", id}, ""}},
-			step{"inbox", []string{"list"}, ""}, want{0, inbox.IdOf(later) + "\topen\t-\t-\t" + later + "\t-", false},
+			step{"inbox", []string{"list"}, ""}, want{0, inbox.IdOf(later) + "\topen\t-\t-\t" + later + "\t-" + plain, false},
 		},
 		{
 			"inbox list shows a take as taken", "s1", false, []step{queued, taken},
-			step{"inbox", []string{"list"}, ""}, want{0, id + "\ttaken\t-\t-\t" + link + "\t-", false},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\ttaken\t-\t-\t" + link + "\t-" + plain, false},
 		},
 		{
 			"inbox list shows a held request whose time came as open", "s1", false,
 			[]step{queued, {"inbox", []string{"hold", id, "--until", "2000-01-01T00:00:00Z"}, ""}},
-			step{"inbox", []string{"list"}, ""}, want{0, id + "\topen\t-\t-\t" + link + "\t-", false},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\topen\t-\t-\t" + link + "\t-" + plain, false},
 		},
 		{
 			"inbox take prints link, task, target, approve, depth and flags", "s1", false, []step{allowed, queued},
@@ -316,6 +320,21 @@ func TestRun(t *testing.T) {
 			want{0, "", false},
 		},
 		{
+			"delegation match says seen for a message of a thread the inbox read up to it", "s1", false,
+			[]step{inThread(link, "1800000000.0002", "where is alloc")},
+			matchAt("w.slack.com/C1/1", "1800000000.0002"), want{0, matchOut(`,"seen":true`), false},
+		},
+		{
+			"delegation match leaves a newer message of the thread unseen", "s1", false,
+			[]step{inThread(link, "1800000000.0002", "where is alloc")},
+			matchAt("w.slack.com/C1/1", "1800000000.0003"), want{0, matchOut(""), false},
+		},
+		{
+			"delegation match says seen for an ignored message", "s1", false,
+			[]step{{"inbox", []string{"ignore", later, "--reason", "fyi"}, ""}},
+			matchAt("w.slack.com/C1/2", "1800000000.0003"), want{0, matchOut(`,"seen":true`), false},
+		},
+		{
 			"delegation remove drops a delegation", "s1", false,
 			[]step{{"delegation", []string{"put"}, prDelegation}, {"delegation", []string{"remove", "pr"}, ""}},
 			step{"delegation", nil, ""}, want{0, `[` + builtIn, false},
@@ -323,12 +342,12 @@ func TestRun(t *testing.T) {
 		{
 			"inbox question settles a taken request and closes its relay", "s1", false,
 			[]step{allowed, queued, taken, {"open", []string{link}, ""}, {"inbox", []string{"question", id}, ""}},
-			step{"close", []string{"--topic", "t"}, ""}, want{1, "", true},
+			step{"close", nil, ""}, want{1, "", true},
 		},
 		{
 			"inbox question lists the request as waiting for the requester", "s1", false,
 			[]step{queued, taken, {"inbox", []string{"question", id}, ""}},
-			step{"inbox", []string{"list"}, ""}, want{0, id + "\tquestion\t-\t-\t" + link + "\t-", false},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\tquestion\t-\t-\t" + link + "\t-" + plain, false},
 		},
 		{
 			"usage error for inbox take without a session", "", false, []step{allowed, queued},
@@ -343,21 +362,21 @@ func TestRun(t *testing.T) {
 		},
 		{
 			"close marks the request it relayed done", "s1", false,
-			[]step{allowed, queued, taken, {"open", []string{link}, ""}, {"close", []string{"--topic", "t", "--paths", inRepo}, ""}},
+			[]step{allowed, queued, taken, {"open", []string{link}, ""}, {"close", nil, ""}},
 			step{"inbox", []string{"list"}, ""}, want{0, "", false},
 		},
 		{
 			"close settles the request of a thread found by its first link", "s1", false,
 			[]step{
 				inThread(link, "1800000000.0001", "first"), inThread(later, "1800000000.0002", "second"),
-				{"inbox", []string{"take", thread}, ""}, {"open", []string{link}, ""}, {"close", []string{"--topic", "t"}, ""},
+				{"inbox", []string{"take", thread}, ""}, {"open", []string{link}, ""}, {"close", nil, ""},
 			},
 			step{"inbox", []string{"list"}, ""}, want{0, "", false},
 		},
 		{
 			"close of a relay opened by hand for an unknown link settles nothing", "s1", false,
-			[]step{queued, {"open", []string{"https://w.slack.com/archives/C1/p9"}, ""}, {"close", []string{"--topic", "t"}, ""}},
-			step{"inbox", []string{"list"}, ""}, want{0, id + "\topen\t-\t-\t" + link + "\t-", false},
+			[]step{queued, {"open", []string{"https://w.slack.com/archives/C1/p9"}, ""}, {"close", nil, ""}},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\topen\t-\t-\t" + link + "\t-" + plain, false},
 		},
 		{"triage defaults to claude", "s1", false, nil, step{"triage", nil, ""}, want{0, "claude", false}},
 		{
@@ -432,12 +451,12 @@ func TestRun(t *testing.T) {
 		{
 			"inbox hold puts a taken request off", "s1", false,
 			[]step{queued, taken, {"inbox", []string{"hold", id}, ""}},
-			step{"inbox", []string{"list"}, ""}, want{0, id + "\theld\t-\t-\t" + link + "\t-", false},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\theld\t-\t-\t" + link + "\t-" + plain, false},
 		},
 		{
 			"inbox hold puts an open request off", "s1", false,
 			[]step{queued, {"inbox", []string{"hold", id, "--until", "1h"}, ""}},
-			step{"inbox", []string{"list"}, ""}, want{0, id + "\theld\t-\t-\t" + link + "\t-", false},
+			step{"inbox", []string{"list"}, ""}, want{0, id + "\theld\t-\t-\t" + link + "\t-" + plain, false},
 		},
 		{
 			"inbox done keeps the relay of another request open", "s1", false,
@@ -515,15 +534,14 @@ func TestRun_Retry(t *testing.T) {
 	now := time.Now()
 	link := "https://w.slack.com/archives/C1/p1"
 	id := inbox.IdOf(link)
-	evidence := gitRepo(t, "svc", "a.go")
 	taken := []step{
 		{"inbox", []string{"add", link}, ""},
 		{"inbox", []string{"take", id}, ""},
 		{"open", []string{link}, ""},
 	}
-	closing := step{"close", []string{"--topic", "t", "--paths", evidence}, ""}
+	closing := step{"close", nil, ""}
 	listed := step{"inbox", []string{"list"}, ""}
-	located := step{"locate", []string{"t"}, ""}
+	at := "\t" + now.UTC().Format(time.RFC3339)
 	closedRelays := filepath.Join("relay", "closed.jsonl")
 
 	tcs := []struct {
@@ -535,13 +553,15 @@ func TestRun_Retry(t *testing.T) {
 		want    string
 	}{
 		{"close after the request failed to settle", filepath.Join("inbox", id+".json"), closing, listed, ""},
-		{"close after the location map failed", "map.jsonl", closing, located, "1\tsvc\t" + evidence + "\tt"},
-		{"close after the relay failed to close", closedRelays, closing, located, "1\tsvc\t" + evidence + "\tt"},
+		{"close after the relay failed to close", closedRelays, closing, listed, ""},
 		{
 			"question after the relay failed to close", closedRelays, step{"inbox", []string{"question", id}, ""}, listed,
-			id + "\tquestion\t-\t-\t" + link + "\t-",
+			id + "\tquestion\t-\t-\t" + link + "\t-" + at + at,
 		},
-		{"hold after the relay failed to close", closedRelays, step{"inbox", []string{"hold", id}, ""}, listed, id + "\theld\t-\t-\t" + link + "\t-"},
+		{
+			"hold after the relay failed to close", closedRelays, step{"inbox", []string{"hold", id}, ""}, listed,
+			id + "\theld\t-\t-\t" + link + "\t-" + at + at,
+		},
 		{"done after the relay failed to close", closedRelays, step{"inbox", []string{"done", id}, ""}, listed, ""},
 	}
 	for _, tc := range tcs {
@@ -592,6 +612,7 @@ func TestRun_Tick(t *testing.T) {
 		{"inbox", []string{"hold", inbox.IdOf(held), "--until", until.Format(time.RFC3339)}, ""},
 		{"inbox", []string{"take", inbox.IdOf(taken)}, ""},
 		{"inbox", []string{"done", inbox.IdOf(done)}, ""},
+		{"lease", []string{"hold", "slack", "--ttl", "3h"}, ""},
 	}
 	for i, s := range steps {
 		code, err := run(s.cmd, slices.Concat(data, s.args), "s1", now.Add(time.Duration(i)*time.Second), nil, &bytes.Buffer{})
@@ -599,20 +620,24 @@ func TestRun_Tick(t *testing.T) {
 		require.Equal(t, 0, code)
 	}
 	at := func(i int) int64 { return now.Add(time.Duration(i) * time.Second).Unix() }
+	last := func(i int) string { return now.Add(time.Duration(i) * time.Second).UTC().Format(time.RFC3339) }
 	openRow := fmt.Sprintf(`{"id":%q,"status":"open","open":true,"link":%q,"source":"slack","author":"Kai",`+
-		`"summary":"where is alloc","task":"answer","added":%d}`, inbox.IdOf(opened), opened, at(0))
+		`"summary":"where is alloc","task":"answer","delegation":"default","added":%d,"last":%q}`,
+		inbox.IdOf(opened), opened, at(0), last(0))
 	heldRow := func(open bool) string {
-		return fmt.Sprintf(`{"id":%q,"status":"held","open":%t,"link":%q,"task":"answer","added":%d,"until":%d}`,
-			inbox.IdOf(held), open, held, at(1), until.Unix())
+		return fmt.Sprintf(`{"id":%q,"status":"held","open":%t,"link":%q,"task":"answer","delegation":"default","added":%d,`+
+			`"last":%q,"until":%d}`, inbox.IdOf(held), open, held, at(1), last(1), until.Unix())
 	}
-	releasedRow := fmt.Sprintf(`{"id":%q,"status":"open","open":true,"link":%q,"task":"answer","added":%d}`,
-		inbox.IdOf(taken), taken, at(2))
+	releasedRow := fmt.Sprintf(`{"id":%q,"status":"open","open":true,"link":%q,"task":"answer","delegation":"default",`+
+		`"added":%d,"last":%q}`, inbox.IdOf(taken), taken, at(2), last(2))
 	// Every request not done owes eyes newest first and the done one has no post
 	acks := fmt.Sprintf(`[{"id":%q,"link":%q,"react":"eyes"},{"id":%q,"link":%q,"react":"eyes"},{"id":%q,"link":%q,"react":"eyes"}]`,
 		inbox.IdOf(taken), taken, inbox.IdOf(held), held, inbox.IdOf(opened), opened)
-	body := func(waiting []string, acks string) string {
-		return fmt.Sprintf(`{"protocol":%d,"waiting":[%s],"slack":{"token":false},"watch":[],"acks":%s}`,
-			protocol, strings.Join(waiting, ","), acks)
+	leaseUntil := now.Add(7*time.Second + 3*time.Hour).UTC().Format(time.RFC3339)
+	leased := fmt.Sprintf(`{"slack":{"session":"s1","until":%q}}`, leaseUntil)
+	body := func(waiting []string, acks, leases string) string {
+		return fmt.Sprintf(`{"protocol":%d,"waiting":[%s],"slack":{"token":false},"watch":[],"acks":%s,"leases":%s}`,
+			protocol, strings.Join(waiting, ","), acks, leases)
 	}
 
 	tcs := []struct {
@@ -620,15 +645,22 @@ func TestRun_Tick(t *testing.T) {
 		after time.Duration
 		want  string
 	}{
-		{"a held request waits closed and a take is left out", time.Minute, body([]string{openRow, heldRow(false)}, acks)},
-		{"a held request whose time came is open", 2 * time.Hour, body([]string{openRow, heldRow(true)}, acks)},
-		{"a take kept past a day opens again and no reaction is owed", 25 * time.Hour, body([]string{openRow, heldRow(true), releasedRow}, "[]")},
+		{
+			"a held request waits closed and a take is left out", time.Minute,
+			body([]string{openRow, heldRow(false)}, acks, leased),
+		},
+		{"a held request whose time came is open", 2 * time.Hour, body([]string{openRow, heldRow(true)}, acks, leased)},
+		{
+			"a take kept past a day opens again and no reaction or lease is left", 25 * time.Hour,
+			body([]string{openRow, heldRow(true), releasedRow}, "[]", "{}"),
+		},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var out bytes.Buffer
-			code, err := run("tick", data, "s1", now.Add(tc.after), nil, &out)
+			// No session so no subtest sends a heartbeat of the session that took a request
+			code, err := run("tick", data, "", now.Add(tc.after), nil, &out)
 			require.NoError(t, err)
 			require.Equal(t, 0, code)
 			assert.JSONEq(t, tc.want, out.String())
@@ -640,7 +672,14 @@ func TestRun_InboxListLimit(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	older, newer := "https://w.slack.com/archives/C1/p1", "https://w.slack.com/archives/C1/p2"
-	line := func(link string) string { return inbox.IdOf(link) + "\topen\t-\t-\t" + link + "\t-" }
+	line := func(link string) string {
+		added := now
+		if link == newer {
+			added = now.Add(time.Second)
+		}
+		at := "\t" + added.UTC().Format(time.RFC3339)
+		return inbox.IdOf(link) + "\topen\t-\t-\t" + link + "\t-" + at + at
+	}
 	tcs := []struct {
 		name  string
 		limit string
@@ -717,12 +756,12 @@ func TestReorder(t *testing.T) {
 		args args
 		want []string
 	}{
-		{"moves a double dash flag", args{"locate", []string{"x", "--data", "d"}}, []string{"--data", "d", "x"}},
-		{"moves a single dash flag", args{"locate", []string{"x", "-data", "d"}}, []string{"-data", "d", "x"}},
-		{"keeps an equals flag whole", args{"locate", []string{"--data=d", "x"}}, []string{"--data=d", "x"}},
-		{"keeps a lone dash as an argument", args{"locate", []string{"-", "x"}}, []string{"-", "x"}},
+		{"moves a double dash flag", args{"open", []string{"x", "--data", "d"}}, []string{"--data", "d", "x"}},
+		{"moves a single dash flag", args{"open", []string{"x", "-data", "d"}}, []string{"-data", "d", "x"}},
+		{"keeps an equals flag whole", args{"open", []string{"--data=d", "x"}}, []string{"--data=d", "x"}},
+		{"keeps a lone dash as an argument", args{"open", []string{"-", "x"}}, []string{"-", "x"}},
 		{
-			"keeps every word after a double dash", args{"locate", []string{"x", "--data", "d", "--", "-p", "--limit", "5"}},
+			"keeps every word after a double dash", args{"open", []string{"x", "--data", "d", "--", "-p", "--limit", "5"}},
 			[]string{"--data", "d", "--", "x", "-p", "--limit", "5"},
 		},
 		{
@@ -730,7 +769,7 @@ func TestReorder(t *testing.T) {
 			[]string{"--data", "d", "command", "laya", "--limit", "5", "-p"},
 		},
 		{"moves flags after another triage word", args{"triage", []string{"claude", "--data", "d"}}, []string{"--data", "d", "claude"}},
-		{"keeps a command word of another command", args{"locate", []string{"command", "--data", "d"}}, []string{"--data", "d", "command"}},
+		{"keeps a command word of another command", args{"open", []string{"command", "--data", "d"}}, []string{"--data", "d", "command"}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {

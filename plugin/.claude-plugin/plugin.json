@@ -1,6 +1,6 @@
 {
   "name": "meetproxy",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Stop being a meat proxy. Keeps Slack and GitHub requests in one inbox you open from any Claude Code session, where the session does the work and posts the reply you approve back to the thread.",
   "author": {
     "name": "jeon-jihyeon"

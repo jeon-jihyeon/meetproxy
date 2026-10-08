@@ -5,15 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/jeon-jihyeon/meetproxy/internal/dest"
 	"github.com/jeon-jihyeon/meetproxy/internal/guard"
 	"github.com/jeon-jihyeon/meetproxy/internal/inbox"
-	"github.com/jeon-jihyeon/meetproxy/internal/locmap"
 	"github.com/jeon-jihyeon/meetproxy/internal/posts"
 	"github.com/jeon-jihyeon/meetproxy/internal/relay"
 )
@@ -50,17 +47,6 @@ func (c cli) open(origin, target string) error {
 		return err
 	}
 	fmt.Fprintln(c.out, r.Id)
-	return nil
-}
-
-func (c cli) locate(terms []string, limit int) error {
-	cs, err := locmap.New(c.data).Locate(terms, limit)
-	if err != nil {
-		return err
-	}
-	for _, cand := range cs {
-		fmt.Fprintf(c.out, "%g\t%s\t%s\t%s\n", cand.Score, cand.Name, cand.Abs(), strings.Join(cand.Topics, " | "))
-	}
 	return nil
 }
 
@@ -132,37 +118,20 @@ func denial(data string, posts []guard.Post, sc scope) (string, error) {
 	return guard.Decide(posts, o, t, sc.mayApprove, dest.New(data).Allowed)
 }
 
-func (c cli) close(topic string, keywords, paths []string) error {
-	if topic == "" {
-		return fmt.Errorf("%w: close needs --topic", errUsage)
-	}
+func (c cli) close() error {
 	store := relay.New(c.data)
 	r, err := store.Current(c.session)
 	if err != nil {
 		return err
 	}
-	dir, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	ps, err := store.Evidence(r.Id, paths, dir)
-	if err != nil {
-		return err
-	}
-	// Each step repeats without harm so a close that failed part way runs again
-	// 1. a done request may be marked done again
-	// 2. the location map keeps the last record of a relay
+	// A done request may be marked done again so a close that failed part way runs again
 	if err := c.settleOrigin(r.Origin); err != nil {
-		return err
-	}
-	e := locmap.Entry{RelayId: r.Id, Topic: topic, Keywords: keywords, Paths: ps, RecordedAt: c.now.UTC()}
-	if err := locmap.New(c.data).Add(e); err != nil {
 		return err
 	}
 	if _, err := store.Close(c.session, c.now); err != nil {
 		return err
 	}
-	fmt.Fprintf(c.out, "%s closed · %d paths\n", r.Id, len(ps))
+	fmt.Fprintf(c.out, "%s closed\n", r.Id)
 	return nil
 }
 
@@ -191,6 +160,8 @@ type tick struct {
 	Watch []posts.Watch `json:"watch"`
 	// Reactions the lease holder adds to request links
 	Acks []ackRow `json:"acks"`
+	// Leases that still last by source so a session holds one only when it runs out
+	Leases map[string]inbox.Lease `json:"leases"`
 }
 
 type ackRow struct {
@@ -211,8 +182,12 @@ type waitingRow struct {
 	// Untrusted text
 	Summary string `json:"summary,omitempty"`
 	Task    string `json:"task,omitempty"`
+	// Delegation that caught the request so the inbox can be listed by it
+	Delegation string `json:"delegation,omitempty"`
 	// Unix seconds
 	Added int64 `json:"added"`
+	// When the newest message of the thread was written
+	Last time.Time `json:"last"`
 	// Unix seconds a held request opens again, zero when it waits for the user
 	Until int64 `json:"until,omitempty"`
 }
@@ -220,17 +195,24 @@ type waitingRow struct {
 // Requests older than this get no reaction since one so late reads as noise
 const ackWithin = 24 * time.Hour
 
+// The inbox is listed once and the ledger read at most once however many requests wait
+// With a session the tick is also its heartbeat
 func (c cli) tick() error {
 	store := inbox.New(c.data)
-	items, err := store.Waiting(c.now)
+	if c.session != "" {
+		if err := store.Beat(c.session, c.now); err != nil {
+			return err
+		}
+	}
+	all, err := store.List()
 	if err != nil {
 		return err
 	}
-	rows := make([]waitingRow, 0, len(items))
-	for _, it := range items {
+	rows := []waitingRow{}
+	for _, it := range inbox.Waiting(all, c.now) {
 		row := waitingRow{
 			Id: it.Id, Status: it.Status, Open: it.Open(c.now), Link: it.Link, Source: it.Source, Author: it.Author,
-			Summary: it.Summary, Task: it.Task, Added: it.AddedAt.Unix(),
+			Summary: it.Summary, Task: it.Task, Delegation: it.Delegation, Added: it.AddedAt.Unix(), Last: it.Last(),
 		}
 		if !it.HeldUntil.IsZero() {
 			row.Until = it.HeldUntil.Unix()
@@ -241,27 +223,27 @@ func (c cli) tick() error {
 	if err != nil {
 		return err
 	}
-	acks, err := c.acks(store)
+	acks, err := c.acks(all)
 	if err != nil {
 		return err
 	}
 	if watch == nil {
 		watch = []posts.Watch{}
 	}
+	leases, err := store.Leases(c.now)
+	if err != nil {
+		return err
+	}
 	return json.NewEncoder(c.out).Encode(tick{
-		Protocol: protocol, Waiting: rows, Slack: readSlackState(c.data, false), Watch: watch, Acks: acks,
+		Protocol: protocol, Waiting: rows, Slack: readSlackState(c.data, false), Watch: watch, Acks: acks, Leases: leases,
 	})
 }
 
 // Reactions still owed on request links
 // 1. eyes on a request queued within ackWithin
 // 2. done on a request answered with a post
-func (c cli) acks(store inbox.Store) ([]ackRow, error) {
-	all, err := store.List()
-	if err != nil {
-		return nil, err
-	}
-	ledger := posts.New(c.data)
+func (c cli) acks(all []inbox.Item) ([]ackRow, error) {
+	var answered map[string]bool
 	out := []ackRow{}
 	for _, it := range all {
 		if c.now.Sub(it.UpdatedAt) > ackWithin {
@@ -274,11 +256,13 @@ func (c cli) acks(store inbox.Store) ([]ackRow, error) {
 		}
 		switch {
 		case it.Status == inbox.StatusDone && it.Reason != "expired":
-			posted, err := ledger.Posted(it.Id)
-			if err != nil {
-				return nil, err
+			if answered == nil {
+				var err error
+				if answered, err = posts.New(c.data).Answered(); err != nil {
+					return nil, err
+				}
 			}
-			if posted {
+			if answered[it.Id] {
 				owed(inbox.AckDone)
 			}
 		case it.Status != inbox.StatusDone:

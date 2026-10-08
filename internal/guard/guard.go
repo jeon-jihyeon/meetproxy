@@ -61,6 +61,9 @@ func Destinations(tool string, input json.RawMessage, data string) ([]Post, erro
 		return bash(in.Command, data)
 	case tool == "Write" || tool == "Edit" || tool == "NotebookEdit":
 		return nil, fileEdit(input, data)
+	// Its scripts are not read so every call counts as posting somewhere unknown
+	case tool == "PowerShell":
+		return nil, unknown("a PowerShell call the guard cannot read")
 	// The post tool makes the same check before it sends
 	case strings.HasPrefix(name, "mcp__meetproxy__"):
 		return nil, nil

@@ -92,23 +92,10 @@ func transcript(t *testing.T, config, name string, truncate bool, lines ...strin
 	require.NoError(t, errors.Join(err, f.Close()))
 }
 
-type got struct {
-	prompt string
-	root   string
-}
-
-func view(cs []workmap.Case) []got {
-	var out []got
+func roots(cs []workmap.Case) []string {
+	out := []string{}
 	for _, c := range cs {
-		out = append(out, got{c.Prompt, c.Root})
-	}
-	return out
-}
-
-func prompts(cs []workmap.Case) []string {
-	var out []string
-	for _, c := range cs {
-		out = append(out, c.Prompt)
+		out = append(out, c.Root)
 	}
 	return out
 }
@@ -121,11 +108,14 @@ func TestRefresh(t *testing.T) {
 	command := func(name, args string) string {
 		return line(t, prompt(m.svc, "<command-name>/"+name+"</command-name><command-args>"+args+"</command-args>", nil))
 	}
+	worktree := filepath.Join(filepath.Dir(m.svc), "svc-wt")
+	writeFile(t, filepath.Join(worktree, ".git"), "gitdir: "+filepath.Join(m.svc, ".git", "worktrees", "svc-wt")+"\n")
+	writeFile(t, filepath.Join(worktree, "pkg", "a.go"), "")
 
 	tcs := []struct {
 		name  string
 		lines []string
-		want  []got
+		want  []string
 	}{
 		{
 			"a typed prompt keeps its place whatever tools answered it",
@@ -134,7 +124,7 @@ func TestRefresh(t *testing.T) {
 				line(t, uses(m.svc, tool("Read", map[string]any{"file_path": alloc}),
 					tool("Skill", map[string]any{"skill": "go-review"}), tool(slack, map[string]any{}))),
 			},
-			[]got{{"할당 우선순위 로직 설명", m.svc}},
+			[]string{m.svc},
 		},
 		{
 			"prompts the user did not type are skipped",
@@ -143,17 +133,17 @@ func TestRefresh(t *testing.T) {
 				line(t, prompt(m.svc, "This session is being continued", map[string]any{"isCompactSummary": true})),
 				line(t, prompt(m.svc, "Caveat from the harness", map[string]any{"isMeta": true})),
 			},
-			nil,
+			[]string{},
 		},
 		{
 			"built-in, meetproxy and argument-less commands are skipped",
 			[]string{command("compact", "keep it"), command("meetproxy:handle", "abc --auto"), command("review", "")},
-			nil,
+			[]string{},
 		},
 		{
-			"a slash command is its arguments",
+			"a slash command with arguments is typed",
 			[]string{command("incident-triage", "5xx 급증 원인")},
-			[]got{{"5xx 급증 원인", m.svc}},
+			[]string{m.svc},
 		},
 		{
 			"markup and short prompts are skipped",
@@ -162,22 +152,27 @@ func TestRefresh(t *testing.T) {
 				line(t, prompt(m.svc, "ok", nil)),
 				line(t, prompt(m.svc, "  네  ", nil)),
 			},
-			nil,
+			[]string{},
 		},
 		{
 			"a scratch folder belongs to the place the transcript started in",
 			[]string{line(t, prompt(m.svc, "첫 질문 정리", nil)), line(t, prompt(scratch, "스크래치에서 이어간 질문", nil))},
-			[]got{{"첫 질문 정리", m.svc}, {"스크래치에서 이어간 질문", m.svc}},
+			[]string{m.svc, m.svc},
 		},
 		{
 			"a transcript only in a scratch folder has no place",
 			[]string{line(t, prompt(scratch, "어디서 한 질문", nil))},
-			nil,
+			[]string{},
+		},
+		{
+			"a worktree belongs to its main checkout",
+			[]string{line(t, prompt(filepath.Join(worktree, "pkg"), "워크트리에서 한 질문", nil))},
+			[]string{m.svc},
 		},
 		{
 			"a line still being written waits",
 			[]string{line(t, prompt(m.wiki, "완성된 질문 하나", nil)), `{"type":"user","cwd":"`},
-			[]got{{"완성된 질문 하나", m.wiki}},
+			[]string{m.wiki},
 		},
 	}
 	for _, tc := range tcs {
@@ -191,7 +186,7 @@ func TestRefresh(t *testing.T) {
 			cases, err := s.Cases()
 			require.NoError(t, err)
 			assert.True(t, ran)
-			assert.Equal(t, tc.want, view(cases))
+			assert.Equal(t, tc.want, roots(cases))
 		})
 	}
 }
@@ -205,9 +200,8 @@ func TestRefreshIncremental(t *testing.T) {
 	day := time.Date(2030, 1, 1, 12, 0, 0, 0, time.Local)
 
 	type want struct {
-		ran     bool
-		prompts []string
-		roots   []string
+		ran   bool
+		roots []string
 	}
 	steps := []struct {
 		name     string
@@ -219,31 +213,25 @@ func TestRefreshIncremental(t *testing.T) {
 	}{
 		{
 			"the first refresh reads the transcript", []string{line(t, prompt(m.svc, "할당 우선순위 로직 설명", nil))}, false, true, day,
-			want{true, []string{"할당 우선순위 로직 설명"}, []string{m.svc}},
+			want{true, []string{m.svc}},
 		},
 		{
 			"a daily refresh on the same day is skipped", []string{line(t, prompt(m.wiki, "온콜 런북 정리", nil))}, false, true, day.Add(time.Hour),
-			want{false, []string{"할당 우선순위 로직 설명"}, []string{m.svc}},
+			want{false, []string{m.svc}},
 		},
 		{
 			"the next day reads only the new lines and keeps the place a scratch prompt started in",
 			[]string{line(t, prompt(scratch, "스크래치에서 이어간 질문", nil)), `{"type":"user",`}, false, true, day.AddDate(0, 0, 1),
-			want{
-				true, []string{"할당 우선순위 로직 설명", "온콜 런북 정리", "스크래치에서 이어간 질문"},
-				[]string{m.svc, m.wiki, m.svc},
-			},
+			want{true, []string{m.svc, m.wiki, m.svc}},
 		},
 		{
 			"a line finished later is read once",
 			[]string{`"cwd":"` + m.svc + `","message":{"content":"마저 쓴 질문"}}` + "\n"}, false, false, day.AddDate(0, 0, 1),
-			want{
-				true, []string{"할당 우선순위 로직 설명", "온콜 런북 정리", "스크래치에서 이어간 질문", "마저 쓴 질문"},
-				[]string{m.svc, m.wiki, m.svc, m.svc},
-			},
+			want{true, []string{m.svc, m.wiki, m.svc, m.svc}},
 		},
 		{
 			"a transcript rewritten shorter replaces its cases", []string{line(t, prompt(m.wiki, "남은 질문", nil))}, true, false, day.AddDate(0, 0, 1),
-			want{true, []string{"남은 질문"}, []string{m.wiki}},
+			want{true, []string{m.wiki}},
 		},
 	}
 	for _, st := range steps {
@@ -252,11 +240,7 @@ func TestRefreshIncremental(t *testing.T) {
 		require.NoError(t, err, st.name)
 		cases, err := s.Cases()
 		require.NoError(t, err, st.name)
-		roots := []string{}
-		for _, c := range cases {
-			roots = append(roots, c.Root)
-		}
-		assert.Equal(t, st.want, want{ran, prompts(cases), roots}, st.name)
+		assert.Equal(t, st.want, want{ran, roots(cases)}, st.name)
 	}
 }
 
@@ -275,10 +259,7 @@ func TestRefreshRetry(t *testing.T) {
 	require.NoError(t, err)
 	cases, err := s.Cases()
 	require.NoError(t, err)
-	assert.Equal(t, []got{
-		{"할당 우선순위 로직 설명", m.svc},
-		{"스크래치 질문", m.svc},
-	}, view(cases))
+	assert.Equal(t, []string{m.svc, m.svc}, roots(cases))
 }
 
 // Old cases beyond the newest ones leave and a removed transcript leaves the state but not its cases
@@ -297,7 +278,6 @@ func TestRefreshPrunes(t *testing.T) {
 
 	type want struct {
 		cases   int
-		first   string
 		offsets []string
 	}
 	tcs := []struct {
@@ -307,8 +287,8 @@ func TestRefreshPrunes(t *testing.T) {
 		year int
 		want want
 	}{
-		{"an old case beyond the newest ones leaves", "오래된 질문", 2020, want{5001, "최근 질문 0", []string{"a.jsonl"}}},
-		{"a young case beyond the newest ones stays", "젊은 질문", 2030, want{5002, "젊은 질문", []string{"a.jsonl"}}},
+		{"an old case beyond the newest ones leaves", "오래된 질문", 2020, want{5001, []string{"a.jsonl"}}},
+		{"a young case beyond the newest ones stays", "젊은 질문", 2030, want{5002, []string{"a.jsonl"}}},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -336,8 +316,7 @@ func TestRefreshPrunes(t *testing.T) {
 			for file := range st.Offsets {
 				offsets = append(offsets, filepath.Base(file))
 			}
-			require.NotEmpty(t, cases)
-			assert.Equal(t, tc.want, want{len(cases), cases[0].Prompt, offsets})
+			assert.Equal(t, tc.want, want{len(cases), offsets})
 		})
 	}
 }
@@ -412,45 +391,6 @@ func TestRefreshLock(t *testing.T) {
 	}
 }
 
-func TestPlaces(t *testing.T) {
-	t.Parallel()
-	tcs := []struct {
-		name      string
-		gitConfig string
-		want      []string
-	}{
-		{
-			"the origin remote names the repository over an earlier remote",
-			"[remote \"upstream\"]\n\turl = https://github.com/acme/upstream-name.git\n" +
-				"[remote \"origin\"]\n\turl = git@github.com:me/origin-name.git\n",
-			[]string{"origin-name"},
-		},
-		{
-			"the first remote names it without an origin",
-			"[submodule \"lib\"]\n\turl = https://github.com/acme/lib-name.git\n" +
-				"[remote \"upstream\"]\n\turl = https://github.com/acme/upstream-name\n",
-			[]string{"upstream-name"},
-		},
-		{"a url with a trailing slash still names it", "[remote \"origin\"]\n\turl = https://github.com/acme/slash-name/\n", []string{"slash-name"}},
-		{"a submodule url alone names nothing", "[submodule \"lib\"]\n\turl = https://github.com/acme/lib-name.git\n", nil},
-	}
-	for _, tc := range tcs {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			root := filepath.Join(t.TempDir(), "repo")
-			writeFile(t, filepath.Join(root, ".git", "config"), tc.gitConfig)
-			config := newConfig(t)
-			transcript(t, config, "a", false, line(t, prompt(root, "저장소 이름 확인", nil)))
-			s := workmap.New(t.TempDir())
-			_, err := s.Refresh(config, false, time.Now())
-			require.NoError(t, err)
-			places, err := s.Places()
-			require.NoError(t, err)
-			assert.Equal(t, []workmap.Place{{Root: root, Name: "repo", Aliases: tc.want, Cases: 1}}, places)
-		})
-	}
-}
-
 func TestPlacesOrder(t *testing.T) {
 	t.Parallel()
 	m := newMachine(t)
@@ -463,7 +403,7 @@ func TestPlacesOrder(t *testing.T) {
 	places, err := s.Places()
 	require.NoError(t, err)
 	assert.Equal(t, []workmap.Place{
-		{Root: m.svc, Name: "svc", Aliases: []string{"adserver"}, Cases: 2},
+		{Root: m.svc, Name: "svc", Cases: 2},
 		{Root: m.wiki, Name: "wiki", Cases: 2},
 	}, places)
 }
@@ -497,6 +437,7 @@ func TestMethods(t *testing.T) {
 
 // A map from before formats is read again from the start to find examples
 // Cases it kept before they knew their transcript are not doubled and those of a deleted transcript stay
+// Prompts and aliases written by older versions are dropped
 func TestRefreshUpgrade(t *testing.T) {
 	t.Parallel()
 	m := newMachine(t)
@@ -510,6 +451,8 @@ func TestRefreshUpgrade(t *testing.T) {
 	legacy := line(t, map[string]any{"prompt": "할당 우선순위 로직 설명", "place": m.svc, "at": at}) +
 		line(t, map[string]any{"prompt": "지워진 대화의 질문", "place": m.wiki, "at": at})
 	writeFile(t, filepath.Join(data, "workmap", "cases.jsonl"), legacy)
+	aliased := `[{"root":"` + m.svc + `","name":"svc","aliases":["adserver"]}]`
+	writeFile(t, filepath.Join(data, "workmap", "places.json"), aliased)
 	file := filepath.Join(m.config, "projects", "-p", "a.jsonl")
 	info, err := os.Stat(file)
 	require.NoError(t, err)
@@ -523,6 +466,12 @@ func TestRefreshUpgrade(t *testing.T) {
 	formats, err := s.Formats()
 	require.NoError(t, err)
 	require.NotEmpty(t, formats)
-	assert.Equal(t, []string{"지워진 대화의 질문", "할당 우선순위 로직 설명"}, prompts(cases))
+	written, err := os.ReadFile(filepath.Join(data, "workmap", "cases.jsonl"))
+	require.NoError(t, err)
+	places, err := os.ReadFile(filepath.Join(data, "workmap", "places.json"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{m.wiki, m.svc}, roots(cases))
 	assert.Len(t, formats[0].Examples, 1)
+	assert.NotContains(t, string(written), "prompt")
+	assert.NotContains(t, string(places), "aliases")
 }

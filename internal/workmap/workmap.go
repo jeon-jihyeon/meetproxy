@@ -16,10 +16,10 @@ import (
 	"github.com/jeon-jihyeon/meetproxy/internal/fileio"
 )
 
-// One request the user typed and what answering it touched
+// One request the user typed and where it was answered
+// The prompt itself is never kept and cases written with one lose it on the next refresh
 // The JSON key of Root stays place so cases written before keep reading
 type Case struct {
-	Prompt string `json:"prompt"`
 	// Root of the repository or the directory the session worked in
 	Root string    `json:"place"`
 	At   time.Time `json:"at"`
@@ -29,12 +29,11 @@ type Case struct {
 	Offset int64 `json:"offset,omitempty"`
 }
 
-// A place the user works in and the names a message may call it by
+// A place the user works in
 type Place struct {
-	Root    string   `json:"root"`
-	Name    string   `json:"name"`
-	Aliases []string `json:"aliases,omitempty"`
-	Cases   int      `json:"cases"`
+	Root  string `json:"root"`
+	Name  string `json:"name"`
+	Cases int    `json:"cases"`
 }
 
 // A skill or command the user can run
@@ -248,16 +247,16 @@ func covered(from map[string]int64, source string, offset int64) bool {
 func updated(old []Case, reads []read) []Case {
 	from := rereads(reads)
 	// A case kept before cases knew their transcript has no source
-	// It is the same as a case read again with its prompt and time
+	// It is the same as a case read again with its place and time
 	again := map[string]bool{}
 	for _, r := range reads {
 		for _, c := range r.cases {
-			again[c.Prompt+"\x00"+c.At.String()] = true
+			again[c.Root+"\x00"+c.At.String()] = true
 		}
 	}
 	var out []Case
 	for _, c := range old {
-		if !covered(from, c.Source, c.Offset) && (c.Source != "" || !again[c.Prompt+"\x00"+c.At.String()]) {
+		if !covered(from, c.Source, c.Offset) && (c.Source != "" || !again[c.Root+"\x00"+c.At.String()]) {
 			out = append(out, c)
 		}
 	}

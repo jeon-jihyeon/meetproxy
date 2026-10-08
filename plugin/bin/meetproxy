@@ -7,24 +7,72 @@
 # 5. another meetproxy on PATH
 set -eu
 
-# The path and guard hooks run on every Read, Edit, Write, Grep, Bash and MCP call
-# A session with no scope gives neither hook anything to do so they end here before any program starts
-# The binary keeps one marker in scope/ per session with a scope and builds the directory with them before any skip
+MODE=cli
+if [ "${1:-}" = hook ] && [ "${2:-}" = guard ]; then
+  MODE=guard
+elif [ "${1:-}" = hook ]; then
+  MODE=hook
+fi
+
 any() { [ -e "$1" ]; }
-if [ "${1:-}" = hook ] && { [ "${2:-}" = path ] || [ "${2:-}" = guard ]; } &&
-  [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && [ -d "${CLAUDE_PLUGIN_DATA}/scope" ] && ! any "${CLAUDE_PLUGIN_DATA}"/scope/*; then
-  exit 0
+
+# The guard hook runs on every Bash, PowerShell, MCP and edit call and the stop hook on every turn
+# Only a session with a marker in scope/ gives a hook anything to do so the rest end here before any program starts
+# The binary builds the directory with every marker before any skip and names each marker after its session id
+# Claude Code writes the session id as the first key so a short head of the input names it
+# Reading the whole input with builtins costs more than the binary once it holds a file an edit writes
+# The head goes to the binary in MEETPROXY_HOOK_HEAD since the binary reads the rest of the same stdin
+# Shells without read -n such as dash skip only while no session has a marker
+HEAD=
+if [ "$MODE" != cli ] && [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && [ -d "${CLAUDE_PLUGIN_DATA}/scope" ]; then
+  if ! any "${CLAUDE_PLUGIN_DATA}"/scope/*; then
+    exit 0
+  fi
+  if [ -n "${BASH_VERSION:-}" ]; then
+    IFS= read -r -n 96 HEAD || true
+    session=
+    case "$HEAD" in
+      '{"session_id":'*)
+        rest=${HEAD#'{"session_id":'}
+        rest=${rest#"${rest%%[! ]*}"}
+        case "$rest" in
+          \"*\"*)
+            rest=${rest#\"}
+            session=${rest%%\"*}
+            ;;
+        esac
+        ;;
+    esac
+    # An id with characters a marker name replaces goes to the binary to decide
+    case "$session" in
+      '' | *[!A-Za-z0-9_-]*) ;;
+      *)
+        if [ ! -e "${CLAUDE_PLUGIN_DATA}/scope/${session}" ]; then
+          exit 0
+        fi
+        ;;
+    esac
+  fi
+fi
+if [ "$MODE" != cli ]; then
+  export MEETPROXY_HOOK_HEAD="$HEAD"
 fi
 
 REPO="jeon-jihyeon/meetproxy"
-ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+# Hooks start the launcher by its absolute path so only other starts resolve the directory with programs
+dir=${0%/*}
+case "$dir" in
+  /*/bin) ROOT=${dir%/bin} ;;
+  *) ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd) ;;
+esac
 MANIFEST="${ROOT}/.claude-plugin/plugin.json"
-SRC=$(dirname -- "$ROOT")
+SRC=${ROOT%/*}
+[ -n "$SRC" ] || SRC=/
 
 # Without a binary the guard blocks the tool call with exit 2 unless the marker directory says no session has a scope
 # State from before markers has no directory and may hold a take so it blocks too
 # A fresh install has neither inbox nor relay so nothing can be in scope and it passes
-# The path hook exits 0 to stay quiet
+# Other hooks exit 0 to stay quiet
 fail() {
   echo "meetproxy: $1" >&2
   case "${MODE}" in
@@ -42,17 +90,20 @@ fail() {
   esac
   exit 1
 }
-MODE=cli
-if [ "${1:-}" = hook ] && [ "${2:-}" = guard ]; then
-  MODE=guard
-elif [ "${1:-}" = hook ]; then
-  MODE=hook
-fi
 
 # Rebuilds when sources are newer and renames into place so a partial file never runs
 # A hook runs the last build without searching the tree since it runs on every tool call
 # The next command line such as the tick of the mod within a minute rebuilds
-if [ -f "${SRC}/go.mod" ] && grep -q "^module github.com/${REPO}\$" "${SRC}/go.mod" && command -v go >/dev/null 2>&1; then
+dev=
+if [ -f "${SRC}/go.mod" ] && command -v go >/dev/null 2>&1; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "module github.com/${REPO}") dev=yes && break ;;
+      "module "*) break ;;
+    esac
+  done <"${SRC}/go.mod"
+fi
+if [ -n "$dev" ]; then
   DEV_BIN="${SRC}/bin/meetproxy"
   if [ ! -x "$DEV_BIN" ] || { [ "$MODE" = cli ] && [ -n "$(find "${SRC}/cmd" "${SRC}/internal" "${SRC}/go.mod" -newer "$DEV_BIN" 2>/dev/null | head -n 1)" ]; }; then
     mkdir -p "${SRC}/bin"
@@ -67,7 +118,26 @@ if [ -f "${SRC}/go.mod" ] && grep -q "^module github.com/${REPO}\$" "${SRC}/go.m
   exec "$DEV_BIN" "$@"
 fi
 
-version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)
+# The first "version" key of the manifest such as   "version": "0.1.9",
+version=
+while IFS= read -r line || [ -n "$line" ]; do
+  key=${line#"${line%%[![:space:]]*}"}
+  case "$key" in
+    \"version\"*)
+      value=${key#\"version\"}
+      gap=${value%%\"*}
+      case "$gap" in
+        *[!:\ \	]* | *:*:*) continue ;;
+        *:*) ;;
+        *) continue ;;
+      esac
+      value=${value#*\"}
+      case "$value" in
+        *\"*) version=${value%%\"*} && break ;;
+      esac
+      ;;
+  esac
+done <"$MANIFEST" || true
 [ -n "$version" ] || fail "no version in ${MANIFEST}"
 TAG="v${version}"
 
@@ -140,7 +210,7 @@ fi
 # Skips this launcher itself when the plugin bin directory is on PATH
 found=$(command -v meetproxy 2>/dev/null || true)
 if [ -n "$found" ] && [ ! "$found" -ef "$0" ]; then
-  have=$("$found" version 2>/dev/null || echo unknown)
+  have=$("$found" version 2>/dev/null </dev/null || echo unknown)
   case "$have" in
     "$version" | "v$version") ;;
     *) echo "meetproxy: running ${found} from PATH, version ${have} where the plugin expects ${version}" >&2 ;;

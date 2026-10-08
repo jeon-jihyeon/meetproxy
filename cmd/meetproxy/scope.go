@@ -11,7 +11,7 @@ import (
 	"github.com/jeon-jihyeon/meetproxy/internal/inbox"
 )
 
-// The launcher skips the path and guard hooks while this directory holds no file
+// The launcher skips every hook of a session while this directory holds no marker of it
 // So every session with a scope keeps a marker here from before its scope begins until a turn ends with none left
 // A marker left behind only costs the skip since the binary still decides
 func scopeDir(data string) string { return filepath.Join(data, "scope") }
