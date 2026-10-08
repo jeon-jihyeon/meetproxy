@@ -1,9 +1,11 @@
 package shell_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/jeon-jihyeon/meetproxy/internal/shell"
 )
@@ -107,7 +109,39 @@ func TestCommands(t *testing.T) {
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, shell.Commands(tc.text))
+			got, err := shell.Commands(tc.text)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func TestCommands_TooDeep(t *testing.T) {
+	t.Parallel()
+	tcs := []struct {
+		name  string
+		depth int
+		want  error
+	}{
+		{"reads substitutions 256 deep", 256, nil},
+		{"stops past 256", 257, shell.ErrTooDeep},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			text := "echo " + strings.Repeat("$(", tc.depth) + "gh" + strings.Repeat(")", tc.depth)
+			got, err := shell.Commands(text)
+			assert.ErrorIs(t, err, tc.want)
+			assert.Equal(t, []shell.Command{{Args: []string{"echo", text[5:]}}}, got)
+		})
+	}
+}
+
+func FuzzCommands(f *testing.F) {
+	for _, s := range []string{"gh pr comment 1 -b \"$(cat <<'EOF'\nx\nEOF\n)\"", "a; b && c | d", "echo `x` ${y} $((1)) <(z)"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, text string) {
+		_, _ = shell.Commands(text)
+	})
 }

@@ -2,6 +2,10 @@
 
 All notable changes to meetproxy are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.1.11] - 2026-10-08
+
+Protocol 10. Sessions on 0.1.10 keep working without `/reload-plugins`.
+
 ## [0.1.10] - 2026-10-08
 
 Protocol 10. Sessions need `/reload-plugins`.
@@ -77,6 +81,7 @@ Protocol 6.
 
 - Launcher that runs the binary from a cache, a checksum verified release or `go install`
 
+[0.1.11]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.9
 [0.1.8]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.9
