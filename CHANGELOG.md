@@ -14,7 +14,7 @@ Protocol 10. Sessions need `/reload-plugins`.
 - A session that crashes gives its requests back within three minutes instead of a day
 - `/meetproxy:inbox` lists the newest requests first and can filter by source or delegation
 - Without a Slack token, a reply to a question in Slack reopens the request when you open the inbox
-- Builds for Windows
+- The binary compiles for Windows. Releases and the launcher still cover macOS and Linux only
 
 ### Changed
 
