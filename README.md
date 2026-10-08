@@ -107,10 +107,10 @@ Anyone who can mention you can write a request, so meetproxy treats request text
 - **You approve every reply.** Nothing is posted without your OK.
 - **Replies stay in scope.** While a session handles a request, it can only post to that thread, the PR it's working on, and your [allow list](plugin/skills/allow/SKILL.md).
 - **Risky actions stay with you.** Merging, closing, deleting, approving PRs without permission, and changing meetproxy's settings are all blocked.
-- **It fails closed.** If the guard can't tell where a command or tool will write, it blocks it. That includes network writes like `curl -X POST` to anything other than the Slack and GitHub APIs.
+- **It fails closed.** If the guard can't tell where a command or tool will write, it blocks it. That includes network writes like `curl -X POST` to a host outside your allow list, raw sockets like `nc`, and copies to another host with `scp` or `rsync`.
 - **Posts are labeled.** Every reply ends with `_Written by Claude on behalf of the user_`.
 
-The guard doesn't parse scripts run by path, copied `gh` binaries, raw IP hosts, or WebFetch. It also blocks inline interpreters like `python -c`, and PowerShell, which it can't parse. It only applies while a request is being handled, so your normal work isn't affected.
+The guard doesn't parse scripts run by path or copied `gh` binaries, and leaves WebFetch alone since it only reads. It also blocks inline interpreters like `python -c`, and PowerShell, which it can't parse. It only applies while a request is being handled, so your normal work isn't affected.
 
 ## Privacy
 
