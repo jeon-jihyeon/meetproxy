@@ -8,7 +8,7 @@ Protocol 10. Sessions need `/reload-plugins`.
 
 ### Added
 
-- Builds for Windows
+- The binary compiles for Windows. Releases and the launcher still cover macOS and Linux only
 
 ### Changed
 
