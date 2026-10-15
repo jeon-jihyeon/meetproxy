@@ -312,7 +312,7 @@ func TestFormat(t *testing.T) {
 	}{
 		{"every guide and skill without a place", "commit", "", want{[]string{"Commit Messages", "Commits"}, []string{"commit-helper", "commit-helper"}, false}},
 		{"those of the place", "commit", m.svc, want{[]string{"Commit Messages", "Commits"}, []string{"commit-helper", "commit-helper"}, false}},
-		{"only those of the user elsewhere", "commit", m.wiki, want{[]string{"Commit Messages"}, []string{"commit-helper"}, false}},
+		{"only those of the user elsewhere", "commit", m.work, want{[]string{"Commit Messages"}, []string{"commit-helper"}, false}},
 		{"a kind the map knows nothing of", "sheet", "", want{nil, nil, false}},
 		{"an unknown kind", "tweet", "", want{nil, nil, true}},
 	}

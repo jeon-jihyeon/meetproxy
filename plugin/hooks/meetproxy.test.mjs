@@ -1231,8 +1231,8 @@ test('channelMessages keeps the first line of a message and drops the thread lin
         type: 'text',
         text: JSON.stringify({
           messages:
-            'Channel: #ops (C9)\n\n=== Message from Kai (K), Team <kai@x.com> (U2) at 2030-01-01 12:10:15 KST === \nMessage TS: 1893456100.000001\n' +
-            '<!subteam^S1> review please\nPR: link\n\nmore context\nThread: 3 replies (latest: 2030-01-01 12:25:56 KST)',
+            'Channel: #ops (C9)\n\n=== Message from Kai (K), Team <kai@x.com> (U2) at 2030-01-01 12:10:15 UTC === \nMessage TS: 1893456100.000001\n' +
+            '<!subteam^S1> review please\nPR: link\n\nmore context\nThread: 3 replies (latest: 2030-01-01 12:25:56 UTC)',
         }),
       },
     ],
@@ -1256,9 +1256,9 @@ test('threadMessages reads the detailed thread answer of the connector', () => {
         type: 'text',
         text: JSON.stringify({
           messages:
-            '=== THREAD PARENT MESSAGE ===\nFrom: Kai (K) <kai@x.com> (U2)\nTime: 2030-01-01 09:44:06 KST\nMessage TS: 1893456100.000001\n' +
+            '=== THREAD PARENT MESSAGE ===\nFrom: Kai (K) <kai@x.com> (U2)\nTime: 2030-01-01 09:44:06 UTC\nMessage TS: 1893456100.000001\n' +
             '<@ME> where is retry\nReactions: eyes (1)\n\n=== THREAD REPLIES (1 total) ===\n\n--- Reply 1 of 1 ---\n' +
-            'From: Ann <ann@x.com> (U3)\nTime: 2030-01-01 09:55:19 KST\nMessage TS: 1893456200.000001\nin config.go\nline two\n',
+            'From: Ann <ann@x.com> (U3)\nTime: 2030-01-01 09:55:19 UTC\nMessage TS: 1893456200.000001\nin config.go\nline two\n',
           pagination_info: 'There are no more messages in this thread.\n',
         }),
       },

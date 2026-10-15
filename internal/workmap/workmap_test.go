@@ -22,17 +22,17 @@ const scratch = "/private/tmp/claude-1/x/scratchpad"
 
 // A machine with two places and a config with a skill of the user
 type machine struct {
-	config, svc, wiki string
+	config, svc, work string
 }
 
 func newMachine(t *testing.T) machine {
 	t.Helper()
 	base := t.TempDir()
-	m := machine{config: newConfig(t), svc: filepath.Join(base, "svc"), wiki: filepath.Join(base, "wiki")}
+	m := machine{config: newConfig(t), svc: filepath.Join(base, "svc"), work: filepath.Join(base, "work")}
 	require.NoError(t, os.MkdirAll(filepath.Join(m.svc, ".git"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(m.svc, "go.mod"), []byte("module github.com/acme/svc\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(m.svc, "cache.go"), nil, 0o644))
-	require.NoError(t, os.MkdirAll(m.wiki, 0o755))
+	require.NoError(t, os.MkdirAll(m.work, 0o755))
 	return m
 }
 
@@ -171,8 +171,8 @@ func TestRefresh(t *testing.T) {
 		},
 		{
 			"a line still being written waits",
-			[]string{line(t, prompt(m.wiki, "완성된 질문 하나", nil)), `{"type":"user","cwd":"`},
-			[]string{m.wiki},
+			[]string{line(t, prompt(m.work, "완성된 질문 하나", nil)), `{"type":"user","cwd":"`},
+			[]string{m.work},
 		},
 	}
 	for _, tc := range tcs {
@@ -216,22 +216,22 @@ func TestRefreshIncremental(t *testing.T) {
 			want{true, []string{m.svc}},
 		},
 		{
-			"a daily refresh on the same day is skipped", []string{line(t, prompt(m.wiki, "온콜 런북 정리", nil))}, false, true, day.Add(time.Hour),
+			"a daily refresh on the same day is skipped", []string{line(t, prompt(m.work, "온콜 런북 정리", nil))}, false, true, day.Add(time.Hour),
 			want{false, []string{m.svc}},
 		},
 		{
 			"the next day reads only the new lines and keeps the place a scratch prompt started in",
 			[]string{line(t, prompt(scratch, "스크래치에서 이어간 질문", nil)), `{"type":"user",`}, false, true, day.AddDate(0, 0, 1),
-			want{true, []string{m.svc, m.wiki, m.svc}},
+			want{true, []string{m.svc, m.work, m.svc}},
 		},
 		{
 			"a line finished later is read once",
 			[]string{`"cwd":"` + m.svc + `","message":{"content":"마저 쓴 질문"}}` + "\n"}, false, false, day.AddDate(0, 0, 1),
-			want{true, []string{m.svc, m.wiki, m.svc, m.svc}},
+			want{true, []string{m.svc, m.work, m.svc, m.svc}},
 		},
 		{
-			"a transcript rewritten shorter replaces its cases", []string{line(t, prompt(m.wiki, "남은 질문", nil))}, true, false, day.AddDate(0, 0, 1),
-			want{true, []string{m.wiki}},
+			"a transcript rewritten shorter replaces its cases", []string{line(t, prompt(m.work, "남은 질문", nil))}, true, false, day.AddDate(0, 0, 1),
+			want{true, []string{m.work}},
 		},
 	}
 	for _, st := range steps {
@@ -296,7 +296,7 @@ func TestRefreshPrunes(t *testing.T) {
 			config := newConfig(t)
 			data := t.TempDir()
 			transcript(t, config, "a", false, append([]string{typed(m.svc, tc.text, tc.year)}, recent...)...)
-			transcript(t, config, "b", false, typed(m.wiki, "지워질 대화", 2030))
+			transcript(t, config, "b", false, typed(m.work, "지워질 대화", 2030))
 			s := workmap.New(data)
 			_, err := s.Refresh(config, false, now)
 			require.NoError(t, err)
@@ -395,8 +395,8 @@ func TestPlacesOrder(t *testing.T) {
 	t.Parallel()
 	m := newMachine(t)
 	transcript(t, m.config, "a", false,
-		line(t, prompt(m.wiki, "온콜 런북 정리", nil)), line(t, prompt(m.svc, "캐시 우선순위 로직", nil)),
-		line(t, prompt(m.wiki, "런북 링크 정리", nil)), line(t, prompt(m.svc, "캐시 실패 원인", nil)))
+		line(t, prompt(m.work, "온콜 런북 정리", nil)), line(t, prompt(m.svc, "캐시 우선순위 로직", nil)),
+		line(t, prompt(m.work, "런북 링크 정리", nil)), line(t, prompt(m.svc, "캐시 실패 원인", nil)))
 	s := workmap.New(t.TempDir())
 	_, err := s.Refresh(m.config, false, time.Now())
 	require.NoError(t, err)
@@ -404,7 +404,7 @@ func TestPlacesOrder(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []workmap.Place{
 		{Root: m.svc, Name: "svc", Cases: 2},
-		{Root: m.wiki, Name: "wiki", Cases: 2},
+		{Root: m.work, Name: "work", Cases: 2},
 	}, places)
 }
 
@@ -427,9 +427,9 @@ func TestMethods(t *testing.T) {
 	methods, err := s.Methods()
 	require.NoError(t, err)
 	assert.Equal(t, []workmap.Method{
+		{Name: "alert-triage", Description: "알림 원인 조사"},
 		{Name: "deploy", Description: "Deploy notice"},
 		{Name: "deploy", Description: "Deploy svc", Root: m.svc},
-		{Name: "alert-triage", Description: "알림 원인 조사"},
 		{Name: "slack:digest", Description: "Channel digest per day"},
 		{Name: "slack:standup", Description: "Daily standup from activity"},
 	}, methods)
@@ -449,7 +449,7 @@ func TestRefreshUpgrade(t *testing.T) {
 		}}}),
 		line(t, map[string]any{"type": "user", "message": map[string]any{"content": []any{map[string]any{"type": "tool_result", "tool_use_id": "u1"}}}}))
 	legacy := line(t, map[string]any{"prompt": "캐시 우선순위 로직 설명", "place": m.svc, "at": at}) +
-		line(t, map[string]any{"prompt": "지워진 대화의 질문", "place": m.wiki, "at": at})
+		line(t, map[string]any{"prompt": "지워진 대화의 질문", "place": m.work, "at": at})
 	writeFile(t, filepath.Join(data, "workmap", "cases.jsonl"), legacy)
 	aliased := `[{"root":"` + m.svc + `","name":"svc","aliases":["server"]}]`
 	writeFile(t, filepath.Join(data, "workmap", "places.json"), aliased)
@@ -470,7 +470,7 @@ func TestRefreshUpgrade(t *testing.T) {
 	require.NoError(t, err)
 	places, err := os.ReadFile(filepath.Join(data, "workmap", "places.json"))
 	require.NoError(t, err)
-	assert.Equal(t, []string{m.wiki, m.svc}, roots(cases))
+	assert.Equal(t, []string{m.work, m.svc}, roots(cases))
 	assert.Len(t, formats[0].Examples, 1)
 	assert.NotContains(t, string(written), "prompt")
 	assert.NotContains(t, string(places), "aliases")

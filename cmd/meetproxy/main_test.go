@@ -107,9 +107,9 @@ func TestRun(t *testing.T) {
 		},
 		{"close fails without an open relay", "s1", false, nil, step{"close", nil, ""}, want{1, "", true}},
 		{"close fails once the relay closed", "s1", false, recorded, step{"close", nil, ""}, want{1, "", true}},
-		{"locate is gone", "s1", false, recorded, step{"locate", []string{"캐시이"}, ""}, want{exitUsage, "", true}},
+		{"locate is gone", "s1", false, recorded, step{"locate", []string{"캐시가"}, ""}, want{exitUsage, "", true}},
 		{"correct is gone", "s1", false, recorded, step{"correct", []string{"r1"}, ""}, want{exitUsage, "", true}},
-		{"route is gone", "s1", false, recorded, step{"route", []string{"캐시이"}, ""}, want{exitUsage, "", true}},
+		{"route is gone", "s1", false, recorded, step{"route", []string{"캐시가"}, ""}, want{exitUsage, "", true}},
 		{"usage error for open with two origins", "s1", false, nil, step{"open", []string{"o", "p"}, ""}, want{exitUsage, "", true}},
 		{
 			"usage error for close with an argument", "s1", false, []step{{"open", []string{"o"}, ""}},
@@ -175,7 +175,7 @@ func TestRun(t *testing.T) {
 		},
 		{
 			"inbox add keeps the first non empty line of the summary with spaces collapsed", "s1", false,
-			[]step{{"inbox", []string{"add", link, "--summary", "\n  where   is\talloc \nsecond line"}, ""}},
+			[]step{{"inbox", []string{"add", link, "--summary", "\n  where   is\tcache \nsecond line"}, ""}},
 			step{"inbox", []string{"list"}, ""}, want{0, id + "\topen\t-\t-\t" + link + "\twhere is cache" + plain, false},
 		},
 		{
@@ -298,7 +298,7 @@ func TestRun(t *testing.T) {
 		{
 			"delegation match falls back to the default for a question", "s1", false, []step{{"delegation", []string{"put"}, prDelegation}},
 			step{"delegation", []string{"match", "mention"}, `{"text":"where is cache","from":"U2"}`},
-			want{0, `{"delegation":"default","task":"answer","triage":true,"depth":"quick","digest":"f6c5abd79fc4"}`, false},
+			want{0, `{"delegation":"default","task":"answer","triage":true,"depth":"quick","digest":"` + delegation.Digest("where is cache") + `"}`, false},
 		},
 		{
 			"delegation match reads a deep request", "s1", false, nil,

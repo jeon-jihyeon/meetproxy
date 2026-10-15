@@ -63,7 +63,7 @@ func TestPrompt(t *testing.T) {
 		{
 			"a message with a linked one",
 			triage.Input{Text: "why did this fail", Channel: "C1", From: "U1", Linked: []string{"cache job failed"}},
-			[]string{"Channel: C1\nFrom: U1\n", "<<<\nwhy did this fail\n>>>", "Linked message:\n<<<\nalloc job failed\n>>>"},
+			[]string{"Channel: C1\nFrom: U1\n", "<<<\nwhy did this fail\n>>>", "Linked message:\n<<<\ncache job failed\n>>>"},
 			[]string{"Workspace:", "Places", "already answered"},
 		},
 		{
