@@ -16,7 +16,7 @@
 /.claude/meetproxy/
 .claude/settings.local.json
 CLAUDE.local.md
-/tmp
+/tmp/
 
 # environment
 .env*
