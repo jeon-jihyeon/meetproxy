@@ -4,7 +4,16 @@ All notable changes to meetproxy are listed here. The format follows [Keep a Cha
 
 A release that raises the protocol between the binary and the watcher needs `/reload-plugins` in every open session, or a restart of it. Until then the old watcher stops and says so instead of misreading the new binary.
 
-## [0.1.11] - 2026-10-08
+## [0.1.12] - 2026-10-15
+
+Protocol 10. Sessions on 0.1.11 keep working without `/reload-plugins`. It carries everything 0.1.9 to 0.1.11 shipped, since those releases were withdrawn.
+
+### Changed
+
+- The inbox and delegation stores read and write their own record types, so the files on disk stay the same while the models change
+- Test fixtures and examples use neutral names only
+
+## [0.1.11] - 2026-10-08 [YANKED]
 
 Protocol 10. Sessions on 0.1.10 keep working without `/reload-plugins`.
 
@@ -28,7 +37,7 @@ Protocol 10. Sessions on 0.1.10 keep working without `/reload-plugins`.
   - deleting a Slack message through a connector
 - The hook denies a post when its input is over 4 MiB, names a malformed session id or another event, or the guard panics
 
-## [0.1.10] - 2026-10-08
+## [0.1.10] - 2026-10-08 [YANKED]
 
 Protocol 10. Sessions need `/reload-plugins`.
 
@@ -62,7 +71,7 @@ Protocol 10. Sessions need `/reload-plugins`.
 
 - While a request is handled, network writes through `curl`, `wget`, httpie or `xh` to hosts other than the Slack and GitHub APIs are denied, and so is the PowerShell tool
 
-## [0.1.9] - 2026-10-07
+## [0.1.9] - 2026-10-07 [YANKED]
 
 Protocol 9. Sessions need `/reload-plugins`.
 
@@ -217,13 +226,14 @@ Protocol 6.
 - Posting guard as a PreToolUse hook, with `/meetproxy:allow` for other destinations
 - Launcher that runs the binary from a cache, a checksum verified release or `go install`
 
-[0.1.11]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.10...v0.1.11
-[0.1.10]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.9...v0.1.10
-[0.1.9]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.9
-[0.1.8]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.9
-[0.1.7]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.9
-[0.1.6]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.9
-[0.1.5]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.9
+[0.1.12]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.12
+[0.1.11]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.12
+[0.1.10]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.12
+[0.1.9]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.12
+[0.1.8]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.12
+[0.1.7]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.12
+[0.1.6]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.12
+[0.1.5]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.12
 [0.1.4]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.1...v0.1.2
