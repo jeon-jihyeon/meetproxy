@@ -263,7 +263,11 @@ func New(dataDir string) Store { return Store{file: filepath.Join(dataDir, "dele
 
 // In order with the built in delegations last so the first match wins
 func (s Store) List() ([]Delegation, error) {
-	ds, err := s.load()
+	rs, err := s.load()
+	ds := make([]Delegation, 0, len(rs)+len(builtIn))
+	for _, r := range rs {
+		ds = append(ds, Delegation(r))
+	}
 	return append(ds, builtIn...), err
 }
 
@@ -278,16 +282,16 @@ func (s Store) Put(d Delegation) error {
 		return err
 	}
 	defer unlock()
-	ds, err := s.load()
+	rs, err := s.load()
 	if err != nil {
 		return err
 	}
-	if i := slices.IndexFunc(ds, func(x Delegation) bool { return x.Id == d.Id }); i >= 0 {
-		ds[i] = d
+	if i := slices.IndexFunc(rs, func(r record) bool { return r.Id == d.Id }); i >= 0 {
+		rs[i] = record(d)
 	} else {
-		ds = append(ds, d)
+		rs = append(rs, record(d))
 	}
-	return fileio.WriteJSON(s.file, ds)
+	return s.save(rs)
 }
 
 func (s Store) Remove(id string) error {
@@ -297,25 +301,16 @@ func (s Store) Remove(id string) error {
 		return err
 	}
 	defer unlock()
-	ds, err := s.load()
+	rs, err := s.load()
 	if err != nil {
 		return err
 	}
-	i := slices.IndexFunc(ds, func(x Delegation) bool { return x.Id == id })
+	i := slices.IndexFunc(rs, func(r record) bool { return r.Id == id })
 	if i < 0 {
 		return fmt.Errorf("no delegation %q", id)
 	}
-	return fileio.WriteJSON(s.file, slices.Delete(ds, i, i+1))
+	return s.save(slices.Delete(rs, i, i+1))
 }
 
 // Serializes every read then write across the sessions that share the delegations
 func (s Store) lock() (unlock func(), err error) { return fileio.Lock(s.file + ".lock") }
-
-func (s Store) load() ([]Delegation, error) {
-	var ds []Delegation
-	found, err := fileio.ReadJSON(s.file, &ds)
-	if err != nil && found {
-		return nil, fmt.Errorf("%s is corrupt: %w", s.file, err)
-	}
-	return ds, err
-}

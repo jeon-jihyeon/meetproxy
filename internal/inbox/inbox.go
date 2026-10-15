@@ -50,52 +50,52 @@ const (
 )
 
 type Item struct {
-	Id string `json:"id"`
+	Id string
 	// Key of the thread the request sits in
 	// Every message of one thread is one request
-	Thread string `json:"thread,omitempty"`
+	Thread string
 	// Link of the first message that asked, where the reply goes
-	Link   string `json:"link"`
-	Source string `json:"source,omitempty"`
+	Link   string
+	Source string
 	// Author id
-	From string `json:"from,omitempty"`
+	From string
 	// Author display name
-	Author  string `json:"author,omitempty"`
-	Channel string `json:"channel,omitempty"`
+	Author  string
+	Channel string
 	// First line of the newest message as the list shows it
 	// Untrusted text
-	Summary string `json:"summary,omitempty"`
-	Status  Status `json:"status"`
-	Reason  string `json:"reason,omitempty"`
+	Summary string
+	Status  Status
+	Reason  string
 	// Delegation that caught the message
-	Delegation string `json:"delegation,omitempty"`
+	Delegation string
 	// Task the delegation names
-	Task string `json:"task,omitempty"`
+	Task string
 	// What the task works on when it is not the message itself such as a pull request
-	Target     string `json:"target,omitempty"`
-	MayApprove bool   `json:"may_approve,omitempty"`
+	Target     string
+	MayApprove bool
 	// Unix seconds of the newest message that asked
 	// A newer one on a settled request opens it again
-	Ts        string    `json:"ts,omitempty"`
-	SessionId string    `json:"session_id,omitempty"`
-	AddedAt   time.Time `json:"added_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Ts        string
+	SessionId string
+	AddedAt   time.Time
+	UpdatedAt time.Time
 	// When a held request opens again
 	// Zero waits until the user takes it
-	HeldUntil time.Time `json:"held_until,omitzero"`
+	HeldUntil time.Time
 	// quick or deep as the request asked
-	Depth string `json:"depth,omitempty"`
+	Depth string
 	// A reply in a thread meetproxy already answered
-	Followup bool `json:"followup,omitempty"`
+	Followup bool
 	// The reply says the earlier answer was wrong
-	Correction bool `json:"correction,omitempty"`
+	Correction bool
 	// Digest of the request text that duplicates are told by
-	Digest string `json:"digest,omitempty"`
+	Digest string
 	// Reactions already added
-	Acked []string `json:"acked,omitempty"`
+	Acked []string
 	// A newer message came while a session worked on the request
 	// The request opens again once the take settles so the message is never absorbed
-	Again bool `json:"again,omitempty"`
+	Again bool
 	// Last heartbeat of the session that took it, zero when that session never sent one
 	// Read with the item and never stored in it
 	beat time.Time
@@ -353,8 +353,7 @@ func (s Store) Get(id string) (Item, error) {
 	if !validId.MatchString(id) {
 		return Item{}, fmt.Errorf("%w %q", ErrNotFound, id)
 	}
-	var it Item
-	found, err := fileio.ReadJSON(s.itemFile(id), &it)
+	rec, found, err := s.read(id)
 	switch {
 	case err != nil && found:
 		return Item{}, fmt.Errorf("%w: %s: %w", ErrCorrupt, s.itemFile(id), err)
@@ -363,11 +362,13 @@ func (s Store) Get(id string) (Item, error) {
 	case !found:
 		return Item{}, fmt.Errorf("%w %s", ErrNotFound, id)
 	}
+	var beat time.Time
+	if Status(rec.Status) == StatusTaken {
+		beat = s.beatOf(rec.SessionId)
+	}
+	it := itemOf(rec, beat)
 	if slices.Contains(legacyOpen, it.Status) {
 		it.Status = StatusOpen
-	}
-	if it.Status == StatusTaken {
-		it.beat = s.beatOf(it.SessionId)
 	}
 	return it, nil
 }
@@ -779,7 +780,28 @@ func (s Store) SetPaused(paused bool) error {
 // Serializes every read then write across the sessions that share the inbox
 func (s Store) lock() (unlock func(), err error) { return fileio.Lock(filepath.Join(s.dir, "lock")) }
 
-func (s Store) put(it Item) error { return fileio.WriteJSON(s.itemFile(it.Id), it) }
+func (s Store) put(it Item) error { return s.write(recordOf(it)) }
+
+func itemOf(r record, beat time.Time) Item {
+	return Item{
+		Id: r.Id, Thread: r.Thread, Link: r.Link, Source: r.Source, From: r.From, Author: r.Author, Channel: r.Channel,
+		Summary: r.Summary, Status: Status(r.Status), Reason: r.Reason, Delegation: r.Delegation, Task: r.Task,
+		Target: r.Target, MayApprove: r.MayApprove, Ts: r.Ts, SessionId: r.SessionId, AddedAt: r.AddedAt,
+		UpdatedAt: r.UpdatedAt, HeldUntil: r.HeldUntil, Depth: r.Depth, Followup: r.Followup, Correction: r.Correction,
+		Digest: r.Digest, Acked: r.Acked, Again: r.Again, beat: beat,
+	}
+}
+
+// The heartbeat is left out since it belongs to the session
+func recordOf(it Item) record {
+	return record{
+		Id: it.Id, Thread: it.Thread, Link: it.Link, Source: it.Source, From: it.From, Author: it.Author, Channel: it.Channel,
+		Summary: it.Summary, Status: string(it.Status), Reason: it.Reason, Delegation: it.Delegation, Task: it.Task,
+		Target: it.Target, MayApprove: it.MayApprove, Ts: it.Ts, SessionId: it.SessionId, AddedAt: it.AddedAt,
+		UpdatedAt: it.UpdatedAt, HeldUntil: it.HeldUntil, Depth: it.Depth, Followup: it.Followup, Correction: it.Correction,
+		Digest: it.Digest, Acked: it.Acked, Again: it.Again,
+	}
+}
 
 func (s Store) itemFile(id string) string { return filepath.Join(s.dir, id+".json") }
 func (s Store) pauseFile() string         { return filepath.Join(s.dir, "paused") }
