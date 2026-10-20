@@ -126,13 +126,15 @@ export function register(on) {
       name: 'post',
       description:
         'Post a reply in the thread of a Slack or GitHub link, such as where a meetproxy request came from. ' +
-        'Only where the open request came from, what it works on and the allow list are accepted.',
+        'Only where the open request came from, what it works on and the allow list are accepted. ' +
+        'format=json returns delivery, reply, ledger, watch and retry states. Never resend a sent reply; verify an unknown delivery first.',
       inputSchema: {
         type: 'object',
         properties: {
           link: { type: 'string' },
           text: { type: 'string' },
           kind: { type: 'string', enum: ['answer', 'question'], description: 'question for a question back to the requester' },
+          format: { type: 'string', enum: ['text', 'json'], description: 'text by default; json for a versioned post receipt' },
         },
         required: ['link', 'text'],
       },
@@ -203,12 +205,13 @@ export function register(on) {
   // The user's own turn calls the tool so the Slack connector may be read here
   on('tool.call', { tool: 'mcp__meetproxy__inbox' }, async ($, e) => ({ result: await listInbox($, e.source, e.delegation, e.limit) })).catch(($, e, next) => (next.called ? next(e) : { result: 'meetproxy could not list the inbox: ' + (next.error?.message ?? next.error?.kind ?? '') }))
 
-  // A post whose check fails or runs out of time is denied rather than sent
+  // Preflight failures stop before dispatch
+  // A timeout after dispatch leaves delivery unknown
   on('tool.call', { tool: 'mcp__meetproxy__post' }, async ($, e) => {
-    return post($, e.link, e.text, e.kind)
+    return post($, e.link, e.text, e.kind, e.format)
       .then(r => ({ result: r }))
-      .catch(err => ({ result: 'denied: post check failed ' + message(err) }))
-  }).catch(($, e, next) => (next.called ? next(e) : { result: 'denied: post check failed ' + (next.error?.message ?? next.error?.kind ?? '') }))
+      .catch(err => ({ result: uncertainPost(e.format, e.link, message(err)) }))
+  }).catch(($, e, next) => (next.called ? next(e) : { result: uncertainPost(e.format, e.link, next.error?.message ?? next.error?.kind ?? '') }))
 
   // A retract the ledger does not vouch for or that fails part way is refused rather than guessed
   on('tool.call', { tool: 'mcp__meetproxy__retract' }, async ($, e) => {
@@ -1100,30 +1103,101 @@ async function asked($, p) {
 
 // Sending
 
-// The same check as the posting guard runs before the source sends
-// A reply that went out is kept in the ledger and its thread is watched for follow-ups
-async function post($, link, body, kind) {
-  if (typeof link !== 'string' || typeof body !== 'string' || !body.trim()) return 'post needs a link and a text'
-  const source = sourceOf(link)
-  if (!source) return 'meetproxy cannot post to ' + link
-  const me = await $.session.id()
-  if (!(await meetproxy($, ['can-post', link, '--session', me])).ok) {
-    return `denied: ${link} is not the request's origin, its target or on the allow list`
+function postResult(format, receipt, text) {
+  return format === 'json' ? JSON.stringify({ version: 1, ...receipt }) : text
+}
+
+// An outer timeout may follow delivery
+// The caller must check the thread before sending again
+function uncertainPost(format, link, error) {
+  return postResult(format, {
+    link: link ?? null, source: sourceOf(link) ?? null, sent: 'unknown', reply: null, reply_id: null,
+    ledger: 'unknown', watch: 'unknown', retry: 'verify', error,
+  }, 'post outcome unknown: ' + error + '. Check the original thread before retrying')
+}
+
+async function post($, link, body, kind, format) {
+  const source = typeof link === 'string' ? sourceOf(link) : undefined
+  const receipt = {
+    link: link ?? null, source: source ?? null, sent: 'not_sent', reply: null, reply_id: null,
+    ledger: 'not_attempted', watch: 'not_attempted', retry: 'after_fix',
   }
-  let reply
+  const result = text => postResult(format, receipt, text)
+  if (typeof link !== 'string' || typeof body !== 'string' || !body.trim()) {
+    receipt.error = 'post needs a link and a text'
+    return result(receipt.error)
+  }
+  if (!source) {
+    receipt.error = 'meetproxy cannot post to ' + link
+    return result(receipt.error)
+  }
+  let me
   try {
-    reply = await send($, source, link, body)
+    me = await $.session.id()
+    if (!(await meetproxy($, ['can-post', link, '--session', me])).ok) {
+      receipt.error = `denied: ${link} is not the request's origin, its target or on the allow list`
+      return result(receipt.error)
+    }
   } catch (err) {
-    return 'failed to post: ' + message(err)
+    receipt.error = message(err)
+    return result('denied: post check failed ' + receipt.error)
   }
-  // A send that named no reply leaves nothing to keep in the ledger, watch or retract, so it never reads as posted
+  try {
+    receipt.reply = await send($, source, link, body) || null
+  } catch (err) {
+    receipt.sent = 'unknown'
+    receipt.retry = 'verify'
+    receipt.error = message(err)
+    return result('failed to post: ' + receipt.error + '. Delivery is unknown; check the original thread before retrying')
+  }
+  receipt.sent = 'sent'
+  receipt.retry = 'never'
+  const reply = receipt.reply
   if (!reply) {
-    return `sent to ${link} but the source named no link of the reply, so it is not in the ledger, its thread is not watched and it cannot be retracted`
+    return result(`sent to ${link} but the source named no link of the reply, so it is not in the ledger, its thread is not watched and it cannot be retracted. Do not resend`)
   }
+  receipt.reply_id = slackLink(reply)?.ts ?? githubLink(reply)?.discussion ?? githubLink(reply)?.comment ?? null
   const rec = { reply, body, kind: kind === 'question' ? 'question' : 'answer' }
-  const r = await meetproxy($, ['posts', 'add', '--session', me], JSON.stringify(rec))
-  if (!r.ok) $.ui.log('meetproxy: could not record the post: ' + firstLine(r.err))
-  return 'posted to ' + link
+  try {
+    const r = await meetproxy($, ['posts', 'add', '--session', me], JSON.stringify(rec))
+    if (r.ok) {
+      receipt.ledger = 'recorded'
+      receipt.watch = 'active'
+      return result('posted to ' + link)
+    }
+    receipt.error = firstLine(r.err) || 'recording failed'
+  } catch (err) {
+    receipt.error = message(err)
+  }
+  await recordedPost($, me, receipt)
+  return result(`sent to ${link}; reply ${reply}; ledger ${receipt.ledger}; watch ${receipt.watch}. Do not resend. ${receipt.error}`)
+}
+
+// Readback never sends again
+// An older watch alone cannot establish that this reply is watched
+async function recordedPost($, me, receipt) {
+  receipt.ledger = 'unknown'
+  receipt.watch = 'unknown'
+  try {
+    const found = await meetproxy($, ['posts', 'find', receipt.reply])
+    if (!found.ok) {
+      if (found.err.includes('no such post in the ledger')) receipt.ledger = 'not_recorded'
+      return
+    }
+    const p = parseJSON(found.out)
+    if (p?.reply !== receipt.reply || !p.request || !p.at) return
+    receipt.ledger = 'recorded'
+    const tick = await meetproxy($, ['tick', '--session', me])
+    const t = tick.ok ? parseJSON(tick.out) : undefined
+    if (!Array.isArray(t?.watch)) return
+    const w = t.watch.find(w => w.request === p.request)
+    const seen = slackLink(receipt.reply)?.ts ?? String(Math.floor(Date.parse(p.at) / 1000))
+    const live = w && w.origin === p.origin && w.thread === p.origin &&
+      Number(w.seen) >= Number(seen) && Date.parse(w.until) > await $.clock.now()
+    receipt.watch = live ? 'active' : 'not_recorded'
+  } catch {
+    // Failed readback leaves the observed states intact
+  }
 }
 
 // Replaces or removes a reply only when the ledger holds it

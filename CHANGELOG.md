@@ -4,6 +4,12 @@ All notable changes to meetproxy are listed here. The format follows [Keep a Cha
 
 A release that raises the protocol between the binary and the watcher needs `/reload-plugins` in every open session, or a restart of it. Until then the old watcher stops and says so instead of misreading the new binary.
 
+## [0.1.13]
+
+### Fixed
+
+- Post receipts distinguish delivery from ledger and watch failures so a caller can avoid sending a reply twice
+
 ## [0.1.12] - 2026-10-15
 
 Protocol 10. Sessions on 0.1.11 keep working without `/reload-plugins`. It carries everything 0.1.9 to 0.1.11 shipped, since those releases were withdrawn.
