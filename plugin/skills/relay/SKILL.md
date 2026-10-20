@@ -49,7 +49,12 @@ Relay one request link end to end. The handle skill also gives a depth, `quick` 
      2. Change it: take their change, show the new reply and ask again
      3. Don't send: print the reply for them. Run from the handle skill, stop here and let it hold the request. Run by hand, go to step 6
    - When the question cannot be asked, post nothing, print the reply and go on as for Don't send
-   - On Send, post with the meetproxy `post` tool, giving it the request link and the text. It sends with the right service for the link, Slack or GitHub.
+   - On Send, post with the meetproxy `post` tool, giving it the request link, the text and `format: "json"`. It sends with the right service for the link, Slack or GitHub.
+   - Parse the JSON string receipt: `version` is 1; `link` and `source` name the destination; `reply` is the reply permalink and `reply_id` is the source's message or comment id, or null.
+   - `sent: "sent"` and `retry: "never"` mean the source acknowledged delivery. Never resend, even if `ledger` or `watch` failed. Show the reply link and any recording problem to the user.
+   - `sent: "unknown"` and `retry: "verify"` require checking the original thread before considering another send. A timeout can happen after the reply went out.
+   - `sent: "not_sent"` and `retry: "after_fix"` mean validation or the guard stopped the post. Explain the problem; the receipt grants no new approval.
+   - `ledger` is `recorded`, `not_recorded`, `unknown` or `not_attempted`. `watch` is `active`, `not_recorded`, `unknown` or `not_attempted`. Only `active` establishes that follow-ups after this reply are watched. Clients omitting `format` still receive text.
    - Post where the request came from. Anywhere else only when the user said so, and the tool denies destinations outside the allow list.
    - On a denial, print the refined answer instead and say that `/meetproxy:allow <destination>` is needed.
 6. Close

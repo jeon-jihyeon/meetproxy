@@ -382,7 +382,7 @@ test('a post whose check fails is denied and nothing is sent', integration, asyn
   // A post hook that outran its budget before it answered is denied too
   const catchPost = handlers['tool.call.catch:mcp__meetproxy__post']
   const next = Object.assign(() => 'ran', { called: false, error: { kind: 'timeout' } })
-  assert.deepEqual(catchPost(env.$, { tool: 'mcp__meetproxy__post' }, next), { result: 'denied: post check failed timeout' })
+  assert.deepEqual(catchPost(env.$, { tool: 'mcp__meetproxy__post' }, next), { result: 'post outcome unknown: timeout. Check the original thread before retrying' })
   const other = Object.assign(e => e, { called: true })
   assert.deepEqual(catchPost(env.$, { tool: 'Bash' }, other), { tool: 'Bash' })
 })
@@ -577,6 +577,152 @@ test('a channel with more pages than the bound reads the newest ones and says so
   assert.deepEqual(rows(env).map(r => r[4]), ['https://w.slack.com/archives/C9/p1893456120000001'])
 })
 
+for (const tc of [
+  { name: 'acknowledged', want: ['sent', 'recorded', 'active', 'never'] },
+  { name: 'ledger fails', fail: a => a[0] === 'posts' && a[1] === 'add', want: ['sent', 'not_recorded', 'unknown', 'never'] },
+  { name: 'watch fails', watchFails: true, want: ['sent', 'recorded', 'not_recorded', 'never'] },
+  { name: 'record acknowledgement lost', lost: true, want: ['sent', 'recorded', 'active', 'never'] },
+  { name: 'older watch', lost: true, older: true, want: ['sent', 'recorded', 'not_recorded', 'never'] },
+  { name: 'recording throws', throws: true, want: ['sent', 'not_recorded', 'unknown', 'never'] },
+  { name: 'readback fails', fail: a => a[0] === 'posts', want: ['sent', 'unknown', 'unknown', 'never'] },
+  { name: 'source fails', sendFails: true, want: ['unknown', 'not_attempted', 'not_attempted', 'verify'] },
+]) {
+  test('post JSON receipt distinguishes ' + tc.name, integration, async () => {
+    const env = session({ fail: tc.fail, sendFails: tc.sendFails, now: Date.now() })
+    const link = 'https://github.com/o/svc/pull/7'
+    env.bin(['open', link, '--session', 'S1'])
+    if (tc.watchFails) {
+      mkdirSync(join(env.data, 'posts', 'watch'), { recursive: true })
+      const { createHash } = await import('node:crypto')
+      const id = createHash('sha256').update(link).digest('hex').slice(0, 12)
+      mkdirSync(join(env.data, 'posts', 'watch', id + '.json'))
+    }
+    const run = env.$.process.run
+    env.$.process.run = async (argv, init) => {
+      const add = argv[1] === 'posts' && argv[2] === 'add'
+      if (add && tc.throws) throw new Error('record timeout')
+      const r = await run(argv, init)
+      if (add && tc.older) {
+        const reply = JSON.parse(init.stdin).reply
+        const p = JSON.parse(env.bin(['posts', 'find', reply]).stdout)
+        const file = join(env.data, 'posts', 'watch', p.request + '.json')
+        const w = JSON.parse(readFileSync(file, 'utf8'))
+        writeFileSync(file, JSON.stringify({ ...w, seen: '1' }))
+      }
+      if (add && tc.lost) throw new Error('record acknowledgement lost')
+      return r
+    }
+    const handlers = await started(env, {})
+    const got = await handlers['tool.call'](env.$, {
+      tool: 'mcp__meetproxy__post', link, text: 'reply', format: 'json',
+    }, () => 'passed')
+    const r = JSON.parse(got.result)
+    assert.equal(r.version, 1)
+    assert.equal(r.link, link)
+    assert.equal(r.source, 'github')
+    assert.deepEqual([r.sent, r.ledger, r.watch, r.retry], tc.want)
+    assert.equal(env.sent.length, tc.sendFails ? 0 : 1)
+    assert.equal(r.reply, tc.sendFails ? null : link + '#issuecomment-900')
+    assert.equal(r.reply_id, tc.sendFails ? null : '900')
+  })
+}
+
+for (const tc of [
+  { name: 'missing link', link: undefined, body: 'reply', error: /post needs a link/ },
+  { name: 'empty body', link: 'https://github.com/o/svc/pull/7', body: ' ', error: /post needs a link/ },
+  { name: 'unsupported source', link: 'https://example.com', body: 'reply', error: /cannot post/ },
+  { name: 'denied scope', link: 'https://github.com/o/svc/pull/7', body: 'reply', error: /denied:/ },
+  { name: 'session failure', link: 'https://github.com/o/svc/pull/7', body: 'reply', fail: 'session', error: /session failed/ },
+  { name: 'check failure', link: 'https://github.com/o/svc/pull/7', body: 'reply', fail: 'check', error: /check failed/ },
+]) {
+  test('post JSON preflight reason: ' + tc.name, integration, async () => {
+    const env = session()
+    if (tc.fail === 'session') env.$.session.id = async () => { throw new Error('session failed') }
+    if (tc.fail === 'check') env.$.process.run = async () => { throw new Error('check failed') }
+    const receipt = JSON.parse(await testing.post(env.$, tc.link, tc.body, 'answer', 'json'))
+    assert.deepEqual([receipt.sent, receipt.ledger, receipt.watch, receipt.retry],
+      ['not_sent', 'not_attempted', 'not_attempted', 'after_fix'])
+    assert.match(receipt.error, tc.error)
+    assert.deepEqual(env.sent, [])
+  })
+}
+
+for (const tc of [
+  { name: 'malformed ledger response', command: 'posts', output: '{}', watch: 'unknown', ledger: 'unknown' },
+  { name: 'failed tick', command: 'tick', code: 1, output: '', watch: 'unknown', ledger: 'recorded' },
+  { name: 'tick without watch rows', command: 'tick', output: '{}', watch: 'unknown', ledger: 'recorded' },
+  { name: 'no matching watch', command: 'tick', output: `{"watch":[]}`, watch: 'not_recorded', ledger: 'recorded' },
+]) {
+  test('post readback preserves uncertainty: ' + tc.name, integration, async () => {
+    const env = session({ now: Date.now() })
+    const link = 'https://github.com/o/svc/pull/7'
+    env.bin(['open', link, '--session', 'S1'])
+    const run = env.$.process.run
+    env.$.process.run = async (argv, init) => {
+      const answer = await run(argv, init)
+      if (argv[1] === 'posts' && argv[2] === 'add') throw new Error('lost acknowledgement')
+      if (argv[1] === tc.command) return { exitCode: tc.code ?? 0, stdout: tc.output, stderr: 'fixture failure' }
+      return answer
+    }
+    const receipt = JSON.parse(await testing.post(env.$, link, 'reply', 'answer', 'json'))
+    assert.deepEqual([receipt.sent, receipt.ledger, receipt.watch, receipt.retry],
+      ['sent', tc.ledger, tc.watch, 'never'])
+    assert.equal(env.sent.length, 1)
+  })
+}
+
+test('post JSON receipt retains delivery when Slack names no reply', integration, async () => {
+  const env = session({ slack: { slack_read_thread: () => ({}) } })
+  const link = 'https://w.slack.com/archives/C7/p1790000000000001'
+  env.bin(['open', link, '--session', 'S1'])
+  const r = JSON.parse(await testing.post(env.$, link, 'hi', 'answer', 'json'))
+  assert.deepEqual([r.sent, r.reply, r.reply_id, r.ledger, r.watch, r.retry],
+    ['sent', null, null, 'not_attempted', 'not_attempted', 'never'])
+  assert.equal(env.sent.length, 1)
+})
+
+test('post JSON receipt identifies Slack replies and guard rejections', integration, async () => {
+  const reply = 'https://w.slack.com/archives/C7/p1790000000000300?thread_ts=1790000000.000100'
+  const env = session({ slack: { slack_read_thread: () => ({}) }, sentLink: reply })
+  const link = 'https://w.slack.com/archives/C7/p1790000000000001'
+  env.bin(['open', link, '--session', 'S1'])
+  const r = JSON.parse(await testing.post(env.$, link, 'hi', 'answer', 'json'))
+  assert.deepEqual([r.sent, r.reply, r.reply_id, r.ledger, r.watch, r.retry],
+    ['sent', reply, '1790000000.000300', 'recorded', 'active', 'never'])
+  const denied = JSON.parse(await testing.post(env.$, 'https://github.com/x/svc/pull/1', 'hi', 'answer', 'json'))
+  assert.deepEqual([denied.sent, denied.ledger, denied.watch, denied.retry],
+    ['not_sent', 'not_attempted', 'not_attempted', 'after_fix'])
+  assert.equal(env.sent.length, 1)
+})
+
+test('post text reports partial recording without suggesting a resend', integration, async () => {
+  const env = session({ fail: a => a[0] === 'posts' && a[1] === 'add' })
+  const link = 'https://github.com/o/svc/pull/7'
+  env.bin(['open', link, '--session', 'S1'])
+  const r = await testing.post(env.$, link, 'reply')
+  assert.match(r, /sent to .*; reply .*issuecomment-900; ledger not_recorded; watch unknown. Do not resend/)
+  assert.equal(env.sent.length, 1)
+})
+
+test('post tool advertises its optional receipt format', integration, async () => {
+  const env = session()
+  const tools = []
+  env.$.tool.register = async tool => tools.push(tool)
+  await started(env, {})
+  const post = tools.find(t => t.name === 'post')
+  assert.deepEqual(post.inputSchema.properties.format.enum, ['text', 'json'])
+  assert.match(post.description, /Never resend a sent reply; verify an unknown delivery first/)
+})
+
+test('outer post timeout returns an uncertain JSON receipt', integration, async () => {
+  const handlers = await started(session(), {})
+  const got = handlers['tool.call.catch:mcp__meetproxy__post']({}, {
+    link: 'https://github.com/o/svc/pull/7', format: 'json',
+  }, { called: false, error: { kind: 'timeout' } })
+  const r = JSON.parse(got.result)
+  assert.deepEqual([r.sent, r.ledger, r.watch, r.retry], ['unknown', 'unknown', 'unknown', 'verify'])
+})
+
 test('a post that fails to send says so', integration, async () => {
   const env = session({ sendFails: true })
   env.bin(['open', 'https://github.com/o/svc/pull/7', '--session', 'S1'])
@@ -730,7 +876,7 @@ test('with a token Slack is read and answered through the binary and the connect
   env.bin(['allow', 'slack:C1'])
   const result = await testing.post(env.$, link, 'hi')
   assert.deepEqual(rows(env).map(r => [r[1], r[4]]), [['open', link]])
-  assert.equal(result, 'posted to ' + link)
+  assert.match(result, /^sent to .*; reply posted; ledger not_recorded; watch unknown. Do not resend/)
   assert.deepEqual(posted, [[link, 'hi']])
   assert.deepEqual(env.mcp, [])
   assert.deepEqual(env.ran, [])
