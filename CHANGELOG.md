@@ -4,7 +4,9 @@ All notable changes to meetproxy are listed here. The format follows [Keep a Cha
 
 A release that raises the protocol between the binary and the watcher needs `/reload-plugins` in every open session, or a restart of it. Until then the old watcher stops and says so instead of misreading the new binary.
 
-## [0.1.13]
+## [0.1.13] - 2026-10-21
+
+Protocol 10. Sessions on 0.1.12 keep working without `/reload-plugins`.
 
 ### Fixed
 
@@ -232,6 +234,7 @@ Protocol 6.
 - Posting guard as a PreToolUse hook, with `/meetproxy:allow` for other destinations
 - Launcher that runs the binary from a cache, a checksum verified release or `go install`
 
+[0.1.13]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.12
 [0.1.11]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.12
 [0.1.10]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.12
