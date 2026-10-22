@@ -17,6 +17,7 @@ import (
 type output struct {
 	kind Kind
 	Example
+	receiptLink string
 }
 
 // The text of one output a tool use sends
@@ -68,7 +69,7 @@ func written(name string, input json.RawMessage, at time.Time) []draft {
 // The kind of output an MCP tool sends by the words in its lower case name
 func toolKind(name string, in map[string]any) Kind {
 	switch {
-	case strings.Contains(name, "meetproxy") && strings.HasSuffix(name, "__post"):
+	case meetproxyPost(name):
 		link, _ := in["link"].(string)
 		return linkKind(link)
 	case strings.Contains(name, "drive") && strings.Contains(name, "create_file"):
@@ -89,6 +90,11 @@ func toolKind(name string, in map[string]any) Kind {
 		}
 	}
 	return ""
+}
+
+func meetproxyPost(name string) bool {
+	name = strings.ToLower(name)
+	return strings.Contains(name, "meetproxy") && strings.HasSuffix(name, "__post")
 }
 
 var writes = []string{"create", "update", "append", "write", "insert"}

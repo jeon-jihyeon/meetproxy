@@ -1,6 +1,7 @@
 package workmap_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -25,7 +26,12 @@ func sends(t *testing.T, cwd, id string, minute int, name string, input map[stri
 
 // A user line with the result of the tool use of id
 func result(t *testing.T, id string, failed bool) string {
-	res := map[string]any{"type": "tool_result", "tool_use_id": id, "is_error": failed, "content": "done"}
+	return resultContent(t, id, failed, "done")
+}
+
+func resultContent(t *testing.T, id string, failed bool, content any) string {
+	t.Helper()
+	res := map[string]any{"type": "tool_result", "tool_use_id": id, "is_error": failed, "content": content}
 	return line(t, map[string]any{"type": "user", "message": map[string]any{"content": []any{res}}})
 }
 
@@ -173,8 +179,18 @@ func TestFormatsExamples(t *testing.T) {
 				ok("f", 6, "mcp__atlassian__createConfluencePage", map[string]any{"title": "Runbook", "body": "<p>x</p>"}),
 				ok("g", 7, "mcp__claude_ai_Google_Drive__create_file", map[string]any{"title": "Plan", "textContent": "text"}),
 				ok("k", 11, "mcp__claude_ai_Google_Drive__create_file", map[string]any{"title": "Rows", "textContent": "a,1", "contentMimeType": "text/csv"}),
-				ok("h", 8, "mcp__meetproxy__post", map[string]any{"link": "https://acme.slack.com/archives/C1/p1", "text": "답변"}),
-				ok("i", 9, "mcp__meetproxy__post", map[string]any{"link": "https://github.com/o/r/pull/1#discussion_r2", "text": "Reply"}),
+				{
+					sends(t, m.svc, "h", 8, "mcp__meetproxy__post", map[string]any{
+						"link": "https://acme.slack.com/archives/C1/p1", "text": "답변",
+					}),
+					resultContent(t, "h", false, "posted to https://acme.slack.com/archives/C1/p1"),
+				},
+				{
+					sends(t, m.svc, "i", 9, "mcp__meetproxy__post", map[string]any{
+						"link": "https://github.com/o/svc/pull/1#discussion_r2", "text": "Reply",
+					}),
+					resultContent(t, "i", false, "posted to https://github.com/o/svc/pull/1#discussion_r2"),
+				},
 				ok("j", 10, "mcp__plugin_slack_slack__slack_read_thread", map[string]any{"channel_id": "C1"}),
 			},
 			[]string{
@@ -329,6 +345,150 @@ func TestFormat(t *testing.T) {
 				skills = append(skills, k.Name)
 			}
 			assert.Equal(t, tc.want, want{guides, skills, errors.Is(err, workmap.ErrUnknownKind)})
+		})
+	}
+}
+
+func TestFormatsMeetproxyReceipts(t *testing.T) {
+	t.Parallel()
+	const link = "https://github.com/o/svc/pull/7"
+	const tool = "mcp__meetproxy__post"
+	quoted := func(text string) json.RawMessage {
+		b, err := json.Marshal(text)
+		require.NoError(t, err)
+		return b
+	}
+	const ack = `{"version":1,"link":"https://github.com/o/svc/pull/7","sent":"sent"}`
+	const pending = `{"version":1,"link":"https://github.com/o/svc/pull/7","sent":"unknown"}`
+	const partial = "sent to " + link + "; reply " + link + "#issuecomment-900; " +
+		"ledger unknown; watch unknown. Do not resend. record failed"
+	const missing = "sent to " + link + " but the source named no link of the reply, so it is not in the ledger, " +
+		"its thread is not watched and it cannot be retracted. Do not resend"
+	blocks := func(text string) json.RawMessage {
+		b, err := json.Marshal([]map[string]string{{"type": "text", "text": text}})
+		require.NoError(t, err)
+		return b
+	}
+	type args struct {
+		content json.RawMessage
+		tool    string
+		failed  bool
+	}
+	kept := []string{"review-comment approved reply"}
+	tcs := []struct {
+		name string
+		args args
+		want []string
+	}{
+		{"JSON acknowledgement", args{quoted(ack), tool, false}, kept},
+		{"MCP text acknowledgement", args{blocks(ack), tool, false}, kept},
+		{"text success", args{quoted("posted to " + link), tool, false}, kept},
+		{"text partial ledger", args{quoted(partial), tool, false}, kept},
+		{"text missing reply", args{quoted(missing), tool, false}, kept},
+		{"names are case insensitive", args{quoted(ack), "mcp__Meetproxy__post", false}, kept},
+		{"failed tool", args{quoted(ack), tool, true}, nil},
+		{"declined draft", args{quoted("not sent since the user chose Don't send"), tool, false}, nil},
+		{"changed draft", args{quoted("not sent since the user wants a change"), tool, false}, nil},
+		{"unknown delivery", args{quoted(pending), tool, false}, nil},
+		{"unsupported version", args{quoted(`{"version":2,"sent":"sent"}`), tool, false}, nil},
+		{"missing destination", args{quoted(`{"version":1,"sent":"sent"}`), tool, false}, nil},
+		{"different destination", args{quoted("posted to https://github.com/o/svc/pull/8"), tool, false}, nil},
+		{"ambiguous sent prefix", args{quoted("sent to " + link + " but delivery unknown"), tool, false}, nil},
+		{"truncated partial receipt", args{quoted("sent to " + link + "; ledger unknown"), tool, false}, nil},
+		{"different JSON destination", args{quoted(`{"version":1,"sent":"sent","link":"x"}`), tool, false}, nil},
+		{"missing content", args{nil, tool, false}, nil},
+		{"unexpected object", args{json.RawMessage(`{}`), tool, false}, nil},
+		{"empty blocks", args{json.RawMessage(`[]`), tool, false}, nil},
+		{"wrong block kind", args{json.RawMessage(`[{"type":"image","text":"posted to x"}]`), tool, false}, nil},
+		{"malformed JSON receipt", args{quoted(`{"version":1`), tool, false}, nil},
+		{"receipt with invalid types", args{quoted(`{"version":"1","sent":"sent"}`), tool, false}, nil},
+		{"plain unconfirmed success", args{quoted("done"), tool, false}, nil},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := newMachine(t)
+			input := map[string]any{"link": link, "text": "approved reply"}
+			transcript(t, m.config, "a", false,
+				sends(t, m.svc, "post-1", 1, tc.args.tool, input),
+				resultContent(t, "post-1", tc.args.failed, tc.args.content),
+			)
+			s := workmap.New(t.TempDir())
+
+			_, err := s.Refresh(m.config, false, time.Date(2030, 1, 1, 1, 0, 0, 0, time.UTC))
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, examples(t, s))
+		})
+	}
+}
+
+func TestFormatsReceiptUpgrade(t *testing.T) {
+	t.Parallel()
+	type args struct {
+		version int
+		missing bool
+	}
+	type want struct {
+		ran     bool
+		err     string
+		version int
+		texts   []string
+	}
+	tcs := []struct {
+		name string
+		args args
+		want want
+	}{
+		{"legacy cache is rechecked even on the same day", args{}, want{true, "<nil>", 1, nil}},
+		{"current cache keeps the daily skip", args{version: 1},
+			want{false, "<nil>", 1, []string{"review-comment legacy draft"}}},
+		{"a missing cache is rebuilt on the same day", args{version: 1, missing: true}, want{true, "<nil>", 1, nil}},
+		{"future cache is not overwritten", args{version: 2}, want{false, "work map examples version 2 is not supported", 2,
+			[]string{"review-comment legacy draft"}}},
+		{"invalid cache is not overwritten", args{version: -1},
+			want{false, "work map examples version -1 is not supported", -1, []string{"review-comment legacy draft"}}},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := newMachine(t)
+			const link = "https://github.com/o/svc/pull/7"
+			transcript(t, m.config, "a", false,
+				sends(t, m.svc, "post-1", 1, "mcp__meetproxy__post", map[string]any{"link": link, "text": "legacy draft"}),
+				resultContent(t, "post-1", false, "not sent since the user declined"),
+			)
+			data := t.TempDir()
+			s := workmap.New(data)
+			now := time.Date(2030, 1, 1, 1, 0, 0, 0, time.UTC)
+			_, err := s.Refresh(m.config, false, now)
+			require.NoError(t, err)
+			file := filepath.Join(data, "workmap", "state.json")
+			b, err := os.ReadFile(file)
+			require.NoError(t, err)
+			var state map[string]any
+			require.NoError(t, json.Unmarshal(b, &state))
+			state["examples_version"] = tc.args.version
+			b, err = json.Marshal(state)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(file, b, 0o600))
+			formats := []workmap.Format{{Kind: workmap.KindReviewComment, Examples: []workmap.Example{{Text: "legacy draft"}}}}
+			b, err = json.Marshal(formats)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(data, "workmap", "formats.json"), b, 0o600))
+			if tc.args.missing {
+				require.NoError(t, os.Remove(filepath.Join(data, "workmap", "formats.json")))
+			}
+
+			ran, err := s.Refresh(m.config, true, now)
+
+			assert.Equal(t, tc.want.ran, ran)
+			assert.Equal(t, tc.want.err, fmt.Sprint(err))
+			assert.Equal(t, tc.want.texts, examples(t, s))
+			b, err = os.ReadFile(file)
+			require.NoError(t, err)
+			require.NoError(t, json.Unmarshal(b, &state))
+			assert.Equal(t, float64(tc.want.version), state["examples_version"])
 		})
 	}
 }

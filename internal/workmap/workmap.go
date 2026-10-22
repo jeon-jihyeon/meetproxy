@@ -48,8 +48,15 @@ type Method struct {
 type state struct {
 	Offsets map[string]int64 `json:"offsets"`
 	// The place a transcript started in so later prompts typed in a scratch folder keep it
-	Homes       map[string]string `json:"homes"`
-	RefreshedAt time.Time         `json:"refreshed_at"`
+	Homes           map[string]string `json:"homes"`
+	RefreshedAt     time.Time         `json:"refreshed_at"`
+	ExamplesVersion int               `json:"examples_version"`
+}
+
+func (s state) fresh(now time.Time) bool {
+	ay, am, ad := s.RefreshedAt.In(now.Location()).Date()
+	by, bm, bd := now.Date()
+	return s.ExamplesVersion == examplesVersion && ay == by && am == bm && ad == bd
 }
 
 type Store struct{ dir string }
@@ -59,6 +66,7 @@ func New(dataDir string) Store { return Store{dir: filepath.Join(dataDir, "workm
 var ErrBusy = errors.New("another refresh is running")
 
 const (
+	examplesVersion = 1
 	// Cases kept however old they are
 	keptCases = 5000
 	// Age under which every case is kept
@@ -85,20 +93,18 @@ func (s Store) Refresh(config string, daily bool, now time.Time) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	ay, am, ad := st.RefreshedAt.In(now.Location()).Date()
-	by, bm, bd := now.Date()
-	if daily && ay == by && am == bm && ad == bd {
-		return false, nil
-	}
 	var formats []Format
 	known, err := fileio.ReadJSON(filepath.Join(s.dir, "formats.json"), &formats)
 	if err != nil {
 		return false, err
 	}
-	// A map from before formats read its transcripts without keeping examples so they are read again
-	// Reading again replaces the cases it covers
-	if !known {
+	if daily && known && st.fresh(now) {
+		return false, nil
+	}
+	// Rebuild derived examples when the rules for acknowledged delivery changed
+	if !known || st.ExamplesVersion != examplesVersion {
 		st = state{}
+		formats = nil
 	}
 	reads, err := readTranscripts(config, st, now)
 	if err != nil {
@@ -111,7 +117,9 @@ func (s Store) Refresh(config string, daily bool, now time.Time) (bool, error) {
 	if err := s.save(config, kept(updated(old, reads), now), formats, reads); err != nil {
 		return false, err
 	}
-	next := state{Offsets: map[string]int64{}, Homes: map[string]string{}, RefreshedAt: now.UTC()}
+	next := state{
+		Offsets: map[string]int64{}, Homes: map[string]string{}, RefreshedAt: now.UTC(), ExamplesVersion: examplesVersion,
+	}
 	for _, r := range reads {
 		next.Offsets[r.file] = r.to
 		if r.home != "" {
@@ -174,7 +182,13 @@ func (s Store) Methods() ([]Method, error) {
 func (s Store) state() (state, error) {
 	var st state
 	_, err := fileio.ReadJSON(filepath.Join(s.dir, "state.json"), &st)
-	return st, err
+	if err != nil {
+		return state{}, err
+	}
+	if st.ExamplesVersion != 0 && st.ExamplesVersion != examplesVersion {
+		return state{}, fmt.Errorf("work map examples version %d is not supported", st.ExamplesVersion)
+	}
+	return st, nil
 }
 
 // The cases one transcript holds from the offset it was read from
