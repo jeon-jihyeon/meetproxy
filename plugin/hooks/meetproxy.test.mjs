@@ -59,14 +59,18 @@ chmodSync(join(FAKE_DIR, 'gh'), 0o755)
 // 4. fail picks binary calls that fail
 // 5. sendFails makes every post fail
 // 6. sentLink is what the connector names when it sends a Slack message
-function session({ gh = {}, slack = {}, token, fail = () => false, sendFails = false, now = NOW, sentLink } = {}) {
+// 7. approval answers the question of the post and retract tools
+//    A function receives the question and options
+//    An Error rejects the question
+//    The default picks the first choice
+function session({ gh = {}, slack = {}, token, fail = () => false, sendFails = false, now = NOW, sentLink, approval = (q, o) => o.options[0] } = {}) {
   testing.failures.clear()
   testing.sorted.clear()
   testing.reset()
   for (const k of Object.keys(testing.reached)) delete testing.reached[k]
   const data = mkdtempSync(join(tmpdir(), 'meetproxy-mod-'))
   const store = {}
-  const env = { data, now, store, ran: [], sent: [], reactions: [], edits: [], asked: [], logs: [], toasts: [], statuses: [], calls: [], ticks: [], mcp: [], ghCalls: [], modGh: [], triaged: 0 }
+  const env = { data, now, store, ran: [], sent: [], reactions: [], edits: [], asked: [], approvals: [], logs: [], toasts: [], statuses: [], calls: [], ticks: [], mcp: [], ghCalls: [], modGh: [], triaged: 0 }
   env.tools = Object.keys(slack).length ? Object.keys(slack).map(t => ({ name: 'mcp__plugin_slack_slack__' + t, mcp: true })) : []
   if (token) {
     mkdirSync(join(data, 'slack'), { recursive: true })
@@ -156,6 +160,11 @@ function session({ gh = {}, slack = {}, token, fail = () => false, sendFails = f
       toast: t => env.toasts.push(t),
       log: m => env.logs.push(m),
       ask: async (q, o) => {
+        if (o?.header === 'Post' || o?.header === 'Retract') {
+          env.approvals.push({ q, o })
+          if (approval instanceof Error) throw approval
+          return typeof approval === 'function' ? approval(q, o) : approval
+        }
         env.asked.push({ q, o })
         return typeof env.answer === 'function' ? env.answer(q, o) : env.answer
       },
@@ -308,6 +317,16 @@ test('a message that fails to queue stops the source twice and is skipped the th
   assert.equal(githubCursor(env), at('2030-01-01T00:05:00Z'))
   assert.equal(env.logs.length, 3)
   assert.equal(testing.failures.size, 0)
+  assert.match(readFileSync(join(env.data, 'inbox', 'ignored.jsonl'), 'utf8'), /could not queue after 3 tries: failed on purpose/)
+})
+
+test('a message that fails to queue and to be recorded as ignored is still skipped the third time', integration, async () => {
+  const env = session({ gh: githubMention(), fail: args => args[0] === 'inbox' && (args[1] === 'add' || args[1] === 'ignore') })
+  env.bin(['inbox', 'advance', at('2030-01-01T00:00:00Z'), '--key', 'github'])
+  for (let i = 0; i < 3; i++) await testing.check(env.$)
+  assert.equal(githubCursor(env), at('2030-01-01T00:05:00Z'))
+  assert.equal(called(env, 'inbox', 'ignore').length, 1)
+  assert.equal(existsSync(join(env.data, 'inbox', 'ignored.jsonl')), false)
 })
 
 test('match failures do not use up the tries of queueing', integration, async () => {
@@ -556,26 +575,42 @@ for (const tc of [
   })
 }
 
-test('a channel with more pages than the bound reads the newest ones and says so', integration, async () => {
-  let reads = 0
-  const env = session({
-    slack: {
-      slack_read_user_profile: () => ({ result: 'User ID: ME\nEmail: me@x.com\n' }),
-      slack_read_channel: () => {
-        reads++
-        return { messages: `Channel: #ops (C9)\n\n=== Message from Datadog <b@x> (U9) at x === \nMessage TS: 1893456120.000001\n\nTriggered: cpu\n\n`, pagination_info: 'use cursor: `next`' }
+const skipped = 'more than 5000 messages since 1893456000, those before 1893456120.000001 were skipped'
+for (const tc of [
+  {
+    name: 'records the span skipped', fail: () => false,
+    want: { logged: 'meetproxy: #C9 had ' + skipped, ignored: [['https://acme.slack.com/archives/C9', 'ops', skipped]] },
+  },
+  {
+    name: 'logs a record that fails', fail: a => a[0] === 'inbox' && a[1] === 'ignore',
+    want: { logged: 'meetproxy: could not record the skip of #C9: failed on purpose', ignored: [] },
+  },
+]) {
+  test('a channel with more pages than the bound reads the newest ones and ' + tc.name, integration, async () => {
+    let reads = 0
+    const env = session({
+      fail: tc.fail,
+      slack: {
+        slack_read_user_profile: () => ({ result: 'User ID: ME\nEmail: ann@example.com\n' }),
+        slack_read_channel: () => {
+          reads++
+          return { messages: `Channel: #ops (C9)\n\n=== Message from Monitor <bot@example.com> (U9) at x === \nMessage TS: 1893456120.000001\n\nTriggered: cpu\n\n`, pagination_info: 'use cursor: `next`' }
+        },
+        slack_read_thread: () => ({ messages: 'THREAD: alert' }),
+        slack_search_public_and_private: () => ({ results: '' }),
       },
-      slack_read_thread: () => ({ messages: 'THREAD: alert' }),
-      slack_search_public_and_private: () => ({ results: '' }),
-    },
+    })
+    env.bin(['delegation', 'put'], JSON.stringify({ ...opsDelegation, host: 'acme.slack.com' }))
+    env.bin(['inbox', 'advance', '1893456000', '--key', 'ops'])
+    await interactive(env)
+    const file = join(env.data, 'inbox', 'ignored.jsonl')
+    const ignored = existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').map(l => JSON.parse(l)) : []
+    assert.equal(reads, 50)
+    assert.ok(env.logs.includes(tc.want.logged))
+    assert.deepEqual(ignored.map(r => [r.link, r.delegation, r.reason]), tc.want.ignored)
+    assert.deepEqual(rows(env).map(r => r[4]), ['https://acme.slack.com/archives/C9/p1893456120000001'])
   })
-  env.bin(['delegation', 'put'], JSON.stringify(opsDelegation))
-  env.bin(['inbox', 'advance', '1893456000', '--key', 'ops'])
-  await interactive(env)
-  assert.equal(reads, 50)
-  assert.ok(env.logs.some(l => l.includes('older ones are skipped')))
-  assert.deepEqual(rows(env).map(r => r[4]), ['https://w.slack.com/archives/C9/p1893456120000001'])
-})
+}
 
 for (const tc of [
   { name: 'acknowledged', want: ['sent', 'recorded', 'active', 'never'] },
@@ -704,6 +739,49 @@ test('post text reports partial recording without suggesting a resend', integrat
   assert.equal(env.sent.length, 1)
 })
 
+for (const tc of [
+  { name: 'Send sends the text shown', approval: 'Send', want: ['sent', 'approved', 'never', undefined], sent: 1 },
+  { name: "Don't send sends nothing", approval: "Don't send", want: ['not_sent', 'declined', 'never', undefined], sent: 0 },
+  { name: 'a change retains surrounding spaces', approval: ' shorter please ', want: ['not_sent', 'changed', 'after_fix', ' shorter please '], sent: 0 },
+  { name: 'a change retains Markdown indentation and line endings', approval: '\tcode\r\n  ann\n', want: ['not_sent', 'changed', 'after_fix', '\tcode\r\n  ann\n'], sent: 0 },
+  { name: 'a dismissed question sends nothing', approval: new Error('dismissed'), want: ['not_sent', 'declined', 'never', undefined], sent: 0 },
+  { name: 'an empty answer sends nothing', approval: '', want: ['not_sent', 'declined', 'never', undefined], sent: 0 },
+  { name: 'a blank answer sends nothing', approval: ' \t\r\n', want: ['not_sent', 'declined', 'never', undefined], sent: 0 },
+  { name: 'an absent answer sends nothing', approval: () => undefined, want: ['not_sent', 'declined', 'never', undefined], sent: 0 },
+  { name: 'an invalid answer sends nothing', approval: {}, want: ['not_sent', 'declined', 'never', undefined], sent: 0 },
+]) {
+  test('post approval: ' + tc.name, integration, async () => {
+    const env = session({ approval: tc.approval, now: Date.now() })
+    const link = 'https://github.com/o/svc/pull/7'
+    env.bin(['open', link, '--session', 'S1'])
+    const r = JSON.parse(await testing.post(env.$, link, 'retry is in config.go', 'answer', 'json'))
+    assert.deepEqual([r.sent, r.approval, r.retry, r.change], tc.want)
+    assert.equal(env.sent.length, tc.sent)
+    assert.equal(called(env, 'posts', 'add').length, tc.sent)
+    assert.equal(env.approvals.length, 1)
+    assert.equal(env.approvals[0].q, 'retry is in config.go\n\nSend this reply to https://github.com/o/svc/pull/7 as written? Type what to change under Other.')
+    assert.deepEqual(env.approvals[0].o.options, ['Send', "Don't send"])
+  })
+}
+
+test('post asks nothing before its destination passes the check', integration, async () => {
+  const env = session()
+  const r = JSON.parse(await testing.post(env.$, 'https://github.com/acme/web/pull/1', 'hi', 'question', 'json'))
+  assert.deepEqual([r.sent, r.approval, r.retry], ['not_sent', 'not_asked', 'after_fix'])
+  assert.deepEqual(env.approvals, [])
+})
+
+test('post approval text names a change and a refusal', integration, async () => {
+  const link = 'https://github.com/o/svc/pull/7'
+  const changed = session({ approval: 'name the file' })
+  changed.bin(['open', link, '--session', 'S1'])
+  assert.equal(await testing.post(changed.$, link, 'hi', 'question'), 'not sent since the user wants a change: name the file. Apply it and post the new text')
+  assert.match(changed.approvals[0].q, /Send this question to/)
+  const refused = session({ approval: "Don't send" })
+  refused.bin(['open', link, '--session', 'S1'])
+  assert.equal(await testing.post(refused.$, link, 'hi'), "not sent since the user chose Don't send. Do not post it")
+})
+
 test('post tool advertises its optional receipt format', integration, async () => {
   const env = session()
   const tools = []
@@ -720,8 +798,25 @@ test('outer post timeout returns an uncertain JSON receipt', integration, async 
     link: 'https://github.com/o/svc/pull/7', format: 'json',
   }, { called: false, error: { kind: 'timeout' } })
   const r = JSON.parse(got.result)
-  assert.deepEqual([r.sent, r.ledger, r.watch, r.retry], ['unknown', 'unknown', 'unknown', 'verify'])
+  assert.deepEqual([r.sent, r.ledger, r.watch, r.retry, r.approval], ['unknown', 'unknown', 'unknown', 'verify', 'unknown'])
 })
+
+for (const link of [undefined, null, 42, false, ['C1'], { name: 'acme' }]) {
+  test('post receipts keep their link type on invalid input: ' + JSON.stringify(link), integration, async () => {
+    const env = session()
+    const receipt = JSON.parse(await testing.post(env.$, link, 'reply', 'answer', 'json'))
+    const handlers = await started(env, {})
+    const timedOut = handlers['tool.call.catch:mcp__meetproxy__post']({}, {
+      link, format: 'json',
+    }, { called: false, error: { kind: 'timeout' } })
+
+    assert.deepEqual([receipt.link, receipt.source], [null, null])
+    assert.deepEqual([JSON.parse(timedOut.result).link, JSON.parse(timedOut.result).source], [null, null])
+    assert.equal(receipt.sent, 'not_sent')
+    assert.deepEqual(env.sent, [])
+    assert.deepEqual(env.approvals, [])
+  })
+}
 
 test('a post that fails to send says so', integration, async () => {
   const env = session({ sendFails: true })
@@ -1221,9 +1316,146 @@ test('retract refuses a reply outside the ledger and edits one in it', integrati
   const reply = 'https://github.com/o/svc/pull/7#issuecomment-900'
   assert.equal(await testing.retract(env.$, reply, 'it is in retry.go'), 'corrected ' + reply)
   assert.deepEqual(env.edits, [['PATCH', 'repos/o/svc/issues/comments/900', 'it is in retry.go\n\n_Written by Claude on behalf of the user_']])
+  assert.equal(env.approvals.at(-1).q, env.edits[0][2] + '\n\nReplace the text of ' + reply + ' as written? Type what to change under Other.')
   assert.ok(JSON.parse(env.bin(['posts', 'list']).stdout)[0].retracted_at)
   assert.match(await testing.retract(env.$, reply), /already retracted/)
 })
+
+const replyLink = 'https://github.com/o/svc/pull/7#issuecomment-900'
+for (const reply of [undefined, {}, '  ']) {
+  test('retract: invalid reply ' + JSON.stringify(reply), async () => {
+    assert.equal(await testing.retract({}, reply), 'retract needs a reply link')
+  })
+}
+
+test('retract: unsupported ledger source is refused', integration, async () => {
+  const env = session()
+  env.bin(['open', 'https://github.com/o/svc/pull/7', '--session', 'S1'])
+  const reply = 'https://example.com/reply'
+  env.bin(['posts', 'add', '--session', 'S1'], JSON.stringify({ reply, body: 'earlier answer', kind: 'answer' }))
+  assert.equal(await testing.retract(env.$, reply, 'use retry.go'), 'meetproxy cannot retract ' + reply)
+  assert.deepEqual(env.approvals, [])
+  assert.deepEqual(env.edits, [])
+})
+
+test('retract: a source error leaves the ledger intact', integration, async () => {
+  const env = session({ fail: a => a[0] === 'github' && a[1] === 'update' })
+  await answered(env)
+  assert.equal(await testing.retract(env.$, replyLink, 'use retry.go'), 'failed to retract: failed on purpose')
+  assert.equal(called(env, 'posts', 'retract').length, 0)
+  assert.deepEqual(env.edits, [])
+})
+
+for (const tc of [
+  { name: 'replace', text: 'use retry.go', command: 'update', result: 'corrected', body: 'use retry.go\n\n_Written by Claude on behalf of the user_' },
+  { name: 'delete', text: undefined, command: 'delete', result: 'deleted', body: undefined },
+]) {
+  test('retract: token ' + tc.name + ' uses the approved text and operation', integration, async () => {
+    const actions = []
+    const change = (args, body) => {
+      actions.push({ args, body })
+      return { out: 'changed' }
+    }
+    const env = session({ token: { update: change, delete: change } })
+    const reply = 'https://acme.slack.com/archives/C1/p1893456600000001'
+    env.bin(['open', reply, '--session', 'S1'])
+    env.bin(['posts', 'add', '--session', 'S1'], JSON.stringify({ reply, body: 'earlier answer', kind: 'answer' }))
+    assert.equal(await testing.retract(env.$, reply, tc.text), tc.result + ' ' + reply)
+    assert.deepEqual(actions, [{ args: [reply], body: tc.body }])
+    assert.equal(called(env, 'slack', tc.command).length, 1)
+    assert.equal(env.mcp.length, 0)
+    assert.ok(env.approvals[0].q.startsWith(tc.body ?? 'Delete ' + reply))
+  })
+}
+
+for (const tc of [
+  {
+    name: 'a kept correction edits nothing', text: 'it is in retry.go', approval: 'Keep it',
+    want: { result: `not retracted since the user chose Keep it. Leave ${replyLink} as it is`, options: ['Replace', 'Keep it'], edits: 0 },
+  },
+  {
+    name: 'a changed correction edits nothing and returns the change', text: 'it is in retry.go', approval: 'say retry.go:12',
+    want: { result: 'not retracted since the user wants a change: say retry.go:12. Apply it and retract again', options: ['Replace', 'Keep it'], edits: 0 },
+  },
+  { name: 'an approved delete deletes', approval: 'Delete', want: { result: 'deleted ' + replyLink, options: ['Delete', 'Keep it'], edits: 1 } },
+  {
+    name: 'a dismissed delete deletes nothing', approval: new Error('dismissed'),
+    want: { result: `not retracted since the user did not answer: dismissed. Leave ${replyLink} as it is`, options: ['Delete', 'Keep it'], edits: 0 },
+  },
+]) {
+  test('retract approval: ' + tc.name, integration, async () => {
+    // The post that makes the reply is approved and only the retract gets the answer of the case
+    const retracting = () => {
+      if (tc.approval instanceof Error) throw tc.approval
+      return tc.approval
+    }
+    const env = session({ approval: (q, o) => (o.header === 'Post' ? o.options[0] : retracting()) })
+    await answered(env)
+    env.approvals.length = 0
+    const result = await testing.retract(env.$, replyLink, tc.text)
+    assert.deepEqual({ result, options: env.approvals[0].o.options, edits: env.edits.length }, tc.want)
+    assert.equal(Boolean(JSON.parse(env.bin(['posts', 'list']).stdout)[0].retracted_at), tc.want.edits === 1)
+  })
+}
+
+for (const tc of [
+  { name: 'a replacement', text: 'use retry.go', note: 'Correction: use retry.go' },
+  { name: 'a deletion', text: undefined, note: 'Correction: please disregard my earlier reply in this thread.' },
+]) {
+  test('retract shows the exact Slack correction for ' + tc.name, integration, async () => {
+    const env = session({ slack: { slack_send_message: () => ({}) } })
+    const reply = 'https://acme.slack.com/archives/C1/p1893456600000001'
+    env.bin(['open', reply, '--session', 'S1'])
+    env.bin(['posts', 'add', '--session', 'S1'], JSON.stringify({ reply, body: 'earlier answer', kind: 'answer' }))
+    assert.equal(await testing.retract(env.$, reply, tc.text), 'posted a correction under ' + reply)
+    const body = tc.note + '\n\n_Written by Claude on behalf of the user_'
+    assert.equal(env.sent[0].message, body)
+    assert.equal(env.approvals[0].q, body + '\n\nPost this correction under ' + reply + ' as written? Type what to change under Other.')
+  })
+}
+
+test('retract keeps its approved Slack route while the token changes', integration, async () => {
+  const env = session({
+    slack: { slack_send_message: () => ({}) },
+    approval: (q, o) => {
+      mkdirSync(join(env.data, 'slack'), { recursive: true })
+      writeFileSync(join(env.data, 'slack', 'token'), 'xoxp-test\n')
+      return o.options[0]
+    },
+  })
+  const reply = 'https://acme.slack.com/archives/C1/p1893456600000001'
+  env.bin(['open', reply, '--session', 'S1'])
+  env.bin(['posts', 'add', '--session', 'S1'], JSON.stringify({ reply, body: 'earlier answer', kind: 'answer' }))
+  assert.equal(await testing.retract(env.$, reply, 'use retry.go'), 'posted a correction under ' + reply)
+  assert.equal(env.sent.length, 1)
+  assert.equal(called(env, 'slack', 'update').length, 0)
+})
+
+test('retract with no Slack route does not ask or send', integration, async () => {
+  const env = session()
+  const reply = 'https://acme.slack.com/archives/C1/p1893456600000001'
+  env.bin(['open', reply, '--session', 'S1'])
+  env.bin(['posts', 'add', '--session', 'S1'], JSON.stringify({ reply, body: 'earlier answer', kind: 'answer' }))
+  assert.equal(await testing.retract(env.$, reply, 'use retry.go'), 'meetproxy cannot reach Slack to retract ' + reply)
+  assert.deepEqual(env.approvals, [])
+  assert.deepEqual(env.sent, [])
+})
+
+for (const throws of [false, true]) {
+  test('retract reports an unconfirmed ledger after changing the source once: throws ' + throws, integration, async () => {
+    const env = session({ fail: a => !throws && a[0] === 'posts' && a[1] === 'retract' })
+    await answered(env)
+    const run = env.$.process.run
+    env.$.process.run = async (argv, init) => {
+      if (throws && argv[1] === 'posts' && argv[2] === 'retract') throw new Error('timed out')
+      return run(argv, init)
+    }
+    const reply = 'https://github.com/o/svc/pull/7#issuecomment-900'
+    assert.match(await testing.retract(env.$, reply, 'use retry.go'), /ledger update was not confirmed.*Do not retry/)
+    assert.equal(env.edits.length, 1)
+    assert.equal(Boolean(JSON.parse(env.bin(['posts', 'list']).stdout)[0].retracted_at), false)
+  })
+}
 
 // The links both the Go parser and these regexes are checked against
 const LINKS = JSON.parse(readFileSync(join(HERE, 'testdata', 'links.json'), 'utf8'))

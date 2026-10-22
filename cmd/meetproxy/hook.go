@@ -119,7 +119,13 @@ var (
 	errTooLarge   = errors.New("the hook input is over 4 MiB")
 )
 
-// Enforced by a hook because request text is untrusted and no person reviews the post
+// Errors of Destinations that deny with their own text
+// Any other error is a broken check
+func denies(err error) bool {
+	return errors.Is(err, guard.ErrUnknownDest) || errors.Is(err, guard.ErrSettings) || errors.Is(err, guard.ErrUnapproved)
+}
+
+// Direct calls can bypass the post tool and its approval while request text is untrusted
 // Non posting calls return before any state is read so broken state never blocks them
 func guardPost(data string, now time.Time, in io.Reader, out io.Writer) error {
 	h, err := readHook(in)
@@ -150,7 +156,7 @@ func guardPost(data string, now time.Time, in io.Reader, out io.Writer) error {
 	}
 	var reason string
 	switch {
-	case errors.Is(destErr, guard.ErrUnknownDest) || errors.Is(destErr, guard.ErrSettings):
+	case denies(destErr):
 		reason = destErr.Error()
 	case destErr != nil:
 		return destErr

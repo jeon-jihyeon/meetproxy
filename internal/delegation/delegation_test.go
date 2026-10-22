@@ -365,6 +365,18 @@ func TestDigest(t *testing.T) {
 	}{
 		{"repeats of an alert differ in numbers, times and links", "Triggered: cpu 93% on host-1 at 10:31 <https://dd/1|x>", "triggered: CPU 97% on host-2 at 11:02:10 https://dd/2", true},
 		{"other words differ", "Triggered: cpu", "Recovered: cpu", false},
+		{
+			"requests linking other pull requests differ", "review please <https://github.com/o/svc/pull/12>",
+			"review please <https://github.com/o/svc/pull/13>", false,
+		},
+		{
+			"requests linking other issues differ", "look at https://github.com/o/svc/issues/4",
+			"look at https://github.com/o/svc/issues/5", false,
+		},
+		{
+			"repeats linking one pull request share it", "review please <https://github.com/o/svc/pull/12|fix> at 10:00",
+			"Review please <https://github.com/O/svc/pull/12/files> at 10:05", true,
+		},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {

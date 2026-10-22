@@ -118,16 +118,22 @@ var (
 	digestTimes = regexp.MustCompile(`\d{1,2}:\d{2}(:\d{2})?`)
 	digestNoise = regexp.MustCompile(`\d+`)
 	digestSpace = regexp.MustCompile(`\s+`)
+	digestWork  = regexp.MustCompile(`github\.com/[\w.-]+/[\w.-]+/(?:pull|issues)/\d+`)
 )
 
 // What repeats of one message share
-// Links, times and digits differ between repeats of one alert so they are dropped before hashing
+// 1. Alert repeats drop links then times then digits before hashing
+// 2. Pull requests and issues the text links stay so requests about different ones never share a digest
 func Digest(text string) string {
 	t := strings.ToLower(text)
+	work := strings.Join(digestWork.FindAllString(t, -1), " ")
 	t = digestLinks.ReplaceAllString(t, " ")
 	t = digestTimes.ReplaceAllString(t, " ")
 	t = digestNoise.ReplaceAllString(t, " ")
 	t = strings.TrimSpace(digestSpace.ReplaceAllString(t, " "))
+	if work != "" {
+		t += "\x00" + work
+	}
 	sum := sha256.Sum256([]byte(t))
 	return hex.EncodeToString(sum[:])[:12]
 }

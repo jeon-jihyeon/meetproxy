@@ -39,5 +39,5 @@ allowed-tools: Bash(meetproxy status), Bash(meetproxy status *), Bash(meetproxy 
    1. Correct it: then ask for the corrected text, or take the text typed under Other
    2. Delete it
    3. Cancel
-3. Call `mcp__meetproxy__retract` with `reply` and, to correct it, `text`. It edits or deletes the reply where the source allows it, and posts a correction under it otherwise
-4. Report its answer in one line
+3. Call `mcp__meetproxy__retract` with `reply` and, to correct it, `text`. It shows the user the exact change and asks before it edits or deletes the reply where the source allows it, and posts a correction under it otherwise
+4. Report its answer in one line. When it returns the user's change, apply it and call it again

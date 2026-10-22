@@ -134,7 +134,14 @@ func TestCheck(t *testing.T) {
 			"allows meetproxy commands that only read",
 			bash(t, "meetproxy inbox list --data d && meetproxy triage && meetproxy allowed"), "",
 		},
-		{"allows a meetproxy slack post where the request came from", bash(t, "echo hi | meetproxy slack post https://w.slack.com/archives/C7/p2"), ""},
+		{
+			"denies a meetproxy slack post even to an allowed channel",
+			bash(t, "echo hi | meetproxy slack post https://acme.slack.com/archives/C1/p2"), "outside the post and retract tools",
+		},
+		{
+			"denies a meetproxy github post even to an allowed repository",
+			bash(t, "echo hi | meetproxy github post https://github.com/o/svc/pull/3"), "outside the post and retract tools",
+		},
 		{"allows a word that only mentions meetproxy", bash(t, "grep -r meetproxy ."), ""},
 		{"allows python without an inline program", bash(t, "python3 -m json.tool a.json"), ""},
 		{"allows a shell running a file", bash(t, "bash ./build.sh"), ""},
@@ -251,8 +258,38 @@ func TestCheck_Bypass(t *testing.T) {
 		{"i. meetproxy open with another target", "meetproxy open https://w.slack.com/archives/C7/p1 --target https://github.com/x/r/pull/1", "github:x/r#1"},
 		{"i. meetproxy slack token", "pbpaste | meetproxy slack token --data d", "changes meetproxy settings"},
 		{"i. meetproxy slack token behind a boolean flag", "meetproxy --busy slack token", "changes meetproxy settings"},
-		{"i. meetproxy slack post elsewhere", "echo hi | meetproxy slack post https://w.slack.com/archives/C9/p1 --session s", "slack:C9 is not allowed"},
-		{"i. meetproxy slack post of no link", "echo hi | meetproxy slack post nowhere", "unknown destination"},
+		{
+			"i. meetproxy slack post elsewhere", "echo hi | meetproxy slack post https://acme.slack.com/archives/C9/p1 --session s",
+			"outside the post and retract tools",
+		},
+		{
+			"i. meetproxy slack post of no link", "echo hi | meetproxy slack post nowhere",
+			"outside the post and retract tools",
+		},
+		{
+			"i. meetproxy github post behind a flag", "echo hi | meetproxy --data d github post https://github.com/o/svc/pull/1",
+			"outside the post and retract tools",
+		},
+		{
+			"i. meetproxy slack update of a reply", "echo hi | meetproxy slack update https://acme.slack.com/archives/C1/p2",
+			"outside the post and retract tools",
+		},
+		{
+			"i. meetproxy github delete of a reply", "meetproxy github delete https://github.com/o/svc/pull/3#issuecomment-1",
+			"outside the post and retract tools",
+		},
+		{
+			"i. meetproxy slack delete of a reply", "meetproxy slack delete https://acme.slack.com/archives/C1/p2",
+			"outside the post and retract tools",
+		},
+		{
+			"i. meetproxy github update of a reply", "echo hi | meetproxy github update https://github.com/o/svc/pull/3",
+			"outside the post and retract tools",
+		},
+		{
+			"i. meetproxy open of no destination", "meetproxy open nowhere",
+			"unknown destination",
+		},
 		{"j. a process substitution read as stdin", "cat < <(gh pr comment 1 -R x/r -b hi)", "github:x/r#1"},
 		{"j. a substitution as the output file", `echo x > "$(gh pr comment 1 -R x/r -b hi)"`, "github:x/r#1"},
 		{"j. a substitution as the error file", "ls 2>$(gh pr comment 1 -R x/r -b hi)", "github:x/r#1"},
