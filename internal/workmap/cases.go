@@ -33,10 +33,47 @@ type toolUse struct {
 }
 
 type toolResult struct {
-	Type      string `json:"type"`
-	ToolUseId string `json:"tool_use_id"`
-	IsError   bool   `json:"is_error"`
+	Type      string          `json:"type"`
+	ToolUseId string          `json:"tool_use_id"`
+	IsError   bool            `json:"is_error"`
+	Content   json.RawMessage `json:"content"`
 }
+
+// A successful tool call can still return a declined draft or an unknown delivery
+func (r toolResult) posted(link string) bool {
+	var text string
+	if json.Unmarshal(r.Content, &text) != nil {
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(r.Content, &blocks) != nil || len(blocks) != 1 || blocks[0].Type != "text" {
+			return false
+		}
+		text = blocks[0].Text
+	}
+	var receipt struct {
+		Version int    `json:"version"`
+		Sent    string `json:"sent"`
+		Link    string `json:"link"`
+	}
+	if json.Unmarshal([]byte(text), &receipt) == nil {
+		return receipt.Version == 1 && receipt.Sent == "sent" && receipt.Link == link
+	}
+	if text == "posted to "+link || text == "sent to "+link+missingPostLink {
+		return true
+	}
+	parts := recordedPost.FindStringSubmatch(text)
+	return len(parts) > 1 && parts[1] == link
+}
+
+// Texts the post tool returns without format json
+// They match the mod's post tool word for word or sent replies stop becoming examples
+const missingPostLink = " but the source named no link of the reply, so it is not in the ledger, " +
+	"its thread is not watched and it cannot be retracted. Do not resend"
+
+var recordedPost = regexp.MustCompile(`^sent to (\S+); reply \S+; ledger (?:recorded|not_recorded|unknown); ` +
+	`watch (?:active|not_recorded|unknown)\. Do not resend\. `)
 
 var command = regexp.MustCompile(`(?s)<command-name>/?([^<]+)</command-name>.*?<command-args>(.*?)</command-args>`)
 
@@ -105,10 +142,18 @@ func (b *caseBuilder) add(line []byte, offset int64) {
 			if u.Type != "tool_use" {
 				continue
 			}
+			var receiptLink string
+			if meetproxyPost(u.Name) {
+				var input struct {
+					Link string `json:"link"`
+				}
+				_ = json.Unmarshal(u.Input, &input)
+				receiptLink = input.Link
+			}
 			// Sessions meetproxy starts have no typed prompt but still send outputs
 			for _, d := range written(u.Name, u.Input, r.Timestamp) {
 				e := Example{Text: cut(d.text, exampleRunes), At: r.Timestamp.UTC(), Root: b.rootOf(r.Cwd), Source: b.source, Offset: offset}
-				b.pending[u.Id] = append(b.pending[u.Id], output{d.kind, e})
+				b.pending[u.Id] = append(b.pending[u.Id], output{d.kind, e, receiptLink})
 			}
 		}
 	}
@@ -126,7 +171,8 @@ func (b *caseBuilder) settle(r record) {
 			continue
 		}
 		delete(b.pending, res.ToolUseId)
-		if !res.IsError {
+		// Pending keys exist only after appending an output
+		if !res.IsError && (outs[0].receiptLink == "" || res.posted(outs[0].receiptLink)) {
 			b.outputs = append(b.outputs, outs...)
 		}
 	}

@@ -4,6 +4,25 @@ All notable changes to meetproxy are listed here. The format follows [Keep a Cha
 
 A release that raises the protocol between the binary and the watcher needs `/reload-plugins` in every open session, or a restart of it. Until then the old watcher stops and says so instead of misreading the new binary.
 
+## [0.1.14] - 2026-10-22
+
+Protocol 10. Sessions on 0.1.13 keep working without `/reload-plugins`.
+
+### Changed
+
+- The post and retract tools show the user the exact text and ask before they send, edit or delete a reply, so the skills don't ask a second time
+- Post receipts carry an `approval` state, and `link` stays null when the input named no link
+
+### Fixed
+
+- A Slack read cut short by the page bound, and a message that keeps failing to queue, are recorded as ignored, so status shows what was lost
+- Requests that link different pull requests or issues no longer share a digest
+- The work map keeps a reply as an example only when the post tool confirmed it was sent, and rebuilds examples kept before this rule
+
+### Security
+
+- While a request is handled, the guard denies `meetproxy slack` and `meetproxy github` post, update and delete run directly, since they skip the user's approval
+
 ## [0.1.13] - 2026-10-21
 
 Protocol 10. Sessions on 0.1.12 keep working without `/reload-plugins`.
@@ -234,6 +253,7 @@ Protocol 6.
 - Posting guard as a PreToolUse hook, with `/meetproxy:allow` for other destinations
 - Launcher that runs the binary from a cache, a checksum verified release or `go install`
 
+[0.1.14]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.12
 [0.1.11]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.4...v0.1.12
