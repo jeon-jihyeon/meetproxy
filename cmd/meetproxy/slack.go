@@ -184,7 +184,7 @@ func (c cli) slackHistory(channel, oldest string) error {
 		return err
 	}
 	if truncated {
-		fmt.Fprintf(os.Stderr, "#%s had more than %d messages since the last check and the older ones are skipped\n", channel, slackapi.MaxPages*100)
+		c.recordSkipped("https://"+a.Host+"/archives/"+channel, oldest, found)
 	}
 	users := c.users(client)
 	out := make([]slackMessage, 0, len(found))
@@ -220,6 +220,19 @@ func (c cli) encodeMessages(out []slackMessage, users *userCache) error {
 	sort.SliceStable(out, func(i, j int) bool { return tsLess(out[i].Ts, out[j].Ts) })
 	users.save()
 	return writeJSON(c.out, out)
+}
+
+// A read the page bound cut short is recorded as ignored beside the note on stderr
+// The record names the conversation and the span left out and never a message text
+// A failed record leaves the read as it is since the messages it got still count
+// History answers newest first so the last message kept is the oldest
+func (c cli) recordSkipped(link, oldest string, kept []slackapi.Message) {
+	from := "the newest page"
+	if len(kept) > 0 {
+		from = kept[len(kept)-1].Ts
+	}
+	reason := fmt.Sprintf("more than %d messages since %s, those before %s were skipped", slackapi.MaxPages*100, oldest, from)
+	fmt.Fprintf(os.Stderr, "%s had %s\n", link, reason)
 }
 
 func tsLess(a, b string) bool {
