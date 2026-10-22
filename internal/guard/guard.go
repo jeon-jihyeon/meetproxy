@@ -15,6 +15,7 @@ import (
 var (
 	ErrUnknownDest = errors.New("posting to an unknown destination, name the repository or channel")
 	ErrSettings    = errors.New("changes meetproxy settings, ask the user to run it")
+	ErrUnapproved  = errors.New("changes a reply outside the post and retract tools, where the user approves every reply")
 )
 
 func unknown(why string) error { return fmt.Errorf("%w: %s", ErrUnknownDest, why) }
@@ -46,6 +47,7 @@ var (
 // 1. Nothing and no error: the call does not post
 // 2. ErrUnknownDest: the call posts or may post somewhere that cannot be told
 // 3. ErrSettings: the call changes what meetproxy takes or where it may post
+// 4. ErrUnapproved: the call changes a reply through meetproxy without the user's approval
 // Fails closed so an unknown posting tool or command is never let through silently
 // data is the plugin data directory whose files a command may not edit and empty when unknown
 func Destinations(tool string, input json.RawMessage, data string) ([]Post, error) {

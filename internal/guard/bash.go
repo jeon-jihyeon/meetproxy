@@ -44,6 +44,11 @@ var (
 	}
 	// meetproxy flags that take no value
 	meetproxyBools = map[string]bool{"busy": true}
+	// meetproxy commands that change replies under the user's name
+	replies = map[string]bool{
+		"slack post": true, "slack update": true, "slack delete": true,
+		"github post": true, "github update": true, "github delete": true,
+	}
 )
 
 // Text inside text deeper than this that still names gh is denied
@@ -285,7 +290,7 @@ func commandName(args []string) int {
 // What a meetproxy command does while a request is handled
 // 1. Commands that change what is taken or where posts may go are left to the user
 // 2. open posts to the origin and the target it names so the relay never moves to another request
-// 3. slack post posts to its link
+// 3. Reply changes run only through the post and retract tools once the user approves
 func meetproxyCall(args []string) ([]Post, error) {
 	pos, target := meetproxyWords(args)
 	word := func(i int) string {
@@ -298,12 +303,8 @@ func meetproxyCall(args []string) ([]Post, error) {
 	switch {
 	case settings[first] || settings[first+" "+second] || (first == "triage" && second != ""):
 		return nil, fmt.Errorf("meetproxy %s %w", strings.TrimSpace(first+" "+second), ErrSettings)
-	case first == "slack" && second == "post":
-		loc, ok := dest.Parse(word(2))
-		if !ok {
-			return nil, unknown("meetproxy slack post of a link that names no place")
-		}
-		return []Post{{At: loc}}, nil
+	case replies[first+" "+second]:
+		return nil, fmt.Errorf("meetproxy %s %s %w", first, second, ErrUnapproved)
 	case first != "open" || second == "":
 		return nil, nil
 	}

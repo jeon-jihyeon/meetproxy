@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jeon-jihyeon/meetproxy/internal/inbox"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -102,6 +103,13 @@ func TestRun_Slack(t *testing.T) {
 		want slackWant
 	}{
 		{"a command before a token says how to set one up", step{"slack", []string{"mentions", "--after", "1"}, ""}, slackWant{1, "", true}},
+		{
+			"history before a token fails", step{"slack", []string{"history", "C1", "--oldest", "1"}, ""},
+			slackWant{1, "", true},
+		},
+		{"direct messages before a token fail", step{"slack", []string{"dms", "--after", "1"}, ""}, slackWant{1, "", true}},
+		{"history needs an oldest timestamp", step{"slack", []string{"history", "C1"}, ""}, slackWant{exitUsage, "", true}},
+		{"direct messages need an after timestamp", step{"slack", []string{"dms"}, ""}, slackWant{exitUsage, "", true}},
 		{"a token Slack refuses is not stored", step{"slack", []string{"token"}, "xoxp-bad\n"}, slackWant{1, "", true}},
 		{"a bot token is refused before Slack is asked", step{"slack", []string{"token"}, "xoxb-good"}, slackWant{exitUsage, "", true}},
 		{"tick before a token", step{"tick", nil, ""}, slackWant{0, `"slack":{"token":false}`, false}},
@@ -233,7 +241,7 @@ func fakeDMs(t *testing.T, n int, ts string, failing *sync.Map, lists *atomic.In
 		case "auth.test":
 			body["url"], body["user_id"], body["team_id"] = "https://w.slack.com/", "U1", "T1"
 		case "users.info":
-			body["user"] = map[string]any{"id": "U2", "team_id": "T1", "real_name": "Kai"}
+			body["user"] = map[string]any{"id": "U2", "team_id": "T1", "real_name": "ann"}
 		case "conversations.list":
 			lists.Add(1)
 			ids := []map[string]any{}
@@ -282,6 +290,7 @@ func TestRun_SlackDMs(t *testing.T) {
 		want want
 	}{
 		{"few conversations are read at once", args{3, "1893456100.000001", []dmRun{{}}}, want{[]int{3}, 1}},
+		{"older messages are ignored", args{1, "1893100000.000001", []dmRun{{}}}, want{[]int{0}, 1}},
 		{"many conversations are read at once", args{41, "1893456100.000001", []dmRun{{}}}, want{[]int{41}, 1}},
 		{
 			"a conversation that fails comes once it is read and holds no other back",
@@ -314,6 +323,159 @@ func TestRun_SlackDMs(t *testing.T) {
 			}
 			got.lists = lists.Load()
 			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// Not parallel since the fake Slack is named through the environment
+func TestRun_SlackReadFailures(t *testing.T) {
+	type args struct {
+		command []string
+		fail    string
+		block   string
+	}
+	type want struct {
+		code  int
+		out   string
+		err   string
+		reads int32
+	}
+	tcs := []struct {
+		name string
+		args args
+		want want
+	}{
+		{
+			"history read fails", args{command: []string{"history", "C1", "--oldest", "1"}, fail: "conversations.history"},
+			want{code: 1, err: "internal_error", reads: 1},
+		},
+		{
+			"direct conversation listing fails", args{command: []string{"dms", "--after", "1"}, fail: "conversations.list"},
+			want{code: 1, err: "internal_error"},
+		},
+		{
+			"direct message state cannot be saved", args{command: []string{"dms", "--after", "1"}, block: "slack/dms.json"},
+			want{code: 1, err: "dms.json", reads: 2},
+		},
+		{
+			"a direct message rate limit stops the read", args{command: []string{"dms", "--after", "1"}, fail: "ratelimited"},
+			want{out: "[]\n", reads: 1},
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			reads := &atomic.Int32{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body := map[string]any{"ok": true}
+				method := strings.TrimPrefix(r.URL.Path, "/")
+				switch method {
+				case "auth.test":
+					body["url"], body["user_id"], body["team_id"] = "https://acme.slack.com/", "U1", "T1"
+				case "conversations.list":
+					body["channels"] = []map[string]any{{"id": "D1"}, {"id": "D2"}}
+				case "conversations.history":
+					reads.Add(1)
+					body["messages"] = []map[string]any{}
+				}
+				if method == tc.args.fail {
+					body["ok"], body["error"] = false, "internal_error"
+				}
+				if method == "conversations.history" && tc.args.fail == "ratelimited" {
+					body["ok"], body["error"] = false, "ratelimited"
+				}
+				w.Header().Set("X-OAuth-Scopes", strings.Join(slackScopes, ","))
+				_ = json.NewEncoder(w).Encode(body)
+			}))
+			t.Cleanup(srv.Close)
+			t.Setenv(slackAPIEnv, srv.URL)
+			data := t.TempDir()
+			now := time.Unix(1893456400, 0)
+			mustRun(t, data, "s1", now, step{"slack", []string{"token"}, "xoxp-good"})
+			require.NoError(t, os.MkdirAll(filepath.Join(data, tc.args.block), 0o700))
+			var out bytes.Buffer
+			code, err := run("slack", append(tc.args.command, "--data", data), "s1", now, strings.NewReader(""), &out)
+			assert.Equal(t, tc.want.code, code)
+			assert.Equal(t, tc.want.err == "", err == nil)
+			assert.Equal(t, tc.want.out, out.String())
+			assert.Contains(t, fmt.Sprint(err), tc.want.err)
+			assert.Equal(t, tc.want.reads, reads.Load())
+		})
+	}
+}
+
+// The fake Slack uses the environment while subtests share its fixed address
+// A truncated read records only the skipped span
+func TestRun_SlackSkipped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := map[string]any{"ok": true}
+		switch strings.TrimPrefix(r.URL.Path, "/") {
+		case "auth.test":
+			body["url"], body["user_id"], body["team_id"] = "https://acme.slack.com/", "U1", "T1"
+		case "users.info":
+			body["user"] = map[string]any{"id": "U2", "team_id": "T1", "real_name": "ann"}
+		case "conversations.list":
+			body["channels"] = []map[string]any{{"id": "D1"}}
+		case "conversations.history":
+			body["messages"] = []map[string]any{{"ts": "1893456150.000001", "user": "U2", "text": "flood"}}
+			if r.FormValue("channel") == "C2" {
+				body["messages"] = []map[string]any{}
+			}
+			body["response_metadata"] = map[string]any{"next_cursor": "more"}
+		}
+		w.Header().Set("X-OAuth-Scopes", strings.Join(slackScopes, ","))
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv(slackAPIEnv, srv.URL)
+	reason := "more than 5000 messages since 1893456000, those before 1893456150.000001 were skipped"
+	type args struct {
+		command []string
+		block   string
+	}
+	type want struct {
+		ignored []inbox.Ignored
+		failed  bool
+	}
+	tcs := []struct {
+		name string
+		args args
+		want want
+	}{
+		{
+			"a channel", args{command: []string{"history", "C1", "--oldest", "1893456000"}},
+			want{ignored: []inbox.Ignored{{Link: "https://acme.slack.com/archives/C1", Reason: reason}}},
+		},
+		{
+			"a direct conversation", args{command: []string{"dms", "--after", "1893456000"}},
+			want{ignored: []inbox.Ignored{{Link: "https://acme.slack.com/archives/D1", Reason: reason}}},
+		},
+		{
+			"an empty truncated read", args{command: []string{"history", "C2", "--oldest", "1893456000"}},
+			want{ignored: []inbox.Ignored{{
+				Link:   "https://acme.slack.com/archives/C2",
+				Reason: "more than 5000 messages since 1893456000, those before the newest page were skipped",
+			}}},
+		},
+		{
+			"a recording failure keeps the read successful",
+			args{command: []string{"history", "C1", "--oldest", "1893456000"}, block: "inbox/ignored.jsonl"},
+			want{failed: true},
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			data := t.TempDir()
+			require.NoError(t, os.MkdirAll(filepath.Join(data, tc.args.block), 0o700))
+			now := time.Unix(1893456400, 0)
+			mustRun(t, data, "s1", now, step{"slack", []string{"token"}, "xoxp-good"})
+			mustRun(t, data, "s1", now, step{"slack", tc.args.command, ""})
+			got, err := inbox.New(data).IgnoredSince(now, 0)
+			assert.Equal(t, tc.want.failed, err != nil)
+			for i := range tc.want.ignored {
+				tc.want.ignored[i].At = now.UTC()
+			}
+			assert.Equal(t, tc.want.ignored, got)
 		})
 	}
 }

@@ -60,12 +60,20 @@ const MAX_PAGES = 50
 const SEARCH_PAGE = 20
 // Characters kept of each Slack message a message links to
 const LINKED_CHARS = 1500
+// Characters kept of the reason of an ignored record
+const REASON_CHARS = 200
 const SLACK = 'plugin:slack:slack'
 // The tools the Slack connector lists
 const SLACK_TOOLS = 'mcp__plugin_slack_slack__'
 // Choices of the token question besides the token typed under Other
 const TOKEN_CANCEL = 'Cancel'
 const TOKEN_TERMINAL = 'Paste it in my terminal'
+// Choices of the questions before a post or a retract besides a change typed under Other
+const SEND = 'Send'
+const DONT_SEND = "Don't send"
+const REPLACE = 'Replace'
+const DELETE = 'Delete'
+const KEEP = 'Keep it'
 // Slack and GitHub reaction names of each acknowledgement
 const SLACK_REACTION = { eyes: 'eyes', done: 'white_check_mark' }
 const GITHUB_REACTION = { eyes: 'eyes', done: 'hooray' }
@@ -257,7 +265,7 @@ async function readTick($) {
 // 6. send($, source, link, reply): a reply in the thread of the link, resolving to the link of the reply
 // 7. replies($, source, w, slack): replies others wrote in a watched thread after what was seen
 // 8. react($, source, link, ack, slack): a reaction on the message of the link
-// 9. unsay($, source, post, text): the reply of a ledger post replaced by text or removed
+// 9. unsay($, source, post, text, slack): the reply of a ledger post replaced by the approved text or removed
 // The mod validator rejects passing $ through object methods so sources dispatch by switch instead of a table
 const SOURCES = ['slack', 'github']
 
@@ -368,10 +376,10 @@ async function react($, source, link, ack, slack) {
   throw unknown(source)
 }
 
-async function unsay($, source, p, text) {
+async function unsay($, source, p, text, slack) {
   switch (source) {
     case 'slack':
-      return slackUnsay($, p, text)
+      return slackUnsay($, p, text, slack)
     case 'github':
       return githubUnsay($, p, text)
   }
@@ -475,8 +483,13 @@ async function slackChannel($, d, oldest, via) {
     if (!page) return out.sort(byTs)
   }
   // Reading back to the cursor is impossible within the bound so the older messages are skipped on purpose
-  $.ui.log(`meetproxy: #${d.channel} had more than ${MAX_PAGES * 100} messages since the last check and the older ones are skipped`)
-  return out.sort(byTs)
+  // The skip is recorded as ignored so status shows which channel lost which span
+  out.sort(byTs)
+  const why = `more than ${MAX_PAGES * 100} messages since ${oldest}, those before ${out[0]?.ts ?? 'the newest page'} were skipped`
+  $.ui.log(`meetproxy: #${d.channel} had ${why}`)
+  const r = await meetproxy($, ['inbox', 'ignore', `https://${d.host}/archives/${d.channel}`, '--delegation', d.id, '--reason', why])
+  if (!r.ok) $.ui.log(`meetproxy: could not record the skip of #${d.channel}: ${firstLine(r.err)}`)
+  return out
 }
 
 // The concise thread lists each reply on a line that starts with > and names its author by email
@@ -545,15 +558,14 @@ async function slackReact($, link, ack, via) {
 
 // With a token the reply is edited or deleted
 // The connector edits nothing so a correction goes in the thread instead
-async function slackUnsay($, p, replacement) {
-  if ((await slackRoute($, undefined, true)) === 'token') {
-    const r = await meetproxy($, ['slack', replacement ? 'update' : 'delete', p.reply], replacement ? withMark(replacement) : undefined)
+async function slackUnsay($, p, replacement, via) {
+  if (via === 'token') {
+    const r = await meetproxy($, ['slack', replacement ? 'update' : 'delete', p.reply], replacement || undefined)
     if (!r.ok) throw new Error(firstLine(r.err))
     return replacement ? 'corrected' : 'deleted'
   }
   const at = slackLink(p.reply)
-  const note = 'Correction: ' + (replacement || 'please disregard my earlier reply in this thread.')
-  const r = await $.mcp.call(SLACK, 'slack_send_message', { channel_id: at.channel, thread_ts: at.thread, message: withMark(note) })
+  const r = await $.mcp.call(SLACK, 'slack_send_message', { channel_id: at.channel, thread_ts: at.thread, message: replacement })
   if (r?.isError) throw new Error(text(r))
   return 'posted a correction under'
 }
@@ -694,7 +706,7 @@ async function githubReact($, link, ack) {
 
 // Only a comment can be edited or deleted so the binary refuses a link to the issue itself
 async function githubUnsay($, p, replacement) {
-  const r = await meetproxy($, ['github', replacement ? 'update' : 'delete', p.reply], replacement ? withMark(replacement) : undefined)
+  const r = await meetproxy($, ['github', replacement ? 'update' : 'delete', p.reply], replacement || undefined)
   if (!r.ok) throw new Error(firstLine(r.err))
   return replacement ? 'corrected' : 'deleted'
 }
@@ -903,9 +915,13 @@ async function enqueue($, m, slack) {
     changes++
     return settled(m, await passed($, m, added))
   }
-  // A message that keeps failing to queue is skipped so it does not cost a triage every check
-  if (countFailure($, 'add', m, added.err) < MAX_FAILURES) return false
-  return settled(m, await skip())
+  // A message that keeps failing to queue is recorded as ignored so it does not cost a triage every check
+  // The record keeps the error and never the text so status still shows the request was lost
+  const tries = countFailure($, 'add', m, added.err)
+  if (tries < MAX_FAILURES) return false
+  const reason = `could not queue after ${tries} tries: ${firstLine(added.err) || 'exit ' + added.code}`.slice(0, REASON_CHARS)
+  const lost = await meetproxy($, ['inbox', 'ignore', m.link, '--from', m.from, '--delegation', d.delegation, '--reason', reason, '--ts', m.ts, '--key', m.cursor])
+  return settled(m, lost.ok ? await passed($, m, lost) : await skip())
 }
 
 // A follow-up settled moves its watch past it so it is read once
@@ -1104,7 +1120,9 @@ async function asked($, p) {
 // Sending
 
 function postResult(format, receipt, text) {
-  return format === 'json' ? JSON.stringify({ version: 1, ...receipt }) : text
+  return format === 'json'
+    ? JSON.stringify({ version: 1, ...receipt, link: typeof receipt.link === 'string' ? receipt.link : null })
+    : text
 }
 
 // An outer timeout may follow delivery
@@ -1112,15 +1130,32 @@ function postResult(format, receipt, text) {
 function uncertainPost(format, link, error) {
   return postResult(format, {
     link: link ?? null, source: sourceOf(link) ?? null, sent: 'unknown', reply: null, reply_id: null,
-    ledger: 'unknown', watch: 'unknown', retry: 'verify', error,
+    ledger: 'unknown', watch: 'unknown', retry: 'verify', approval: 'unknown', error,
   }, 'post outcome unknown: ' + error + '. Check the original thread before retrying')
+}
+
+// The user approves what goes out under their name in a question of the tool that sends it
+// 1. What is approved is what goes out since asking and sending are one call
+// 2. A skill step or a permission rule that allows the tool never stands in for the user
+// 3. A dismissed question or a run with no one to ask is declined
+// 4. Any answer but the two choices is a change the user typed under Other
+async function approval($, header, question, yes, no) {
+  let answer
+  try {
+    answer = await $.ui.ask(question + ' Type what to change under Other.', { header, options: [yes, no] })
+  } catch (err) {
+    return { approval: 'declined', why: 'the user did not answer: ' + message(err) }
+  }
+  if (answer === yes) return { approval: 'approved' }
+  if (typeof answer !== 'string' || answer === no || !answer.trim()) return { approval: 'declined', why: 'the user chose ' + no }
+  return { approval: 'changed', change: answer }
 }
 
 async function post($, link, body, kind, format) {
   const source = typeof link === 'string' ? sourceOf(link) : undefined
   const receipt = {
     link: link ?? null, source: source ?? null, sent: 'not_sent', reply: null, reply_id: null,
-    ledger: 'not_attempted', watch: 'not_attempted', retry: 'after_fix',
+    ledger: 'not_attempted', watch: 'not_attempted', retry: 'after_fix', approval: 'not_asked',
   }
   const result = text => postResult(format, receipt, text)
   if (typeof link !== 'string' || typeof body !== 'string' || !body.trim()) {
@@ -1141,6 +1176,19 @@ async function post($, link, body, kind, format) {
   } catch (err) {
     receipt.error = message(err)
     return result('denied: post check failed ' + receipt.error)
+  }
+  const what = kind === 'question' ? 'question' : 'reply'
+  const answer = await approval($, 'Post', `${body}\n\nSend this ${what} to ${link} as written?`, SEND, DONT_SEND)
+  receipt.approval = answer.approval
+  if (answer.approval === 'changed') {
+    receipt.error = 'not sent since the user wants a change'
+    receipt.change = answer.change
+    return result(`${receipt.error}: ${answer.change}. Apply it and post the new text`)
+  }
+  if (answer.approval === 'declined') {
+    receipt.error = 'not sent since ' + answer.why
+    receipt.retry = 'never'
+    return result(receipt.error + '. Do not post it')
   }
   try {
     receipt.reply = await send($, source, link, body) || null
@@ -1209,13 +1257,33 @@ async function retract($, reply, replacement) {
   if (p.retracted_at) return p.reply + ' was already retracted'
   const source = sourceOf(p.reply)
   if (!source) return 'meetproxy cannot retract ' + p.reply
+  const text = typeof replacement === 'string' ? replacement.trim() : ''
+  const via = source === 'slack' ? await slackRoute($, undefined, true) : undefined
+  if (source === 'slack' && !via) return 'meetproxy cannot reach Slack to retract ' + p.reply
+  // Resolve the route and final text before asking so the approved text is the text sent
+  const correction = source === 'slack' && via === 'mcp'
+  const body = correction
+    ? withMark('Correction: ' + (text || 'please disregard my earlier reply in this thread.'))
+    : text ? withMark(text) : ''
+  const question = body
+    ? `${body}\n\n${correction ? 'Post this correction under' : 'Replace the text of'} ${p.reply} as written?`
+    : `Delete ${p.reply}?`
+  const answer = await approval($, 'Retract', question, text ? REPLACE : DELETE, KEEP)
+  if (answer.approval === 'changed') return `not retracted since the user wants a change: ${answer.change}. Apply it and retract again`
+  if (answer.approval === 'declined') return `not retracted since ${answer.why}. Leave ${p.reply} as it is`
   let done
   try {
-    done = await unsay($, source, p, typeof replacement === 'string' ? replacement.trim() : '')
+    done = await unsay($, source, p, body, via)
   } catch (err) {
     return 'failed to retract: ' + message(err)
   }
-  await meetproxy($, ['posts', 'retract', p.reply])
+  let recorded
+  try {
+    recorded = await meetproxy($, ['posts', 'retract', p.reply])
+  } catch {
+    // A timeout can happen after the ledger changed so only the acknowledgement is unknown
+  }
+  if (!recorded?.ok) return `${done} ${p.reply}; the ledger update was not confirmed. Do not retry the change. Check the original thread and /meetproxy:status`
   return `${done} ${p.reply}`
 }
 

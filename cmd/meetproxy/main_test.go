@@ -287,7 +287,7 @@ func TestRun(t *testing.T) {
 			"delegation match picks a review for a pull request link", "s1", false, []step{{"delegation", []string{"put"}, prDelegation}},
 			step{"delegation", []string{"match", "mention"}, `{"text":"<@U1> review https://github.com/o/svc/pull/7 please","from":"U2"}`},
 			want{0, `{"delegation":"pr","task":"review","triage":false,"target":"https://github.com/o/svc/pull/7",` +
-				`"depth":"quick","digest":"d4893200715e"}`, false},
+				`"depth":"quick","digest":"12404fa6521d"}`, false},
 		},
 		{
 			"delegation match reviews a requested pull request", "s1", false, nil,

@@ -167,6 +167,14 @@ func TestRunHookGuard_Scope(t *testing.T) {
 		{"allows a post to the target after a take", args{taken, "", bash("gh pr comment 3 -R t/r -b hi")}, ""},
 		{"denies an approval the delegation does not allow", args{taken, "", bash("gh pr review 3 -R t/r --approve -b ok")}, "is not delegated"},
 		{"denies meetproxy allow while a take is open", args{taken, "", bash("meetproxy allow slack:C9")}, "changes meetproxy settings"},
+		{
+			"denies a direct meetproxy slack post to the origin while a take is open",
+			args{taken, "", bash("echo hi | meetproxy slack post " + link)}, "outside the post and retract tools",
+		},
+		{
+			"lets a direct meetproxy slack post run when nothing is handled",
+			args{nil, "", bash("echo hi | meetproxy slack post " + link)}, "",
+		},
 		{"denies opening another request while a take is open", args{taken, "", bash("meetproxy open https://w.slack.com/archives/C9/p2")}, "slack:C9 is not allowed"},
 		{"denies a post elsewhere after a close in the same turn", args{closed, "", elsewhere}, "slack:C9 is not allowed"},
 		{"lets a post go anywhere once the turn of the close ended", args{closed, "stop", elsewhere}, ""},

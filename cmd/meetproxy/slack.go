@@ -18,6 +18,7 @@ import (
 
 	"github.com/jeon-jihyeon/meetproxy/internal/dest"
 	"github.com/jeon-jihyeon/meetproxy/internal/fileio"
+	"github.com/jeon-jihyeon/meetproxy/internal/inbox"
 	"github.com/jeon-jihyeon/meetproxy/internal/posts"
 	"github.com/jeon-jihyeon/meetproxy/internal/slackapi"
 )
@@ -199,7 +200,7 @@ func (c cli) slackHistory(channel, oldest string) error {
 		return err
 	}
 	if truncated {
-		fmt.Fprintf(os.Stderr, "#%s had more than %d messages since the last check and the older ones are skipped\n", channel, slackapi.MaxPages*100)
+		c.recordSkipped("https://"+a.Host+"/archives/"+channel, oldest, found)
 	}
 	users := c.users(client)
 	out := make([]slackMessage, 0, len(found))
@@ -245,6 +246,22 @@ func (c cli) encodeMessages(out []slackMessage, users *userCache) error {
 	sort.SliceStable(out, func(i, j int) bool { return tsLess(out[i].Ts, out[j].Ts) })
 	users.save()
 	return writeJSON(c.out, out)
+}
+
+// A read the page bound cut short is recorded as ignored beside the note on stderr
+// The record names the conversation and the span left out and never a message text
+// A failed record leaves the read as it is since the messages it got still count
+// History answers newest first so the last message kept is the oldest
+func (c cli) recordSkipped(link, oldest string, kept []slackapi.Message) {
+	from := "the newest page"
+	if len(kept) > 0 {
+		from = kept[len(kept)-1].Ts
+	}
+	reason := fmt.Sprintf("more than %d messages since %s, those before %s were skipped", slackapi.MaxPages*100, oldest, from)
+	fmt.Fprintf(os.Stderr, "%s had %s\n", link, reason)
+	if err := inbox.New(c.data).Ignore(inbox.Ignored{Link: link, Reason: reason}, c.now); err != nil {
+		fmt.Fprintf(os.Stderr, "could not record the skip of %s: %v\n", link, err)
+	}
 }
 
 func tsLess(a, b string) bool {
@@ -339,7 +356,7 @@ func (c cli) slackDMs(after string) error {
 		return err
 	}
 	read := readDMs(c.data, ids)
-	found := c.readConversations(client, ids, read, after)
+	found := c.readConversations(client, a.Host, ids, read, after)
 	if err := fileio.WriteJSON(dmsFile(c.data), read); err != nil {
 		return err
 	}
@@ -440,7 +457,7 @@ func (r dmRead) oldest(after string) string {
 // Reads the conversations read longest ago first and records what each read reached
 // Only messages after the ts each conversation was read from are returned
 // A conversation that fails keeps what it had and a rate limit stops the rest
-func (c cli) readConversations(client slackapi.Client, ids []string, read map[string]dmRead, after string) []slackapi.Message {
+func (c cli) readConversations(client slackapi.Client, host string, ids []string, read map[string]dmRead, after string) []slackapi.Message {
 	order := slices.Clone(ids)
 	slices.SortStableFunc(order, func(x, y string) int { return cmp.Compare(read[x].Read, read[y].Read) })
 	var out []slackapi.Message
@@ -460,7 +477,7 @@ func (c cli) readConversations(client slackapi.Client, ids []string, read map[st
 			fmt.Fprintf(os.Stderr, "direct messages of %s wait since they could not be read: %v\n", id, err)
 			continue
 		case truncated:
-			fmt.Fprintf(os.Stderr, "%s had more than %d messages since the last check and the older ones are skipped\n", id, slackapi.MaxPages*100)
+			c.recordSkipped("https://"+host+"/archives/"+id, oldest, msgs)
 		}
 		for _, m := range msgs {
 			if !tsLess(oldest, m.Ts) {
