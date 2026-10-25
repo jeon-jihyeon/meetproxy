@@ -31,17 +31,21 @@ export function recognized(result, field, messages) {
 
 // The cursor of the next page in a Slack tool answer
 export function nextPage(result) {
-  const info = parseJSON(text(result))?.pagination_info ?? ''
-  return /cursor: `([^`]+)`/.exec(info)?.[1]
+  const parsed = parseJSON(text(result))
+  const info = parsed?.pagination_info ?? ''
+  if (typeof info !== 'string') throw new Error('unrecognized Slack pagination format')
+  const cursor = /cursor:?\s+`([^`]+)`/i.exec(info)?.[1]
+  if (!cursor && /next page|cursor/i.test(info)) throw new Error('unrecognized Slack pagination format')
+  if (!cursor && parsed?.has_more) throw new Error('Slack has more messages without a continuation cursor')
+  return cursor
 }
 
 // The search tool answers with JSON whose results field is markdown
 // Each message is one block
 export function searchMessages(result) {
   const md = parseJSON(text(result))?.results ?? text(result)
-  return md
-    .split(/^### Result /m)
-    .slice(1)
+  return blocks(md, /^### Result [^\n]*(?:\n|$)/gm,
+    /^Channel: [^\n]*\nFrom: [^\n]*\nMessage_ts: [\d.]+\nPermalink: \[link\]\(\S+\)\nText: \n/)
     .map(block => ({
       author: /^From: ([^<(]*)/m.exec(block)?.[1]?.trim() ?? '',
       channel: /^Channel: .*\(ID: (\w+)\)/m.exec(block)?.[1] ?? '',
@@ -50,7 +54,6 @@ export function searchMessages(result) {
       link: /^Permalink: \[link\]\((\S+)\)/m.exec(block)?.[1] ?? '',
       text: body(block),
     }))
-    .filter(m => m.ts && m.link)
     .sort(byTs)
 }
 
@@ -58,9 +61,7 @@ export function searchMessages(result) {
 // Their blocks carry no permalink so one is built from the host
 export function channelMessages(result, channel, host) {
   const md = parseJSON(text(result))?.messages ?? text(result)
-  return md
-    .split(/^=== Message from /m)
-    .slice(1)
+  return blocks(md, /^=== Message from /gm, /^[^\n]* ===\s*\nMessage TS: [\d.]+(?:\n|$)/)
     .map(block => {
       const ts = /^Message TS: ([\d.]+)/m.exec(block)?.[1] ?? ''
       return {
@@ -72,7 +73,6 @@ export function channelMessages(result, channel, host) {
         text: messageText(block),
       }
     })
-    .filter(m => m.ts)
     .sort(byTs)
 }
 
@@ -80,9 +80,8 @@ export function channelMessages(result, channel, host) {
 // Its blocks carry no permalink so one is built from the host
 export function threadMessages(result, channel, host) {
   const md = parseJSON(text(result))?.messages ?? text(result)
-  return md
-    .split(/^(?:=== THREAD PARENT MESSAGE ===|--- Reply \d+ of \d+ ---)$/m)
-    .slice(1)
+  return blocks(md, /^(?:=== THREAD PARENT MESSAGE ===|--- Reply \d+ of \d+ ---)\n/gm,
+    /^From: [^\n]*\n(?:Time: [^\n]*\n)?Message TS: [\d.]+(?:\n|$)/)
     .map(block => {
       const ts = /^Message TS: ([\d.]+)/m.exec(block)?.[1] ?? ''
       return {
@@ -94,21 +93,42 @@ export function threadMessages(result, channel, host) {
         text: messageText(block),
       }
     })
-    .filter(m => m.ts)
     .sort(byTs)
 }
 
-// The text starts on the line after the ts and ends before the lines the reader adds about the message
+export function threadSnapshot(result, channel, host) {
+  const messages = threadMessages(result, channel, host)
+  if (!messages.length) throw new Error('thread snapshot is unreadable')
+  return messages.map(m => ({ ...m, reaction_lines: (m.text.match(/^Reactions: .*$/gm) ?? [])
+    .flatMap(line => line.slice('Reactions: '.length).split(/[,;]\s*/)) }))
+}
+
+// Rendered delimiters have meaning only with their immediate metadata header
+function blocks(md, delimiter, header) {
+  const boundaries = []
+  for (const match of md.matchAll(delimiter)) {
+    const start = match.index + match[0].length
+    const tail = md.slice(start)
+    if (header.test(tail)) boundaries.push({ at: match.index, start })
+    else if (/^(?:[^\n]*\n)?(?:From:|Time:|Message TS:|Channel:|Message_ts:|Permalink:)/.test(tail)) {
+      throw new Error('incomplete Slack message header')
+    }
+  }
+  if (boundaries.length && !/^(?:Channel: [^\n]*|=== THREAD REPLIES \(\d+ total\) ===)?\s*$/.test(md.slice(0, boundaries[0].at))) {
+    throw new Error('unrecognized Slack message prefix')
+  }
+  return boundaries.map((boundary, i) => md.slice(boundary.start, boundaries[i + 1]?.at ?? md.length))
+}
+
 function messageText(block) {
   const ts = /^Message TS: .*$/m.exec(block)
   if (!ts) return ''
   return block
     .slice(ts.index + ts[0].length)
-    .split(/^(?:Reactions: |Thread: \d+ repl|=== THREAD REPLIES )/m)[0]
     .trim()
 }
 
 function body(block) {
   const at = block.indexOf('Text: \n')
-  return at < 0 ? '' : block.slice(at + 'Text: \n'.length).replace(/\n-{3}\s*$/, '').trim()
+  return at < 0 ? '' : block.slice(at + 'Text: \n'.length).trim()
 }

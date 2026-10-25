@@ -232,6 +232,6 @@ func TestClientNotifications(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Equal(t, []any{"1", "mention", pr}, []any{got[0].Key(), got[0].Reason, got[0].Subject.URL})
 	assert.True(t, slices.ContainsFunc(f.calls, func(s string) bool {
-		return strings.Contains(s, "-f participating=true -f since=2030-01-01T00:00:00Z")
+		return strings.Contains(s, "-f participating=true -f all=true -f since=2030-01-01T00:00:00Z")
 	}), f.calls)
 }

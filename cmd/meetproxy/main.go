@@ -16,7 +16,7 @@ var version = "dev"
 
 // The command set the plugin mod speaks
 // Raised whenever a command the mod calls changes so an older mod stops instead of misreading
-const protocol = 10
+const protocol = 13
 
 const (
 	exitFailed   = 1
@@ -72,6 +72,16 @@ var families = []family{
 		{name: "protocol", noData: true, help: "print the command set the plugin mod expects", run: printProtocol},
 	}},
 	{"slack", []command{
+		{
+			name: "slack conversations", help: "list direct conversations for durable per-channel collection",
+			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackConversations()) },
+		},
+		{
+			name: "slack page", args: "<mentions|channel|parents|replies>", least: 1, most: 1,
+			flags: []string{"after", "before", "cursor", "channel", "thread"},
+			help:  "read one page in a fixed collection window",
+			run:   func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackPage(a[0], f)) },
+		},
 		{
 			name: "slack token", help: "store the user token on stdin once Slack accepts it, print user, team, host and missing scopes",
 			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackToken()) },
@@ -143,7 +153,9 @@ func usage() string {
 type flags struct {
 	data, root, session string
 
-	after, oldest string
+	after, oldest  string
+	before, cursor string
+
 	answer, react string
 
 	thread, channel string
@@ -161,6 +173,9 @@ func (f *flags) set() *flag.FlagSet {
 	fs.IntVar(&f.limit, "limit", defaultLimit, "number of results, every one with 0")
 
 	fs.StringVar(&f.after, "after", "", "unix seconds to read Slack mentions after")
+	fs.StringVar(&f.before, "before", "", "unix seconds of the fixed collection end")
+	fs.StringVar(&f.cursor, "cursor", "", "opaque source page cursor")
+
 	fs.StringVar(&f.oldest, "oldest", "", "Slack ts to read a channel after")
 	fs.StringVar(&f.answer, "answer", "", "now, later or keep")
 

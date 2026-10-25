@@ -45,9 +45,9 @@ Anyone who can mention you can write a request, so meetproxy treats request text
 
 ## Privacy
 
-There's no meetproxy server and no telemetry.
+meetproxy runs locally with no telemetry. An opt-in authenticated loopback HTTP interface provides reads and host handoff.
 
-- **Read:** your Slack mentions and DMs and GitHub notifications. 
+- Read: connected Slack channel history and threads, mentions and DMs, and GitHub notifications. 
 
 ## Uninstall
 

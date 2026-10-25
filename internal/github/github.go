@@ -79,14 +79,17 @@ func (n Notification) Key() string {
 type Comment struct {
 	Id int64 `json:"id"`
 	// Root comment of the review thread a reply sits in, zero for the root and any other comment
-	InReplyTo   int64     `json:"in_reply_to_id"`
-	User        User      `json:"user"`
-	Body        string    `json:"body"`
-	Title       string    `json:"title"`
-	HTMLURL     string    `json:"html_url"`
-	CreatedAt   time.Time `json:"created_at"`
-	SubmittedAt time.Time `json:"submitted_at"`
-	Association string    `json:"author_association"`
+	InReplyTo   int64           `json:"in_reply_to_id"`
+	User        User            `json:"user"`
+	Body        string          `json:"body"`
+	Title       string          `json:"title"`
+	HTMLURL     string          `json:"html_url"`
+	CreatedAt   time.Time       `json:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at"`
+	Reactions   json.RawMessage `json:"reactions,omitempty"`
+	Comments    int             `json:"comments,omitempty"`
+	SubmittedAt time.Time       `json:"submitted_at"`
+	Association string          `json:"author_association"`
 }
 
 // The comment that starts the review thread the comment sits in
@@ -111,7 +114,7 @@ func (c Client) Login() (string, error) {
 
 // Notifications that involve the user updated since since, without marking them read
 func (c Client) Notifications(since time.Time) ([]Notification, error) {
-	return list[Notification](c, "notifications", since, "-f", "participating=true")
+	return list[Notification](c, "notifications", since, "-f", "participating=true", "-f", "all=true")
 }
 
 // Every item of a list across its pages

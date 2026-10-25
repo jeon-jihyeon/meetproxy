@@ -34,10 +34,14 @@ type Error struct {
 	// Slack's error code such as missing_scope or invalid_auth
 	Code string
 	// The scope a missing_scope answer names
-	Needed string
+	Needed     string
+	RetryAfter string
 }
 
 func (e *Error) Error() string {
+	if e.RetryAfter != "" {
+		return fmt.Sprintf("slack %s: %s retry_after:%s", e.Method, e.Code, e.RetryAfter)
+	}
 	if e.Needed != "" {
 		return fmt.Sprintf("slack %s: %s, the token needs %s", e.Method, e.Code, e.Needed)
 	}
@@ -110,11 +114,15 @@ func (c Client) AuthTest() (Auth, error) {
 
 // One message as the API answers it
 type Message struct {
-	Ts       string `json:"ts"`
-	User     string `json:"user"`
-	BotId    string `json:"bot_id"`
-	Username string `json:"username"`
-	Text     string `json:"text"`
+	Subtype    string          `json:"subtype"`
+	Ts         string          `json:"ts"`
+	User       string          `json:"user"`
+	BotId      string          `json:"bot_id"`
+	Username   string          `json:"username"`
+	Text       string          `json:"text"`
+	Edited     json.RawMessage `json:"edited,omitempty"`
+	Reactions  json.RawMessage `json:"reactions,omitempty"`
+	ReplyCount int             `json:"reply_count,omitempty"`
 	// ts of the thread a reply sits in
 	ThreadTs string `json:"thread_ts"`
 	// Set by search alone
@@ -318,10 +326,11 @@ func (c Client) call(method string, form url.Values, v any) (http.Header, error)
 			return nil, err
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
-			if try > 0 {
-				return nil, &Error{Method: method, Code: "ratelimited"}
+			seconds, wait := retryAfter(resp.Header.Get("Retry-After"))
+			if try > 0 || wait == 0 {
+				return nil, &Error{Method: method, Code: "ratelimited", RetryAfter: seconds}
 			}
-			c.sleep(retryAfter(resp.Header.Get("Retry-After")))
+			c.sleep(wait)
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
@@ -347,10 +356,19 @@ func (c Client) call(method string, form url.Values, v any) (http.Header, error)
 	}
 }
 
-func retryAfter(header string) time.Duration {
-	s, err := strconv.Atoi(strings.TrimSpace(header))
-	if err != nil || s < 1 {
-		return time.Second
+func retryAfter(header string) (string, time.Duration) {
+	header = strings.TrimLeft(strings.TrimSpace(header), "0")
+	if header == "" || strings.ContainsAny(header, "\r\n") {
+		return "1", time.Second
 	}
-	return min(time.Duration(s)*time.Second, maxRetryAfter)
+	for _, r := range header {
+		if r < '0' || r > '9' {
+			return "1", time.Second
+		}
+	}
+	s, err := strconv.ParseInt(header, 10, 64)
+	if err != nil || s > int64(maxRetryAfter/time.Second) {
+		return header, 0
+	}
+	return header, time.Duration(s) * time.Second
 }
