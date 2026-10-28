@@ -11,7 +11,7 @@ import (
 func (c cli) snapshot(link string) error {
 	l, ok := messageurl.ParseLink(link)
 	if !ok {
-		return fmt.Errorf("snapshot needs a Slack or GitHub message link")
+		return fmt.Errorf("snapshot needs a supported message link")
 	}
 	if l.Source == messageurl.GitHub {
 		messages, err := newGitHub().Snapshot(l)

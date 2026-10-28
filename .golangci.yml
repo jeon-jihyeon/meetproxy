@@ -30,7 +30,7 @@ linters:
           disabled: true
     # Imports point down only
     # 1. cmd uses everything and nothing imports cmd
-    # 4. any package may use fileio and shell which use no package of the module
+    # 4. fileio and shell use no package of the module
     # 5. slackapi speaks HTTP alone and only cmd uses it
     # 6. github runs gh, uses only dest and only cmd uses it
     depguard:
@@ -54,7 +54,7 @@ linters:
             - "!$test"
           deny:
             - pkg: github.com/jeon-jihyeon/meetproxy
-              desc: fileio, shell and slackapi use no package of the module
+              desc: fileio, shell, slackapi use no package of the module
   exclusions:
     rules:
       - path: _test\.go

@@ -16,7 +16,7 @@ var version = "dev"
 
 // The command set the plugin mod speaks
 // Raised whenever a command the mod calls changes so an older mod stops instead of misreading
-const protocol = 13
+const protocol = 14
 
 const (
 	exitFailed   = 1
@@ -35,7 +35,10 @@ func main() {
 		os.Exit(exitUsage)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
-	code, err := run(cmd, args, os.Getenv("CLAUDE_CODE_SESSION_ID"), time.Now(), os.Stdin, os.Stdout)
+	c := cli{
+		session: os.Getenv("CLAUDE_CODE_SESSION_ID"), now: time.Now(), in: os.Stdin, out: os.Stdout,
+	}
+	code, err := c.exec(cmd, args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "meetproxy:", err)
 	}
@@ -183,35 +186,38 @@ func (f *flags) set() *flag.FlagSet {
 
 	fs.StringVar(&f.thread, "thread", "", "key of the thread the request sits in")
 
-	fs.StringVar(&f.channel, "channel", "", "Slack channel or GitHub repository")
+	fs.StringVar(&f.channel, "channel", "", "channel or repository")
 
 	return fs
 }
 
-func run(cmd string, args []string, session string, now time.Time, in io.Reader, out io.Writer) (int, error) {
-	f := flags{session: session}
+// Runs a command line with what c carries
+// The data directory comes from the flags and the session from --session over the one c carries
+func (c cli) exec(cmd string, args []string) (int, error) {
+	f := flags{session: c.session}
 	fs := f.set()
 	if err := fs.Parse(reorder(cmd, args)); err != nil {
 		return exitUsage, err
 	}
 	words := append([]string{cmd}, fs.Args()...)
-	c, ok := lookup(words)
+	line, ok := lookup(words)
 	if !ok {
 		return exitUsage, fmt.Errorf("unknown command %q\n%s", strings.Join(words, " "), usage())
 	}
 	var given []string
 	fs.Visit(func(fl *flag.Flag) { given = append(given, fl.Name) })
-	rest := words[len(strings.Fields(c.name)):]
-	if err := c.check(rest, given, f.session); err != nil {
+	rest := words[len(strings.Fields(line.name)):]
+	if err := line.check(rest, given, f.session); err != nil {
 		return exitUsage, err
 	}
-	if !c.noData {
+	if !line.noData {
 		var err error
 		if f.data, err = f.dataDir(); err != nil {
 			return exitUsage, err
 		}
 	}
-	return c.run(cli{data: f.data, session: f.session, now: now, in: in, out: out}, rest, f)
+	c.data, c.session = f.data, f.session
+	return line.run(c, rest, f)
 }
 
 // Usage errors of the positional arguments, the flags given and the session id
@@ -271,6 +277,9 @@ func exitCode(err error) (int, error) {
 	}
 }
 
+// Flags that take no value
+var boolFlags = []string{"--confirm", "-confirm"}
+
 func reorder(_ string, args []string) []string {
 	var flags, pos []string
 	for i := 0; i < len(args); i++ {
@@ -281,7 +290,7 @@ func reorder(_ string, args []string) []string {
 			return append(append(flags, a), append(pos, args[i+1:]...)...)
 		case len(a) > 1 && a[0] == '-':
 			flags = append(flags, a)
-			if !strings.Contains(a, "=") && i+1 < len(args) {
+			if !strings.Contains(a, "=") && !slices.Contains(boolFlags, a) && i+1 < len(args) {
 				flags = append(flags, args[i+1])
 				i++
 			}

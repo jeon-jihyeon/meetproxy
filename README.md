@@ -47,8 +47,6 @@ Anyone who can mention you can write a request, so meetproxy treats request text
 
 meetproxy runs locally with no telemetry. An opt-in authenticated loopback HTTP interface provides reads and host handoff.
 
-- Read: connected Slack channel history and threads, mentions and DMs, and GitHub notifications. 
-
 ## Uninstall
 
 ```
@@ -62,8 +60,6 @@ To remove all data, close every session first:
 rm -rf ~/.claude/plugins/data/meetproxy-meetproxy ~/.meetproxy
 rm -f ~/.claude/plugins/store/meetproxy_meetproxy-*.json
 ```
-
-If you set up a Slack token, also delete the Slack app from your workspace to revoke it.
 
 ## Troubleshooting
 

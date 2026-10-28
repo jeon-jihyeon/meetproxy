@@ -20,6 +20,7 @@ archives:
     name_template: "meetproxy_{{ .Os }}_{{ .Arch }}"
     files:
       - LICENSE
+      - NOTICE
 
 checksum:
   name_template: checksums.txt
