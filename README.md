@@ -39,6 +39,20 @@ No API key needed. All the work happens in your own Claude Code sessions.
 - `gh`, logged in with the default scopes
 - For Slack: the [official Slack plugin](https://github.com/anthropics/claude-plugins-official). A personal token is optional
 
+## How it works
+
+### Computer use
+
+For an app meetproxy doesn't connect, like a database client or a chat app, Claude can drive its window. It needs a computer-use server, and meetproxy doesn't ship one. Claude Code's built-in computer use works, or install cua-driver on macOS and register it:
+
+```sh
+/bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"
+cua-driver permissions grant
+cua-driver mcp-config --client claude --no-skills
+```
+
+Run what the last command prints, then restart the session. Your host's permission settings decide which actions it asks you about first.
+
 ## Safe by default
 
 Anyone who can mention you can write a request, so meetproxy treats request text as untrusted.

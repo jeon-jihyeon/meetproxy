@@ -207,6 +207,10 @@ func (c cli) exec(cmd string, args []string) (int, error) {
 	var given []string
 	fs.Visit(func(fl *flag.Flag) { given = append(given, fl.Name) })
 	rest := words[len(strings.Fields(line.name)):]
+	if !slices.Contains(line.flags, "session") {
+		// A command without --session never sees the environment id so only checked ids reach any command
+		f.session = ""
+	}
 	if err := line.check(rest, given, f.session); err != nil {
 		return exitUsage, err
 	}
@@ -232,6 +236,9 @@ func (c command) check(rest, given []string, session string) error {
 	}
 	if c.session && session == "" {
 		return fmt.Errorf("%w: %s needs a session id", errUsage, c.name)
+	}
+	if session != "" && !sessionId.MatchString(session) {
+		return fmt.Errorf("%w: %s takes a session id of 1 to 128 letters, digits, _ or -", errUsage, c.name)
 	}
 	return nil
 }

@@ -2,6 +2,18 @@
 
 All notable changes to meetproxy are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.1.16]
+
+Protocol 14. Restart every open session after upgrading.
+
+### Added
+
+- Computer use for apps meetproxy has no adapter for. The host approves every computer-use action.
+
+### Security
+
+- The CLI checks every `--session` value before it names a file.
+
 ## [0.1.15]
 
 Protocol 13. Restart every open session after upgrading.
@@ -101,6 +113,7 @@ Protocol 6.
 
 - Launcher that runs the binary from a cache, a checksum verified release or `go install`
 
+[0.1.16]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.12...v0.1.13
