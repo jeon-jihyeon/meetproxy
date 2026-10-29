@@ -5,6 +5,7 @@
 
 /evals/results/
 /meetproxy
+/meetproxy.exe
 /demo
 /.meetproxy
 *.test

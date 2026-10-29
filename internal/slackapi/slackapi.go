@@ -3,6 +3,7 @@ package slackapi
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -50,11 +52,30 @@ func (e *Error) Error() string {
 
 var ErrBase = errors.New("a Slack API base other than slack.com must be a loopback address")
 
+// The client's deadline passed before the request left, so Slack never got it
+var ErrPastDeadline = errors.New("the deadline passed before the request was sent")
+
 type Client struct {
 	base  string
 	token string
 	http  *http.Client
 	sleep func(time.Duration)
+	// The wall time every call ends by, zero for none
+	deadline time.Time
+}
+
+// The client whose calls end by deadline
+// A Retry-After that leaves no full request time after the wait fails at once
+func (c Client) Until(deadline time.Time) Client {
+	c.deadline = deadline
+	return c
+}
+
+func (c Client) context() (context.Context, context.CancelFunc) {
+	if c.deadline.IsZero() {
+		return context.WithCancel(context.Background())
+	}
+	return context.WithDeadline(context.Background(), c.deadline)
 }
 
 // An empty base is slack.com
@@ -284,10 +305,114 @@ func (c Client) DirectConversations() ([]string, error) {
 	return nil, fmt.Errorf("slack conversations.list: more than %d pages of direct conversations", MaxPages)
 }
 
-// A member of a workspace by the name messages show
+// A conversation as conversations.info and conversations.list answer it
+type Conversation struct {
+	Id   string `json:"id"`
+	Name string `json:"name"`
+	IsIm bool   `json:"is_im"`
+	// The other member of a direct conversation
+	User string `json:"user"`
+}
+
+func (c Client) ConversationInfo(id string) (Conversation, error) {
+	var r struct {
+		Channel Conversation `json:"channel"`
+	}
+	_, err := c.call("conversations.info", url.Values{"channel": {id}}, &r)
+	return r.Channel, err
+}
+
+// Every conversation of the types the user is a member of, within MaxPages
+func (c Client) Conversations(types string) ([]Conversation, error) {
+	var out []Conversation
+	cursor := ""
+	for range MaxPages {
+		var r struct {
+			Channels []Conversation `json:"channels"`
+			Meta     struct {
+				NextCursor string `json:"next_cursor"`
+			} `json:"response_metadata"`
+		}
+		form := url.Values{"types": {types}, "exclude_archived": {"true"}, "limit": {"200"}}
+		if cursor != "" {
+			form.Set("cursor", cursor)
+		}
+		if _, err := c.call("users.conversations", form, &r); err != nil {
+			return nil, err
+		}
+		out = append(out, r.Channels...)
+		if cursor = r.Meta.NextCursor; cursor == "" {
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("slack users.conversations: more than %d pages", MaxPages)
+}
+
+// A member of the workspace with every name it goes by
+type Member struct {
+	Id    string
+	Names []string
+}
+
+// Every member of the workspace that is not deleted, within MaxPages
+// A list that runs past MaxPages fails since a name matched against part of it proves nothing
+func (c Client) Members() ([]Member, error) {
+	var out []Member
+	cursor := ""
+	for range MaxPages {
+		var r struct {
+			Members []struct {
+				Id       string `json:"id"`
+				Name     string `json:"name"`
+				Deleted  bool   `json:"deleted"`
+				RealName string `json:"real_name"`
+				Profile  struct {
+					DisplayName string `json:"display_name"`
+					RealName    string `json:"real_name"`
+				} `json:"profile"`
+			} `json:"members"`
+			Meta struct {
+				NextCursor string `json:"next_cursor"`
+			} `json:"response_metadata"`
+		}
+		form := url.Values{"limit": {"200"}}
+		if cursor != "" {
+			form.Set("cursor", cursor)
+		}
+		if _, err := c.call("users.list", form, &r); err != nil {
+			return nil, err
+		}
+		for _, u := range r.Members {
+			if u.Deleted {
+				continue
+			}
+			out = append(out, Member{Id: u.Id, Names: namesOf(u.Name, u.RealName, u.Profile.DisplayName, u.Profile.RealName)})
+		}
+		if cursor = r.Meta.NextCursor; cursor == "" {
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("slack users.list: more than %d pages", MaxPages)
+}
+
+// The distinct non-empty names a user goes by
+func namesOf(names ...string) []string {
+	var out []string
+	for _, n := range names {
+		if n != "" && !slices.Contains(out, n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// A user of any workspace by the name messages show
 type User struct {
 	Id   string `json:"id"`
 	Name string `json:"name"`
+	// Every name it goes by as Members matches them
+	Names   []string `json:"names,omitempty"`
+	Deleted bool     `json:"deleted,omitempty"`
 }
 
 func (c Client) UserInfo(id string) (User, error) {
@@ -296,38 +421,32 @@ func (c Client) UserInfo(id string) (User, error) {
 			Id       string `json:"id"`
 			Name     string `json:"name"`
 			RealName string `json:"real_name"`
+			Deleted  bool   `json:"deleted"`
+			Profile  struct {
+				DisplayName string `json:"display_name"`
+				RealName    string `json:"real_name"`
+			} `json:"profile"`
 		} `json:"user"`
 	}
 	if _, err := c.call("users.info", url.Values{"user": {id}}, &r); err != nil {
 		return User{}, err
 	}
 	u := r.User
-	return User{Id: u.Id, Name: cmp.Or(u.RealName, u.Name)}, nil
+	return User{Id: u.Id, Name: cmp.Or(u.RealName, u.Name), Names: namesOf(u.Name, u.RealName, u.Profile.DisplayName, u.Profile.RealName), Deleted: u.Deleted}, nil
 }
 
 // Posts the form to method and decodes the answer into v
 // A rate limit is waited out once as Retry-After asks and fails the second time
+// The wait runs only while the retry still has its whole request time before the deadline
 func (c Client) call(method string, form url.Values, v any) (http.Header, error) {
 	for try := 0; ; try++ {
-		req, err := http.NewRequest(http.MethodPost, c.base+"/"+method, strings.NewReader(form.Encode()))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("Authorization", "Bearer "+c.token)
-		resp, err := c.http.Do(req)
-		if err != nil {
-			// The error names the URL and never the token
-			return nil, err
-		}
-		b, err := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
+		resp, b, err := c.post(method, form)
 		if err != nil {
 			return nil, err
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
 			seconds, wait := retryAfter(resp.Header.Get("Retry-After"))
-			if try > 0 || wait == 0 {
+			if try > 0 || wait == 0 || !c.deadline.IsZero() && time.Until(c.deadline) < wait+requestTimeout {
 				return nil, &Error{Method: method, Code: "ratelimited", RetryAfter: seconds}
 			}
 			c.sleep(wait)
@@ -354,6 +473,29 @@ func (c Client) call(method string, form url.Values, v any) (http.Header, error)
 		}
 		return resp.Header, nil
 	}
+}
+
+// One request and its whole answer, ended by the client's deadline
+func (c Client) post(method string, form url.Values) (*http.Response, []byte, error) {
+	ctx, cancel := c.context()
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, nil, fmt.Errorf("slack %s: %w: %w", method, ErrPastDeadline, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/"+method, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		// The error names the URL and never the token
+		return nil, nil, err
+	}
+	b, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	return resp, b, err
 }
 
 func retryAfter(header string) (string, time.Duration) {

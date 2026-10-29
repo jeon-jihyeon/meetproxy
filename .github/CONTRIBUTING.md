@@ -20,7 +20,7 @@ Data of a `--plugin-dir` session lives in `~/.claude/plugins/data/meetproxy-inli
 
 ## Checks
 
-Run these before opening a pull request. CI runs the same on Linux and macOS.
+Run these before opening a pull request. CI runs the same on Linux, and on macOS too when a maintainer dispatches it with `macos`.
 
 ```sh
 gofmt -l .

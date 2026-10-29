@@ -14,9 +14,9 @@ import (
 // Set by ldflags in release builds
 var version = "dev"
 
-// The command set the plugin mod speaks
-// Raised whenever a command the mod calls changes so an older mod stops instead of misreading
-const protocol = 14
+// The host contract the plugin mod speaks
+// Raised whenever the input, the answer or an effect of a mod command changes, or the tool set does
+const protocol = 15
 
 const (
 	exitFailed   = 1
@@ -37,6 +37,7 @@ func main() {
 	cmd, args := os.Args[1], os.Args[2:]
 	c := cli{
 		session: os.Getenv("CLAUDE_CODE_SESSION_ID"), now: time.Now(), in: os.Stdin, out: os.Stdout,
+		browser: osBrowser(), dialog: systemDialog(),
 	}
 	code, err := c.exec(cmd, args)
 	if err != nil {
@@ -126,6 +127,20 @@ var families = []family{
 		},
 	}},
 	{"github", githubCommands},
+	{"sign-in", []command{
+		{
+			name: "signin open", flags: []string{"log", "offset", "browser", "session"}, session: true,
+			help: "open the newest loopback link of --log after --offset in a new window of --browser, print opened or not found",
+			run: func(c cli, _ []string, f flags) (int, error) {
+				return exitCode(c.signinOpen(f.log, f.offset, f.browser))
+			},
+		},
+		{
+			name: "signin wait", flags: []string{"session"}, session: true,
+			help: "close the window signin open opened once the sign-in left it, print closed, timed out or waiting",
+			run:  func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.signinWait()) },
+		},
+	}},
 }
 
 func usage() string {
@@ -163,6 +178,8 @@ type flags struct {
 
 	thread, channel string
 
+	log, offset, browser string
+
 	limit int
 }
 
@@ -187,6 +204,10 @@ func (f *flags) set() *flag.FlagSet {
 	fs.StringVar(&f.thread, "thread", "", "key of the thread the request sits in")
 
 	fs.StringVar(&f.channel, "channel", "", "channel or repository")
+
+	fs.StringVar(&f.log, "log", "", "the log file an app prints its sign-in link to")
+	fs.StringVar(&f.offset, "offset", "", "the log's size in bytes right before the sign-in was pressed")
+	fs.StringVar(&f.browser, "browser", "", "Google Chrome or Whale")
 
 	return fs
 }

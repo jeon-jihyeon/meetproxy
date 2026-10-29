@@ -15,6 +15,9 @@ var Reactions = []string{"+1", "-1", "laugh", "confused", "heart", "hooray", "ro
 
 var ErrNotComment = errors.New("not a GitHub comment link")
 
+// The review comment of a link sits on another pull request than the link's number
+var ErrOtherPull = errors.New("the review comment sits on another pull request")
+
 // Posts body as a reply in the review thread of the link or as a comment on the issue or pull request
 // A reply goes to the root of the review thread since GitHub takes no reply to a reply
 // Returns the link of the new comment
@@ -22,10 +25,14 @@ func (c Client) Post(l messageurl.Link, body string) (string, error) {
 	b, n := base(l.Repo), strconv.Itoa(l.Number)
 	path := b + "/issues/" + n + "/comments"
 	if l.Discussion != "" {
-		root, err := c.root(l, nil)
+		x, on, err := c.review(l)
 		if err != nil {
 			return "", err
 		}
+		if on != l.Number {
+			return "", ErrOtherPull
+		}
+		root := x.Root()
 		path = b + "/pulls/" + n + "/comments/" + strconv.FormatInt(root, 10) + "/replies"
 	}
 	out, err := c.send("POST", path, map[string]string{"body": body})

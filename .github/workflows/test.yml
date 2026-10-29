@@ -1,19 +1,35 @@
 name: test
 
 on:
-  push:
-    branches: [main]
   pull_request:
+    # Docs alone skip the run, but every skill and reference under plugin is still validated
+    # A positive pattern after a negative one includes the path again
+    paths:
+      - "**"
+      - "!**.md"
+      - "plugin/**"
+      - ".claude-plugin/**"
+  workflow_dispatch:
+    inputs:
+      macos:
+        description: Also run the Go tests on macOS
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   go:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # macOS minutes cost ten Linux minutes, so macOS runs only on request
+        os: ${{ inputs.macos && fromJSON('["ubuntu-latest","macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

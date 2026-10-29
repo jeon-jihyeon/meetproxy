@@ -61,7 +61,7 @@ func (c cli) slackPage(kind string, f flags) error {
 			out = append(out, slackMessage{Author: authorOf(m, users), Channel: m.Channel.Id, From: m.User, Ts: m.Ts, Link: m.Permalink, Text: m.Text})
 		} else {
 			thread := cmpOr(m.ThreadTs, f.thread)
-			out = append(out, slackMessage{Author: authorOf(m, users), Channel: f.channel, From: cmpOr(m.User, m.BotId), Ts: m.Ts, Link: permalink(a.Host, f.channel, m.Ts, thread), Text: m.Text})
+			out = append(out, slackMessage{Author: authorOf(m, users), Channel: f.channel, From: cmpOr(m.User, m.BotId), Ts: m.Ts, Link: permalink(a.Host, f.channel, m.Ts, thread), Text: m.Text, Bot: m.BotId != ""})
 		}
 	}
 	users.save()

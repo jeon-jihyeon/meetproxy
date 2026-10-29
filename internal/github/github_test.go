@@ -3,8 +3,11 @@ package github_test
 import "github.com/jeon-jihyeon/meetproxy/internal/messageurl"
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -109,7 +112,7 @@ func TestClientPost(t *testing.T) {
 	}{
 		{
 			"a review reply goes to the root of its thread", review + "51", map[string]string{
-				"GET repos/o/r/pulls/comments/51":            one(comment(51, 50, "kai", "why", 1, review+"51")),
+				"GET repos/o/r/pulls/comments/51":            one(onPull(comment(51, 50, "kai", "why", 1, review+"51"), pr)),
 				"POST repos/o/r/pulls/3/comments/50/replies": one(comment(55, 50, "me", "hi", 2, review+"55")),
 			},
 			want{review + "55", []string{"api repos/o/r/pulls/comments/51", "api -X POST repos/o/r/pulls/3/comments/50/replies --input -"}},
@@ -131,6 +134,61 @@ func TestClientPost(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, want{got, f.calls})
 			assert.Equal(t, []string{`{"body":"hi"}`}, f.stdin)
+		})
+	}
+}
+
+func onPull(c map[string]any, pull string) map[string]any {
+	c["pull_request_url"] = pull
+	return c
+}
+
+// A review comment link whose comment sits on another pull request posts nothing
+func TestClientPost_ReviewCommentOfAnotherPull(t *testing.T) {
+	t.Parallel()
+	c, f := client(map[string]string{
+		"GET repos/o/r/pulls/comments/51": one(onPull(comment(51, 50, "kai", "why", 1, "https://github.com/o/r/pull/4#discussion_r51"), "https://api.github.com/repos/o/r/pulls/4")),
+	})
+	l, ok := messageurl.ParseLink(review + "51")
+	require.True(t, ok)
+
+	_, err := c.Post(l, "hi")
+
+	require.ErrorIs(t, err, github.ErrOtherPull)
+	assert.Equal(t, []string{"api repos/o/r/pulls/comments/51"}, f.calls)
+}
+
+// The pull request number is the last segment of the comment's pull request URL, whatever the owner and repo are named
+func TestClientPullOf(t *testing.T) {
+	t.Parallel()
+	type want struct {
+		number int
+		err    bool
+	}
+	tcs := []struct {
+		name string
+		repo string
+		pull string
+		want want
+	}{
+		{"an ordinary repo", "o/r", "https://api.github.com/repos/o/r/pulls/5", want{5, false}},
+		{"a repo named pulls", "o/pulls", "https://api.github.com/repos/o/pulls/pulls/5", want{5, false}},
+		{"an owner named pulls", "pulls/svc", "https://api.github.com/repos/pulls/svc/pulls/5", want{5, false}},
+		{"no pull request number", "o/r", "https://api.github.com/repos/o/r/pulls/", want{0, true}},
+		{"no pull request URL", "o/r", "", want{0, true}},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c, _ := client(map[string]string{
+				"GET repos/" + tc.repo + "/pulls/comments/51": one(onPull(comment(51, 50, "kai", "why", 1, "https://github.com/"+tc.repo+"/pull/5#discussion_r51"), tc.pull)),
+			})
+			l, ok := messageurl.ParseLink("https://github.com/" + tc.repo + "/pull/5#discussion_r51")
+			require.True(t, ok)
+
+			got, err := c.PullOf(l)
+
+			assert.Equal(t, tc.want, want{got, err != nil})
 		})
 	}
 }
@@ -206,6 +264,7 @@ func TestClientRead(t *testing.T) {
 		want string
 	}{
 		{"an issue with its first comments", args{isLink, 2}, "kai: Broken\nit fails\nann: same here"},
+		{"an issue with every comment at limit 0", args{isLink, 0}, "kai: Broken\nit fails\nann: same here\nkai: any news"},
 		{"one comment", args{note + "11", 5}, "ann: same here"},
 		{"a review thread from its root", args{review + "51", 5}, "kai: root\nann: reply"},
 	}
@@ -234,4 +293,22 @@ func TestClientNotifications(t *testing.T) {
 	assert.True(t, slices.ContainsFunc(f.calls, func(s string) bool {
 		return strings.Contains(s, "-f participating=true -f all=true -f since=2030-01-01T00:00:00Z")
 	}), f.calls)
+}
+
+// A gh run past the deadline of its call never starts, and one that runs on is cut at that deadline
+func TestExecBy_EndsAtTheDeadline(t *testing.T) {
+	dir := t.TempDir()
+	runs := filepath.Join(dir, "runs")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "gh"), []byte("#!/bin/sh\necho run >> "+runs+"\nexec sleep 30\n"), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := github.ExecBy(time.Now().Add(-time.Second))([]string{"api", "user"}, nil)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	_, statErr := os.Stat(runs)
+	assert.ErrorIs(t, statErr, os.ErrNotExist, "gh ran past the deadline")
+
+	began := time.Now()
+	_, err = github.ExecBy(time.Now().Add(300*time.Millisecond))([]string{"api", "user"}, nil)
+	require.Error(t, err)
+	assert.Less(t, time.Since(began), 10*time.Second)
 }
