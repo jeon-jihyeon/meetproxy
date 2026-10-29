@@ -3,6 +3,8 @@ package github
 import "github.com/jeon-jihyeon/meetproxy/internal/messageurl"
 
 import (
+	"errors"
+
 	"strconv"
 	"strings"
 	"time"
@@ -63,11 +65,54 @@ func (c Client) root(l messageurl.Link, cs []Comment) (int64, error) {
 			return x.Root(), nil
 		}
 	}
-	var x Comment
-	if err := c.Get(base(l.Repo)+"/pulls/comments/"+l.Discussion, &x); err != nil {
+	x, _, err := c.reviewComment(l)
+	if err != nil {
 		return 0, err
 	}
 	return x.Root(), nil
+}
+
+// The review comment of a link and the API URL of the pull request it sits on
+func (c Client) reviewComment(l messageurl.Link) (Comment, string, error) {
+	var x struct {
+		Comment
+		PullURL string `json:"pull_request_url"`
+	}
+	err := c.Get(base(l.Repo)+"/pulls/comments/"+l.Discussion, &x)
+	return x.Comment, x.PullURL, err
+}
+
+// The review comment of a link and the number of the pull request it sits on
+func (c Client) review(l messageurl.Link) (Comment, int, error) {
+	x, pull, err := c.reviewComment(l)
+	if err != nil {
+		return Comment{}, 0, err
+	}
+	on, err := pullNumber(pull)
+	if err != nil {
+		return Comment{}, 0, err
+	}
+	return x, on, nil
+}
+
+// The number at the end of a pull request API URL
+// It is read from the end since an owner or a repo may be named pulls
+func pullNumber(url string) (int, error) {
+	i := strings.LastIndex(url, "/pulls/")
+	if i < 0 {
+		return 0, errors.New("review comment without a pull request")
+	}
+	on, err := strconv.Atoi(url[i+len("/pulls/"):])
+	if err != nil || on <= 0 {
+		return 0, errors.New("review comment with an unreadable pull request")
+	}
+	return on, nil
+}
+
+// The number of the pull request the review comment of a link sits on
+func (c Client) PullOf(l messageurl.Link) (int, error) {
+	_, on, err := c.review(l)
+	return on, err
 }
 
 // The replies in the review thread of the link among cs
@@ -86,7 +131,6 @@ func (c Client) inThread(l messageurl.Link, cs []Comment) ([]Comment, int64, err
 }
 
 func (c Client) Read(l messageurl.Link, limit int) (string, error) {
-	limit = max(limit, 1)
 	b, n := base(l.Repo), strconv.Itoa(l.Number)
 	var cs []Comment
 	switch {
@@ -123,8 +167,11 @@ func (c Client) Read(l messageurl.Link, limit int) (string, error) {
 		}
 		cs = append([]Comment{it}, rest...)
 	}
-	lines := make([]string, 0, limit)
-	for _, x := range cs[:min(len(cs), limit)] {
+	if limit > 0 {
+		cs = cs[:min(len(cs), limit)]
+	}
+	lines := make([]string, 0, len(cs))
+	for _, x := range cs {
 		lines = append(lines, x.User.Login+": "+x.Body)
 	}
 	return clip(strings.Join(lines, "\n")), nil

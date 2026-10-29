@@ -225,7 +225,7 @@ func TestPostAndUserInfo(t *testing.T) {
 	f := &fake{answers: map[string]func(*http.Request) (int, any){
 		"chat.postMessage": func(*http.Request) (int, any) { return ok(map[string]any{"ts": "1.3"}) },
 		"users.info": func(*http.Request) (int, any) {
-			return ok(map[string]any{"user": map[string]any{"id": "U2", "name": "kai", "real_name": "Kai"}})
+			return ok(map[string]any{"user": map[string]any{"id": "U2", "name": "kai", "real_name": "Kai", "deleted": true, "profile": map[string]any{"display_name": "kk", "real_name": "Kai"}}})
 		},
 	}}
 	c := f.client(t)
@@ -236,7 +236,7 @@ func TestPostAndUserInfo(t *testing.T) {
 	require.NoError(t, perr)
 	require.NoError(t, err)
 	assert.Equal(t, "1.3", ts)
-	assert.Equal(t, User{Id: "U2", Name: "Kai"}, u)
+	assert.Equal(t, User{Id: "U2", Name: "Kai", Names: []string{"kai", "Kai", "kk"}, Deleted: true}, u)
 	assert.Equal(t, []string{"chat.postMessage channel=C1&text=hi&thread_ts=1.2", "users.info user=U2"}, f.calls)
 }
 
@@ -285,4 +285,25 @@ func TestDirectConversations(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"D1", "G2"}, got)
 	assert.Contains(t, f.calls[0], "types=im%2Cmpim")
+}
+
+// Every page of the member list, each member with the names it goes by and deleted ones left out
+func TestMembers(t *testing.T) {
+	t.Parallel()
+	f := &fake{answers: map[string]func(*http.Request) (int, any){
+		"users.list": func(r *http.Request) (int, any) {
+			if r.Form.Get("cursor") == "" {
+				return ok(map[string]any{"members": []map[string]any{
+					{"id": "U1", "name": "ann", "real_name": "Ann Lee", "profile": map[string]any{"display_name": "ann"}},
+					{"id": "U3", "name": "old", "deleted": true},
+				}, "response_metadata": map[string]any{"next_cursor": "p2"}})
+			}
+			return ok(map[string]any{"members": []map[string]any{{"id": "U2", "name": "ann2", "profile": map[string]any{"display_name": "ann"}}}})
+		},
+	}}
+
+	got, err := f.client(t).Members()
+
+	require.NoError(t, err)
+	assert.Equal(t, []Member{{Id: "U1", Names: []string{"ann", "Ann Lee"}}, {Id: "U2", Names: []string{"ann2", "ann"}}}, got)
 }

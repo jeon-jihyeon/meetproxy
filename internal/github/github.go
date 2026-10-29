@@ -23,9 +23,25 @@ type Runner func(args []string, stdin []byte) ([]byte, error)
 
 // Runs the gh on PATH
 // meetproxy keeps no token of its own so gh is the only way it reaches GitHub
-func Exec(args []string, stdin []byte) ([]byte, error) {
+func Exec(args []string, stdin []byte) ([]byte, error) { return ExecBy(time.Time{})(args, stdin) }
+
+// Runs the gh on PATH, each run ending by deadline too unless it is zero
+// So a reader that runs gh many times never outlasts the call that asked for it
+func ExecBy(deadline time.Time) Runner {
+	return func(args []string, stdin []byte) ([]byte, error) { return execGh(deadline, args, stdin) }
+}
+
+func execGh(deadline time.Time, args []string, stdin []byte) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
 	defer cancel()
+	if !deadline.IsZero() {
+		var stop context.CancelFunc
+		ctx, stop = context.WithDeadline(ctx, deadline)
+		defer stop()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("gh %s: %w", strings.Join(args[:min(len(args), 2)], " "), err)
+	}
 	cmd := exec.CommandContext(ctx, "gh", args...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)

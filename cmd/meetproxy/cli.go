@@ -13,6 +13,11 @@ type cli struct {
 	now     time.Time
 	in      io.Reader
 	out     io.Writer
+	browser browserScript
+	// Shows meetproxy's own secret dialogs, none when nil
+	dialog osDialog
+	// The wall time a collection or a change ends by, zero for none
+	deadline time.Time
 }
 
 func printVersion(c cli, _ []string, _ flags) (int, error) {

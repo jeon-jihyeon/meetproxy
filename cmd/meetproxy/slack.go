@@ -51,6 +51,8 @@ type slackMessage struct {
 	Ts      string `json:"ts"`
 	Link    string `json:"link"`
 	Text    string `json:"text"`
+	// Posted by an app rather than a person
+	Bot bool `json:"bot,omitempty"`
 }
 
 // What auth.test said of the token when it was stored or checked
@@ -88,7 +90,11 @@ func (c cli) slack() (slackapi.Client, error) {
 	if err != nil {
 		return slackapi.Client{}, err
 	}
-	return newSlack(strings.TrimSpace(string(b)))
+	client, err := newSlack(strings.TrimSpace(string(b)))
+	if err != nil || c.deadline.IsZero() {
+		return client, err
+	}
+	return client.Until(c.deadline), nil
 }
 
 // Stores the token on stdin once Slack accepts it
@@ -301,7 +307,12 @@ func (c cli) slackRead(link string, limit int) error {
 	if err != nil {
 		return err
 	}
-	msgs, err := client.Replies(at.channel, at.ts, "", max(limit, 1))
+	var msgs []slackapi.Message
+	if limit > 0 {
+		msgs, err = client.Replies(at.channel, at.ts, "", limit)
+	} else {
+		msgs, err = threadMessages(client, at.channel, at.ts)
+	}
 	if err != nil {
 		return err
 	}
@@ -411,8 +422,9 @@ func (c cli) users(client slackapi.Client) *userCache {
 	return u
 }
 
+// A cached user of an older release holds no names and is looked up again
 func (u *userCache) get(id string) (slackapi.User, error) {
-	if cached, ok := u.users[id]; ok && u.now.Sub(cached.At) < userCacheFor {
+	if cached, ok := u.users[id]; ok && u.now.Sub(cached.At) < userCacheFor && len(cached.Names) > 0 {
 		return cached.User, nil
 	}
 	got, err := u.client.UserInfo(id)

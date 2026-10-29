@@ -3,6 +3,7 @@ linters:
   enable:
     - depguard
     - dupl
+    - forbidigo
     - funlen
     - gocritic
     - gocyclo
@@ -28,33 +29,35 @@ linters:
           disabled: true
         - name: exported
           disabled: true
-    # Imports point down only
+    # Imports point down only and each rule allows exactly what its package may use
     # 1. cmd uses everything and nothing imports cmd
-    # 4. fileio and shell use no package of the module
-    # 5. slackapi speaks HTTP alone and only cmd uses it
-    # 6. github runs gh, uses only dest and only cmd uses it
+    # 2. fileio, shell, slackapi, slackmcp use no package of the module
+    # 5. Tests are left out of every rule
     depguard:
       rules:
-        github:
-          files:
-            - "**/internal/github/**"
-            - "!$test"
-          deny:
-            - pkg: github.com/jeon-jihyeon/meetproxy/internal/fileio
-              desc: github uses only dest
-            - pkg: github.com/jeon-jihyeon/meetproxy/internal/slackapi
-              desc: github uses only dest
-            - pkg: github.com/jeon-jihyeon/meetproxy/cmd
-              desc: nothing imports cmd
         base:
+          list-mode: strict
           files:
             - "**/internal/fileio/**"
             - "**/internal/shell/**"
             - "**/internal/slackapi/**"
+            - "**/internal/slackmcp/**"
             - "!$test"
-          deny:
-            - pkg: github.com/jeon-jihyeon/meetproxy
-              desc: fileio, shell, slackapi use no package of the module
+          allow:
+            - $gostd
+        github:
+          list-mode: strict
+          files:
+            - "**/internal/github/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/jeon-jihyeon/meetproxy/internal/messageurl$
+    # Only cmd reads the process environment
+    forbidigo:
+      forbid:
+        - pattern: ^os\.(Getenv|LookupEnv|Environ|ExpandEnv)$
+          msg: only cmd reads the process environment
   exclusions:
     rules:
       - path: _test\.go
@@ -63,3 +66,6 @@ linters:
           - funlen
           - gocyclo
           - unparam
+      - path: (_test\.go|^cmd/)
+        linters:
+          - forbidigo

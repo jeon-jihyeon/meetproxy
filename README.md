@@ -51,11 +51,13 @@ cua-driver permissions grant
 cua-driver mcp-config --client claude --no-skills
 ```
 
-Run what the last command prints, then restart the session. Your host's permission settings decide which actions it asks you about first.
+Run what the last command prints, then restart the session. Your host's permission settings decide which actions it asks you about first. 
 
 ## Safe by default
 
 Anyone who can mention you can write a request, so meetproxy treats request text as untrusted.
+
+- **Your host approves computer use.** When an agent drives an app window, your host, Claude Code or Codex, approves those actions, not meetproxy.
 
 ## Privacy
 

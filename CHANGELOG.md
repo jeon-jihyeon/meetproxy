@@ -2,6 +2,23 @@
 
 All notable changes to meetproxy are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Protocol 15. Run `/reload-plugins` in every open session after upgrading, or restart it.
+
+### Added
+
+- `meetproxy signin open` and `signin wait` open the sign-in link an app prints in a new browser window without the model ever seeing it, then close that window once the callback is done.
+
+### Changed
+
+- `slack_token` open an OS dialog on the user's screen for the token.
+
+### Security
+
+- A sign-in window closes only while it still holds one tab on the loopback port of the link the app printed, within 10 minutes of opening, unless the same wait just saw it on that port, so a browser that reused its window id never closes a window of yours.
+- On macOS the token and password dialogs come to the front, so a paste goes into the dialog and not the window behind it.
+
 ## [0.1.16]
 
 Protocol 14. Restart every open session after upgrading.
