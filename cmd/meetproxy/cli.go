@@ -8,12 +8,13 @@ import (
 )
 
 type cli struct {
-	data    string
-	session string
-	now     time.Time
-	in      io.Reader
-	out     io.Writer
-	browser browserScript
+	data      string
+	session   string
+	now       time.Time
+	in        io.Reader
+	out       io.Writer
+	slackBase string
+	browser   browserScript
 	// Shows meetproxy's own secret dialogs, none when nil
 	dialog osDialog
 	// The wall time a collection or a change ends by, zero for none

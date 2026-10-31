@@ -16,7 +16,7 @@ var version = "dev"
 
 // The host contract the plugin mod speaks
 // Raised whenever the input, the answer or an effect of a mod command changes, or the tool set does
-const protocol = 15
+const protocol = 16
 
 const (
 	exitFailed   = 1
@@ -38,6 +38,7 @@ func main() {
 	c := cli{
 		session: os.Getenv("CLAUDE_CODE_SESSION_ID"), now: time.Now(), in: os.Stdin, out: os.Stdout,
 		browser: osBrowser(), dialog: systemDialog(),
+		slackBase: os.Getenv(slackAPIEnv),
 	}
 	code, err := c.exec(cmd, args)
 	if err != nil {
@@ -215,6 +216,9 @@ func (f *flags) set() *flag.FlagSet {
 // Runs a command line with what c carries
 // The data directory comes from the flags and the session from --session over the one c carries
 func (c cli) exec(cmd string, args []string) (int, error) {
+	if c.slackBase == "" {
+		c.slackBase = os.Getenv(slackAPIEnv)
+	}
 	f := flags{session: c.session}
 	fs := f.set()
 	if err := fs.Parse(reorder(cmd, args)); err != nil {

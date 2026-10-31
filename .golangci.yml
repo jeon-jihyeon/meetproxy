@@ -36,6 +36,14 @@ linters:
     # Tests are outside the import rules
     depguard:
       rules:
+        migrated-entry:
+          list-mode: strict
+          files:
+            - "**/cmd/meetproxy/slack_account.go"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/jeon-jihyeon/meetproxy/app/
         application:
           list-mode: strict
           files:
