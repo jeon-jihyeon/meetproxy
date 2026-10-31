@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,6 +41,17 @@ func launcher(t *testing.T) (script, tools string) {
 		require.NoError(t, os.Symlink(path, filepath.Join(tools, name)))
 	}
 	return script, tools
+}
+
+// A fake meetproxy that prints its name, its arguments and the hook input it got back from the launcher
+// It runs on builtins alone so it works without any tool on PATH
+func fakeBinary(t *testing.T, dir, name string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	body := "#!/bin/sh\n[ \"$1\" = version ] && echo 9.9.9 && exit 0\necho " + name + " \"$@\"\n" +
+		"printf '%s' \"${MEETPROXY_HOOK_HEAD:-}\"\n" +
+		"[ \"$1\" = hook ] && while IFS= read -r l || [ -n \"$l\" ]; do printf '%s\\n' \"$l\"; done\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "meetproxy"), []byte(body), 0o755))
 }
 
 // A release archive of a fake meetproxy that prints release and its arguments
@@ -113,6 +125,60 @@ func TestLauncher_ReleaseChecksum(t *testing.T) {
 			assert.Equal(t, tc.stdout, strings.TrimSpace(string(out)))
 			_, statErr := os.Stat(filepath.Join(home, ".meetproxy", "bin", "v9.9.9", "meetproxy"))
 			assert.Equal(t, tc.match, statErr == nil, "only a verified binary is kept")
+		})
+	}
+}
+
+func TestLauncher_ApplicationChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the launcher is a POSIX shell script")
+	}
+	t.Parallel()
+	type want struct {
+		output string
+		build  string
+	}
+	tcs := []struct {
+		name string
+		args []string
+		want want
+	}{
+		{"a command rebuilds an existing binary", []string{"open", "x"}, want{"rebuilt open x", "build"}},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			script, tools := launcher(t)
+			root := filepath.Dir(filepath.Dir(filepath.Dir(script)))
+			for _, name := range []string{"app", "cmd", "internal"} {
+				require.NoError(t, os.Mkdir(filepath.Join(root, name), 0o755))
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(root, "go.mod"),
+				[]byte("module github.com/jeon-jihyeon/meetproxy\n"), 0o600))
+			file := filepath.Join(root, "app", "policy.go")
+			require.NoError(t, os.WriteFile(file, []byte("package app\n"), 0o600))
+			fakeBinary(t, filepath.Join(root, "bin"), "cached")
+			before := time.Now().Add(-time.Hour)
+			for _, name := range []string{"app", "cmd", "internal", "go.mod", "app/policy.go"} {
+				require.NoError(t, os.Chtimes(filepath.Join(root, name), before, before))
+			}
+			after := time.Now().Add(time.Minute)
+			require.NoError(t, os.Chtimes(file, after, after))
+			build := "#!/bin/sh\necho build >> \"$CALLS\"\n" +
+				"printf '%s\\n' '#!/bin/sh' 'echo rebuilt \"$@\"' > \"$3\"\nchmod 755 \"$3\"\n"
+			require.NoError(t, os.WriteFile(filepath.Join(tools, "go"), []byte(build), 0o755))
+			calls := filepath.Join(root, "calls")
+			require.NoError(t, os.WriteFile(calls, nil, 0o600))
+			cmd := exec.Command(script, tc.args...)
+			cmd.Env = []string{"HOME=" + t.TempDir(), "PATH=" + tools, "CALLS=" + calls}
+
+			out, err := cmd.Output()
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.want.output, strings.TrimSpace(string(out)))
+			logged, err := os.ReadFile(calls)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want.build, strings.TrimSpace(string(logged)))
 		})
 	}
 }

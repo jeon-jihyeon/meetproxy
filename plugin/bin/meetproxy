@@ -37,7 +37,7 @@ if [ -f "${SRC}/go.mod" ] && command -v go >/dev/null 2>&1; then
 fi
 if [ -n "$dev" ]; then
   DEV_BIN="${SRC}/bin/meetproxy"
-  if [ ! -x "$DEV_BIN" ] || { [ "$MODE" = cli ] && [ -n "$(find "${SRC}/cmd" "${SRC}/internal" "${SRC}/go.mod" -newer "$DEV_BIN" 2>/dev/null | head -n 1)" ]; }; then
+  if [ ! -x "$DEV_BIN" ] || { [ "$MODE" = cli ] && [ -n "$(find "${SRC}/app" "${SRC}/cmd" "${SRC}/internal" "${SRC}/go.mod" -newer "$DEV_BIN" 2>/dev/null | head -n 1)" ]; }; then
     mkdir -p "${SRC}/bin"
     tmp="${DEV_BIN}.$$"
     if (cd "$SRC" && go build -o "$tmp" ./cmd/meetproxy) >&2; then

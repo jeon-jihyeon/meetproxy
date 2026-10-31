@@ -29,12 +29,39 @@ linters:
           disabled: true
         - name: exported
           disabled: true
-    # Imports point down only and each rule allows exactly what its package may use
-    # 1. cmd uses everything and nothing imports cmd
-    # 2. fileio, shell, slackapi, slackmcp use no package of the module
-    # 5. Tests are left out of every rule
+    # Migrated entry points depend only on the public application layer
+    # Pure models and host values use only the standard library
+    # Stores use fileio and never import a domain model
+    # Unmoved packages keep their existing strict rules
+    # Tests are outside the import rules
     depguard:
       rules:
+        application:
+          list-mode: strict
+          files:
+            - "**/app/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/jeon-jihyeon/meetproxy/internal/
+            - github.com/jeon-jihyeon/meetproxy/app/host$
+        pure-values:
+          list-mode: strict
+          files:
+            - "**/internal/slackstate/**"
+            - "**/internal/signin/**"
+            - "**/app/host/**"
+            - "!$test"
+          allow:
+            - $gostd
+        storage:
+          list-mode: strict
+          files:
+            - "**/internal/store/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/jeon-jihyeon/meetproxy/internal/fileio$
         base:
           list-mode: strict
           files:
@@ -42,6 +69,7 @@ linters:
             - "**/internal/shell/**"
             - "**/internal/slackapi/**"
             - "**/internal/slackmcp/**"
+            - "**/internal/signinbrowser/**"
             - "!$test"
           allow:
             - $gostd
