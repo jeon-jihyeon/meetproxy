@@ -92,6 +92,33 @@ func TestAuthTest(t *testing.T) {
 	assert.Equal(t, Auth{User: "U1", Team: "T1", Host: "acme.slack.com", Scopes: []string{"search:read", "users:read"}}, a)
 }
 
+func TestRevoke(t *testing.T) {
+	t.Parallel()
+	refused := func(*http.Request) (int, any) {
+		return http.StatusOK, map[string]any{"ok": false, "error": "invalid_auth"}
+	}
+	tcs := []struct {
+		name   string
+		answer func(*http.Request) (int, any)
+		want   bool
+		err    bool
+	}{
+		{"revoked", func(*http.Request) (int, any) { return ok(map[string]any{"revoked": true}) }, true, false},
+		{"a test call", func(*http.Request) (int, any) { return ok(map[string]any{"revoked": false}) }, false, false},
+		{"a refused token", refused, false, true},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fake{answers: map[string]func(*http.Request) (int, any){"auth.revoke": tc.answer}}
+			revoked, err := f.client(t).Revoke()
+			assert.Equal(t, tc.want, revoked)
+			assert.Equal(t, tc.err, err != nil)
+			assert.Equal(t, []string{"auth.revoke "}, f.calls, "no test argument, so the revoke is real")
+		})
+	}
+}
+
 func TestErrors(t *testing.T) {
 	t.Parallel()
 	type want struct {

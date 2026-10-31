@@ -18,6 +18,9 @@ var ErrNotComment = errors.New("not a GitHub comment link")
 // The review comment of a link sits on another pull request than the link's number
 var ErrOtherPull = errors.New("the review comment sits on another pull request")
 
+// GitHub deletes only a pending review, so a submitted one keeps its place
+var ErrReviewStays = errors.New("a submitted review can't be deleted; retract it with text to replace its body")
+
 // Posts body as a reply in the review thread of the link or as a comment on the issue or pull request
 // A reply goes to the root of the review thread since GitHub takes no reply to a reply
 // Returns the link of the new comment
@@ -44,6 +47,39 @@ func (c Client) Post(l messageurl.Link, body string) (string, error) {
 		return "", fmt.Errorf("gh api %s: no link in the answer", path)
 	}
 	return posted.HTMLURL, nil
+}
+
+// Submits a review of the pull request on commit with event COMMENT or APPROVE
+// commit pins it so a push after the head check never takes it
+// Returns the link of the new review
+func (c Client) Review(repo string, number int, commit, event, body string) (ReviewInfo, error) {
+	path := base(repo) + "/pulls/" + strconv.Itoa(number) + "/reviews"
+	out, err := c.send("POST", path, map[string]string{"commit_id": commit, "event": event, "body": body})
+	if err != nil {
+		return ReviewInfo{}, err
+	}
+	var posted ReviewInfo
+	if err := json.Unmarshal(out, &posted); err != nil || posted.HTMLURL == "" {
+		return ReviewInfo{}, fmt.Errorf("gh api %s: no link in the answer", path)
+	}
+	return posted, nil
+}
+
+// The head commit of the pull request the link names
+func (c Client) Head(repo string, number int) (PullHead, error) {
+	var pull struct {
+		Head struct {
+			Sha string `json:"sha"`
+		} `json:"head"`
+	}
+	path := base(repo) + "/pulls/" + strconv.Itoa(number)
+	if err := c.Get(path, &pull); err != nil {
+		return PullHead{}, err
+	}
+	if pull.Head.Sha == "" {
+		return PullHead{}, fmt.Errorf("gh api %s: no head commit", path)
+	}
+	return PullHead{SHA: pull.Head.Sha}, nil
 }
 
 // The API path of the comment the link points at, or of the issue or pull request itself
@@ -76,6 +112,10 @@ func commentPath(l messageurl.Link) (string, error) {
 }
 
 func (c Client) Edit(l messageurl.Link, body string) error {
+	if l.Review != "" {
+		_, err := c.send("PUT", base(l.Repo)+"/pulls/"+strconv.Itoa(l.Number)+"/reviews/"+l.Review, map[string]string{"body": body})
+		return err
+	}
 	path, err := commentPath(l)
 	if err != nil {
 		return err
@@ -85,6 +125,9 @@ func (c Client) Edit(l messageurl.Link, body string) error {
 }
 
 func (c Client) Delete(l messageurl.Link) error {
+	if l.Review != "" {
+		return ErrReviewStays
+	}
 	path, err := commentPath(l)
 	if err != nil {
 		return err

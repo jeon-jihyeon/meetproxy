@@ -193,10 +193,62 @@ func TestClientPullOf(t *testing.T) {
 	}
 }
 
+func TestClientReview(t *testing.T) {
+	t.Parallel()
+	tcs := []struct {
+		name, answer string
+		want         string
+		err          bool
+	}{
+		{"returns the review's link", `{"id":71,"html_url":"` + prLink + `#pullrequestreview-71"}`, prLink + "#pullrequestreview-71", false},
+		{"fails on an answer with no link", `{"id":71}`, "", true},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c, f := client(map[string]string{"POST repos/o/r/pulls/3/reviews": tc.answer})
+			l, ok := messageurl.ParseLink(prLink)
+			require.True(t, ok)
+
+			got, err := c.Review(l.Repo, l.Number, "0123456789abcdef0123456789abcdef01234567", "APPROVE", "LGTM")
+
+			assert.Equal(t, tc.want, got.HTMLURL)
+			assert.Equal(t, tc.err, err != nil, err)
+			assert.Equal(t, []string{`{"body":"LGTM","commit_id":"0123456789abcdef0123456789abcdef01234567","event":"APPROVE"}`}, f.stdin)
+		})
+	}
+}
+
+func TestClientHead(t *testing.T) {
+	t.Parallel()
+	tcs := []struct {
+		name, answer string
+		want         string
+		err          bool
+	}{
+		{"returns the head commit", `{"head":{"sha":"abc"}}`, "abc", false},
+		{"fails on an empty sha", `{"head":{"sha":""}}`, "", true},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c, _ := client(map[string]string{"GET repos/o/r/pulls/3": tc.answer})
+			l, ok := messageurl.ParseLink(prLink)
+			require.True(t, ok)
+
+			got, err := c.Head(l.Repo, l.Number)
+
+			assert.Equal(t, tc.want, got.SHA)
+			assert.Equal(t, tc.err, err != nil, err)
+		})
+	}
+}
+
 func TestClientChange(t *testing.T) {
 	t.Parallel()
 	answers := map[string]string{
 		"PATCH repos/o/r/issues/comments/11":         "{}",
+		"PUT repos/o/r/pulls/3/reviews/71":           "{}",
 		"DELETE repos/o/r/pulls/comments/51":         "",
 		"POST repos/o/r/issues/3/reactions":          "{}",
 		"POST repos/o/r/pulls/comments/51/reactions": "{}",
@@ -223,6 +275,8 @@ func TestClientChange(t *testing.T) {
 		{"deletes a review comment", args{review + "51", del}, want{false, 1}},
 		{"refuses to edit the issue itself", args{isLink, edit}, want{true, 0}},
 		{"refuses to delete the pull request itself", args{prLink, del}, want{true, 0}},
+		{"edits a review's body", args{prLink + "#pullrequestreview-71", edit}, want{false, 1}},
+		{"refuses to delete a submitted review", args{prLink + "#pullrequestreview-71", del}, want{true, 0}},
 		{"reacts on the issue", args{isLink, react("eyes")}, want{false, 1}},
 		{"reacts on a review comment itself", args{review + "51", react("hooray")}, want{false, 1}},
 		{"refuses a reaction GitHub does not have", args{isLink, react("white_check_mark")}, want{true, 0}},

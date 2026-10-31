@@ -133,6 +133,15 @@ func (c Client) AuthTest() (Auth, error) {
 	return a, nil
 }
 
+// Revokes the token, true once Slack says it is revoked
+func (c Client) Revoke() (bool, error) {
+	var r struct {
+		Revoked bool `json:"revoked"`
+	}
+	_, err := c.call("auth.revoke", url.Values{}, &r)
+	return r.Revoked, err
+}
+
 // One message as the API answers it
 type Message struct {
 	Subtype    string          `json:"subtype"`
@@ -312,6 +321,8 @@ type Conversation struct {
 	IsIm bool   `json:"is_im"`
 	// The other member of a direct conversation
 	User string `json:"user"`
+	// Names a channel had before its renames
+	PreviousNames []string `json:"previous_names"`
 }
 
 func (c Client) ConversationInfo(id string) (Conversation, error) {

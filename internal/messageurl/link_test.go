@@ -21,6 +21,7 @@ func TestParseLink(t *testing.T) {
 		{"issue", "https://github.com/o/svc/issues/7", want{messageurl.Link{Source: "github", Repo: "o/svc", Number: 7}, true}},
 		{"review comment", "https://github.com/o/svc/pull/7#discussion_r51", want{messageurl.Link{Source: "github", Repo: "o/svc", Number: 7, Pull: true, Discussion: "51"}, true}},
 		{"issue comment", "https://github.com/o/svc/issues/7#issuecomment-51", want{messageurl.Link{Source: "github", Repo: "o/svc", Number: 7, Comment: "51"}, true}},
+		{"review", "https://github.com/o/svc/pull/7#pullrequestreview-51", want{messageurl.Link{Source: "github", Repo: "o/svc", Number: 7, Pull: true, Review: "51"}, true}},
 		{"Slack message", "https://acme.slack.com/archives/C1/p1893456100000001", want{messageurl.Link{Source: "slack", Channel: "C1", Ts: "1893456100.000001", ThreadTs: "1893456100.000001"}, true}},
 		{"Slack reply", "https://acme.slack.com/archives/C1/p1893456100000001?thread_ts=1893456000.000001", want{messageurl.Link{Source: "slack", Channel: "C1", Ts: "1893456100.000001", ThreadTs: "1893456000.000001"}, true}},
 		{"zero issue", "https://github.com/o/svc/issues/0", want{}},

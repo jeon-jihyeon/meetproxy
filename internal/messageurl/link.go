@@ -21,6 +21,7 @@ type Link struct {
 	Pull       bool
 	Discussion string
 	Comment    string
+	Review     string
 }
 
 var (
@@ -29,6 +30,7 @@ var (
 	githubItem   = regexp.MustCompile(`^https://github\.com/([\w.-]+/[\w.-]+)/(pull|issues)/(\d+)`)
 	discussion   = regexp.MustCompile(`#discussion_r(\d+)`)
 	issueComment = regexp.MustCompile(`#issuecomment-(\d+)`)
+	review       = regexp.MustCompile(`#pullrequestreview-(\d+)`)
 )
 
 func ParseLink(raw string) (Link, bool) {
@@ -52,6 +54,9 @@ func ParseLink(raw string) (Link, bool) {
 		}
 		if item := issueComment.FindStringSubmatch(raw); item != nil {
 			link.Comment = item[1]
+		}
+		if item := review.FindStringSubmatch(raw); item != nil {
+			link.Review = item[1]
 		}
 		return link, true
 	}
