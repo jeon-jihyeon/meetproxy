@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	appslack "github.com/jeon-jihyeon/meetproxy/app/slack"
 	"github.com/jeon-jihyeon/meetproxy/internal/fileio"
 	"github.com/jeon-jihyeon/meetproxy/internal/slackapi"
 )
@@ -25,20 +26,12 @@ import (
 // slackapi refuses any host but a loopback one so it never moves the token elsewhere
 const slackAPIEnv = "MEETPROXY_SLACK_API"
 
-// User scopes every Slack command needs
-var slackScopes = []string{
-	"search:read", "channels:history", "groups:history", "im:history", "mpim:history", "users:read", "chat:write",
-	"reactions:write", "channels:read", "groups:read", "im:read", "mpim:read",
-}
-
 const (
-	// A token is a few dozen characters so more on stdin is not a token
-	maxTokenBytes = 4096
 	// How long a looked up Slack user is trusted as it was
 	userCacheFor = 24 * time.Hour
 )
 
-var errNoToken = errors.New("no Slack token, run /meetproxy:slack to set one up")
+var errNoToken = appslack.ErrNoToken
 
 // Answers the user can give to the Slack token question
 var setupAnswers = []string{"now", "later", "keep"}
@@ -53,12 +46,6 @@ type slackMessage struct {
 	Text    string `json:"text"`
 	// Posted by an app rather than a person
 	Bot bool `json:"bot,omitempty"`
-}
-
-// What auth.test said of the token when it was stored or checked
-type slackAuth struct {
-	slackapi.Auth
-	At time.Time `json:"at"`
 }
 
 type slackSetup struct {
@@ -77,80 +64,40 @@ func authFile(data string) string  { return filepath.Join(slackDir(data), "auth.
 func usersFile(data string) string { return filepath.Join(slackDir(data), "users.json") }
 func setupFile(data string) string { return filepath.Join(slackDir(data), "setup.json") }
 
+func hasToken(data string) bool {
+	_, err := os.Stat(tokenFile(data))
+	return err == nil
+}
+
 func newSlack(token string) (slackapi.Client, error) {
 	return slackapi.New(os.Getenv(slackAPIEnv), token)
 }
 
 // The client of the stored token
 func (c cli) slack() (slackapi.Client, error) {
+	client, _, err := c.slackStored()
+	return client, err
+}
+
+// The client of the stored token and the token file it read
+func (c cli) slackStored() (slackapi.Client, []byte, error) {
 	b, err := os.ReadFile(tokenFile(c.data))
 	if errors.Is(err, os.ErrNotExist) {
-		return slackapi.Client{}, errNoToken
+		return slackapi.Client{}, nil, errNoToken
 	}
 	if err != nil {
-		return slackapi.Client{}, err
+		return slackapi.Client{}, nil, err
 	}
 	client, err := newSlack(strings.TrimSpace(string(b)))
 	if err != nil || c.deadline.IsZero() {
-		return client, err
+		return client, b, err
 	}
-	return client.Until(c.deadline), nil
+	return client.Until(c.deadline), b, nil
 }
 
-// Stores the token on stdin once Slack accepts it
-// The token is read from stdin so it never shows in a process list or a transcript
-func (c cli) slackToken() error {
-	b, err := io.ReadAll(io.LimitReader(c.in, maxTokenBytes+1))
-	if err != nil {
-		return err
-	}
-	token := strings.TrimSpace(string(b))
-	if len(b) > maxTokenBytes || !strings.HasPrefix(token, "xoxp-") || strings.ContainsAny(token, " \t\n") {
-		return fmt.Errorf("%w: stdin must hold one user token that starts with xoxp-", errUsage)
-	}
-	client, err := newSlack(token)
-	if err != nil {
-		return err
-	}
-	a, err := client.AuthTest()
-	if err != nil {
-		return err
-	}
-	if err := fileio.WriteAtomic(tokenFile(c.data), []byte(token+"\n"), 0o600); err != nil {
-		return err
-	}
-	if err := fileio.WriteJSON(authFile(c.data), slackAuth{a, c.now.UTC()}); err != nil {
-		return err
-	}
-	return writeJSON(c.out, map[string]any{"user": a.User, "team": a.Team, "host": a.Host, "missing": missingScopes(a.Scopes)})
-}
-
-// Checks the token with Slack and keeps what it says
-func (c cli) slackWhoami() error {
-	a, err := c.slackAuth(true)
-	if err != nil {
-		return err
-	}
-	return writeJSON(c.out, map[string]string{"user": a.User, "team": a.Team, "host": a.Host})
-}
-
-// What the token acts for, asked of Slack when live or when nothing is kept
 func (c cli) slackAuth(live bool) (slackapi.Auth, error) {
-	var kept slackAuth
-	if !live {
-		if found, err := fileio.ReadJSON(authFile(c.data), &kept); found && err == nil && kept.User != "" {
-			return kept.Auth, nil
-		}
-	}
-	client, err := c.slack()
-	if err != nil {
-		return slackapi.Auth{}, err
-	}
-	a, err := client.AuthTest()
-	if err != nil {
-		return slackapi.Auth{}, err
-	}
-	return a, fileio.WriteJSON(authFile(c.data), slackAuth{a, c.now.UTC()})
+	a, err := c.slackAccount().Auth(live)
+	return slackapi.Auth{User: a.User, Team: a.Team, Host: a.Host, Scopes: a.Scopes}, err
 }
 
 func (c cli) slackMentions(after string) error {
@@ -364,7 +311,7 @@ func (c cli) slackSession() (slackapi.Client, slackapi.Auth, error) {
 func (c cli) slackManifest() error {
 	manifest := map[string]any{
 		"display_information": map[string]string{"name": "meetproxy", "description": "Reads mentions and replies in threads for the user through meetproxy"},
-		"oauth_config":        map[string]any{"scopes": map[string][]string{"user": slices.Clone(slackScopes)}},
+		"oauth_config":        map[string]any{"scopes": map[string][]string{"user": appslack.RequiredScopes()}},
 		"settings":            map[string]bool{"org_deploy_enabled": false, "socket_mode_enabled": false, "token_rotation_enabled": false},
 	}
 	b, err := json.Marshal(manifest)
@@ -464,14 +411,4 @@ func writeJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	return enc.Encode(v)
-}
-
-func missingScopes(granted []string) []string {
-	missing := []string{}
-	for _, s := range slackScopes {
-		if !slices.Contains(granted, s) {
-			missing = append(missing, s)
-		}
-	}
-	return missing
 }

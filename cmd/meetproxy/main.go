@@ -91,6 +91,7 @@ var families = []family{
 			name: "slack token", help: "store the user token on stdin once Slack accepts it, print user, team, host and missing scopes",
 			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackToken()) },
 		},
+		{name: "slack logout", help: "revoke and remove the stored token, print one fixed line", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackLogout()) }},
 		{name: "slack whoami", help: "check the token with Slack", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackWhoami()) }},
 		{
 			name: "slack mentions", flags: []string{"after"}, help: "print messages that mention the user after --after oldest first",
