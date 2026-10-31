@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jeon-jihyeon/meetproxy/internal/signinbrowser"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -221,22 +222,35 @@ func TestSigninWait(t *testing.T) {
 	}{
 		{
 			"the callback then a page past loopback", 0, "",
-			[]fakeAnswer{{out: "false " + printedLink}, {out: idp}, {out: "true " + code}, {out: "false https://acme.example.com/ok"}, {}},
+			[]fakeAnswer{{out: "false " + printedLink}, {out: idp}, {out: "true " + code}, {out: "false https://acme.example.com/ok"}, {out: signinGone}},
 			"closed", false, true,
 		},
-		{"the callback page loaded", 0, "", []fakeAnswer{{out: idp}, {out: "false " + code}, {out: "1 " + code}, {}}, "closed", false, true},
+		{
+			"the callback then a page past loopback the close left open", 0, "",
+			[]fakeAnswer{{out: "false " + printedLink}, {out: idp}, {out: "true " + code}, {out: "false https://acme.example.com/ok"}, {out: "open"}},
+			"not closed", false, true,
+		},
+		{
+			"the callback loaded in a tracked window the close left open", 0, "",
+			[]fakeAnswer{{out: "false " + printedLink}, {out: idp}, {out: "true " + code}, {out: "false " + code}, {out: "open"}},
+			"not closed", true, true,
+		},
+		{"the callback page loaded", 0, "", []fakeAnswer{{out: idp}, {out: "false " + code}, {out: "1 " + code}, {out: signinGone}}, "closed", false, true},
+		{"a callback window the close left open", 0, "", []fakeAnswer{{out: idp}, {out: "false " + code}, {out: "1 " + code}, {out: "open"}}, "not closed", true, true},
+		{"a close script that failed", 0, "", []fakeAnswer{{out: idp}, {out: "false " + code}, {out: "1 " + code}, {err: errBrowserScript}}, "not closed", true, true},
 		{"a local server of the user after a relaunch", 0, signinAway, []fakeAnswer{{out: "true http://localhost:3000/"}, {out: "false http://localhost:3000/"}, {out: "1 http://localhost:3000/"}}, "closed", false, false},
 		{"a page of the user then a local server of the user", 0, "", []fakeAnswer{{out: "false https://mail.example.com/"}, {out: "false http://localhost:5173/"}, {out: "1 http://localhost:5173/"}}, "closed", false, false},
 		{"a saved step then a page of the user then a local server of the user", 0, signinAway, []fakeAnswer{{out: "false https://mail.example.com/"}, {out: "false http://localhost:5173/"}, {out: "1 http://localhost:5173/"}}, "closed", false, false},
 		{"a failed read before a callback saved by an earlier run", 0, signinBack, []fakeAnswer{{err: errBrowserScript}, {out: "false https://acme.example.com/home"}, {out: "1 https://acme.example.com/home"}}, "closed", false, false},
-		{"a step saved by an earlier run", 0, signinAway, []fakeAnswer{{out: "false " + code}, {out: "1 " + code}, {}}, "closed", false, true},
+		{"a step saved by an earlier run", 0, signinAway, []fakeAnswer{{out: "false " + code}, {out: "1 " + code}, {out: signinGone}}, "closed", false, true},
 		{"a callback saved by an earlier run, then a page of the user", 0, signinBack, []fakeAnswer{{out: "false https://acme.example.com/home"}, {out: "1 https://acme.example.com/home"}}, "closed", false, false},
 		{"a callback saved by an earlier run, then a window of several tabs", 0, signinBack, []fakeAnswer{{out: "false " + code}, {out: "3 " + code}}, "closed", false, false},
 		{"the window gone", 0, "", []fakeAnswer{{out: signinGone}}, "closed", false, false},
 		{"still at the identity provider", 0, "", []fakeAnswer{{out: idp}}, "waiting", true, false},
 		{"still on the printed link", 0, "", []fakeAnswer{{out: "false " + printedLink}}, "waiting", true, false},
 		{"reads that fail", 0, "", []fakeAnswer{{err: errBrowserScript}}, "waiting", true, false},
-		{"the give-up time on the printed link", signinGiveUp, "", []fakeAnswer{{out: "1 " + printedLink}, {}}, "timed out", false, true},
+		{"the give-up time on the printed link", signinGiveUp, "", []fakeAnswer{{out: "1 " + printedLink}, {out: signinGone}}, "timed out", false, true},
+		{"the give-up close left open", signinGiveUp, "", []fakeAnswer{{out: "1 " + printedLink}, {out: "open"}}, "not closed", true, true},
 		{"the give-up time at the identity provider leaves the window", signinGiveUp, "", []fakeAnswer{{out: "1 https://idp.example.com/login"}}, "timed out", false, false},
 		{"the give-up time during the run", signinGiveUp - 10*time.Second, "", []fakeAnswer{{out: idp}}, "timed out", false, false},
 	}
@@ -260,10 +274,46 @@ func TestSigninWait(t *testing.T) {
 			for _, s := range b.scripts {
 				assert.Contains(t, s, `window id "1234"`)
 				assert.NotContains(t, s, "http")
-				closed = closed || strings.Contains(s, "close window")
+				if strings.Contains(s, "close window") {
+					closed = true
+					assert.NotContains(t, s, "URL", "the close asks only whether the window still exists")
+				}
 			}
 			assert.Equal(t, tt.closes, closed)
 			assertNoSecret(t, c.data, &out, err, "c0de-v4lue", "st4te", "0ne-t1me-s3cret", "idp.example.com")
+		})
+	}
+}
+
+// A record signin wait keeps after a close that left the window open lets hook end close that window
+func TestSigninWait_NotClosed(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	code := "http://127.0.0.1:38999/callback?code=c0de-v4lue&state=st4te"
+	idp := "false https://idp.example.com/login"
+
+	tests := []struct {
+		name    string
+		age     time.Duration
+		answers []fakeAnswer
+		// What the window shows when the session ends
+		left string
+	}{
+		{"a tracked callback page", 0, []fakeAnswer{{out: "false " + printedLink}, {out: idp}, {out: "true " + code}, {out: "false " + code}, {out: "open"}}, "1 " + code},
+		{"a callback page", 0, []fakeAnswer{{out: idp}, {out: "false " + code}, {out: "1 " + code}, {out: "open"}}, "1 " + code},
+		{"the give-up time on the printed link", signinGiveUp, []fakeAnswer{{out: "1 " + printedLink}, {out: "open"}}, "1 " + printedLink},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			b := &fakeBrowser{answers: tt.answers, at: now}
+			var out bytes.Buffer
+			c := signinCli(t, b, &out)
+			require.NoError(t, writeSignin(c.data, "s1", signinRecord{Browser: "Google Chrome", Window: "1234", At: now.Add(-tt.age), Origin: loopbackOrigin(printedLink)}))
+			_, err := c.exec("signin", []string{"wait", "--data", c.data})
+			require.NoError(t, err)
+			require.Equal(t, signinNotClosed+"\n", out.String())
+
 		})
 	}
 }
@@ -373,7 +423,7 @@ func TestNewestLoopbackLink(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, newestLoopbackLink([]byte(tt.text)))
+			assert.Equal(t, tt.want, signinbrowser.LinkAfter(writeLog(t, tt.text), 0))
 		})
 	}
 }
@@ -383,8 +433,8 @@ func TestOsascriptCommand(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("no osascript")
 	}
-	script := openScript("Google Chrome", printedLink)
-	cmd := osascriptCommand(context.Background(), script)
+	script := "return 1"
+	cmd := signinbrowser.Command(context.Background(), script)
 	assert.Equal(t, []string{"/usr/bin/osascript"}, cmd.Args)
 	assert.NotZero(t, cmd.WaitDelay)
 	b, err := io.ReadAll(cmd.Stdin)

@@ -138,7 +138,7 @@ var families = []family{
 		},
 		{
 			name: "signin wait", flags: []string{"session"}, session: true,
-			help: "close the window signin open opened once the sign-in left it, print closed, timed out or waiting",
+			help: "close the window signin open opened once the sign-in left it, print closed, timed out, not closed or waiting",
 			run:  func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.signinWait()) },
 		},
 	}},

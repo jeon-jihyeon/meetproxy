@@ -40,6 +40,7 @@ linters:
           list-mode: strict
           files:
             - "**/cmd/meetproxy/slack_account.go"
+            - "**/cmd/meetproxy/signin.go"
             - "!$test"
           allow:
             - $gostd
