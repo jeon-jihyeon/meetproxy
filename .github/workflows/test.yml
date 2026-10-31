@@ -37,7 +37,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: "1.26.10"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -47,6 +47,11 @@ jobs:
       - name: go vet
         if: runner.os == 'Linux'
         run: go vet ./...
+      - name: Release artifact verifier tests
+        if: runner.os == 'Linux'
+        run: python3 -m unittest discover -s .github/scripts -p 'test_verify_release.py'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         if: runner.os == 'Linux'
         with:

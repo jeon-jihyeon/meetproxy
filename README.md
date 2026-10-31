@@ -35,8 +35,8 @@ No API key needed. All the work happens in your own Claude Code sessions.
 
 - Claude Code 2.1.287 or later
 - macOS or Linux, amd64 or arm64
-- `curl`, `tar`, and `shasum` or `sha256sum`. If Go is installed, the launcher can build from source instead
-- `gh`, logged in with the default scopes
+- `tar`, and `shasum` or `sha256sum`
+- `gh`, logged in with the default scopes and able to read this repository. The launcher downloads the binary through `gh`
 - For Slack: the [official Slack plugin](https://github.com/anthropics/claude-plugins-official). A personal token is optional
 
 ## How it works
@@ -80,7 +80,7 @@ rm -f ~/.claude/plugins/store/meetproxy_meetproxy-*.json
 ## Troubleshooting
 
 - **"meetproxy was updated, run /reload-plugins".** Do exactly that, or restart the session.
-- **The binary didn't download.** The launcher prints the reason. Behind a proxy, grab `meetproxy_<os>_<arch>.tar.gz` from [Releases](https://github.com/jeon-jihyeon/meetproxy/releases), [verify it](#verify-a-release), and extract it to `~/.meetproxy/bin/v<version>/`.
+- **The binary didn't download.** The launcher prints the reason. If it says to run `gh auth login`, do that and start a new session. Behind a proxy, grab `meetproxy_<os>_<arch>.tar.gz` from [Releases](https://github.com/jeon-jihyeon/meetproxy/releases), [verify it](#verify-a-release), and extract it to `~/.meetproxy/bin/v<version>/`.
 
 ## Verify a release
 

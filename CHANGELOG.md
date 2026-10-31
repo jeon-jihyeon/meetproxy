@@ -2,17 +2,18 @@
 
 All notable changes to meetproxy are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.18] - 2026-11-01
 
-Protocol 15. Run `/reload-plugins` in every open session after upgrading, or restart it.
+Protocol 16. Run `/reload-plugins` in every open session after upgrading, or restart it.
 
 ### Added
 
-- `meetproxy signin open` and `signin wait` open the sign-in link an app prints in a new browser window without the model ever seeing it, then close that window once the callback is done.
+- Computer use reads and drives web pages in your own browser through its accessibility tree, with no profile or debugging setup.
 
 ### Changed
 
 - `slack_token` open an OS dialog on the user's screen for the token.
+- The launcher downloads the release from github.com through your `gh` login, even when `GH_HOST` names another host. Without one it says to run `gh auth login` and no longer tries curl or `go install`.
 
 ### Security
 
@@ -130,6 +131,7 @@ Protocol 6.
 
 - Launcher that runs the binary from a cache, a checksum verified release or `go install`
 
+[0.1.18]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.16...v0.1.18
 [0.1.16]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/jeon-jihyeon/meetproxy/compare/v0.1.13...v0.1.14

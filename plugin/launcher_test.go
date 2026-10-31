@@ -19,7 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Tools the launcher uses before the PATH fallback, without curl and go
+// Tools the launcher uses before the PATH fallback, without gh
 var launcherTools = []string{"awk", "cat", "chmod", "cut", "dirname", "find", "grep", "head", "ls", "mkdir", "mktemp", "mv", "rm", "sed", "tar", "tr", "uname"}
 
 // A launcher copy outside the source tree with a version no release has
@@ -69,22 +69,54 @@ func releaseArchive(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-// A release fetched from GitHub runs only when its sha256 matches checksums.txt
-// A fake curl serves the release files from a directory by the last part of the URL
+// A fake gh that logs every call and serves release files from RELEASE only with READABLE set
+// With GH_HOST set it reads that host unless --repo names github.com, as gh does
+// Its auth token prints ghToken only with LOGGED_IN set and its auth status always fails, as with a second broken account
+// A fake curl and go only log, so a call of either shows in the log
+const (
+	ghToken = "gho_t0ken"
+	fakeGh  = "#!/bin/sh\necho \"gh $*\" >> \"$CALLS\"\n" +
+		"[ \"$1 $2\" = \"auth token\" ] && { [ -n \"$LOGGED_IN\" ] && echo " + ghToken + "; exit; }\n" +
+		"[ \"$1 $2\" = \"release download\" ] && [ -n \"$READABLE\" ] || exit 1\n" +
+		"dir= pats= repo=\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --dir) dir=$2; shift ;;\n    --pattern) pats=\"$pats $2\"; shift ;;\n    --repo) repo=$2; shift ;;\n  esac\n  shift\ndone\n" +
+		"[ -n \"$GH_HOST\" ] && [ \"${repo%%/*}\" != github.com ] && exit 1\n" +
+		"for p in $pats; do cat \"$RELEASE/$p\" > \"$dir/$p\" || exit 1; done\n"
+	fakeLogger = "#!/bin/sh\necho \"$0 $*\" >> \"$CALLS\"\nexit 1\n"
+)
+
+// A release fetched from GitHub through the active gh login runs only when its sha256 matches checksums.txt
+// A failed download says to log in only when gh has no token
 func TestLauncher_ReleaseChecksum(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the launcher is a POSIX shell script")
 	}
 	t.Parallel()
 	archive := "meetproxy_" + runtime.GOOS + "_" + runtime.GOARCH + ".tar.gz"
+	download := "gh release download v9.9.9 --repo github.com/jeon-jihyeon/meetproxy --pattern " + archive + " --pattern checksums.txt --dir "
+	token := "gh auth token --hostname github.com"
+	login := "meetproxy: run gh auth login, then run again"
+	noRead := "through gh. Check that gh auth login can read jeon-jihyeon/meetproxy, then run again"
 	tcs := []struct {
-		name   string
-		match  bool
-		code   int
-		stdout string
+		name     string
+		match    bool
+		gh       bool
+		logged   bool
+		readable bool
+		code     int
+		stdout   string
+		// The calls logged in order, a download matched by its start
+		calls []string
+		// A fixed line stderr holds
+		stderr string
+		// The GH_HOST of the user's shell
+		host string
 	}{
-		{"a matching checksum runs the fetched binary", true, 0, "release open x"},
-		{"a mismatch exits before anything runs", false, 1, ""},
+		{"a matching checksum runs the fetched binary", true, true, true, true, 0, "release open x", []string{download}, "", ""},
+		{"a GH_HOST of another host still fetches from github.com", true, true, true, true, 0, "release open x", []string{download}, "", "ghe.example.com"},
+		{"a mismatch exits before anything runs", false, true, true, true, 1, "", []string{download}, "", ""},
+		{"a login that can't read the release says to check its access", true, true, true, false, 1, "", []string{download, token}, noRead, ""},
+		{"no gh login says to log in", true, true, false, false, 1, "", []string{download, token}, login, ""},
+		{"no gh fetches nothing", true, false, false, false, 1, "", nil, login, ""},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -109,11 +141,28 @@ func TestLauncher_ReleaseChecksum(t *testing.T) {
 				want = strings.Repeat("0", len(want))
 			}
 			require.NoError(t, os.WriteFile(filepath.Join(release, "checksums.txt"), []byte(want+"  "+archive+"\n"), 0o600))
-			curl := "#!/bin/sh\nurl=$2\ncat \"$RELEASE/${url##*/}\" > \"$4\"\n"
-			require.NoError(t, os.WriteFile(filepath.Join(tools, "curl"), []byte(curl), 0o755))
+			if tc.gh {
+				require.NoError(t, os.WriteFile(filepath.Join(tools, "gh"), []byte(fakeGh), 0o755))
+			}
+			for _, name := range []string{"curl", "go"} {
+				require.NoError(t, os.WriteFile(filepath.Join(tools, name), []byte(fakeLogger), 0o755))
+			}
+			calls := filepath.Join(t.TempDir(), "calls")
+			env := []string{"HOME=" + home, "PATH=" + tools, "RELEASE=" + release, "CALLS=" + calls}
+			if tc.logged {
+				env = append(env, "LOGGED_IN=1")
+			}
+			if tc.readable {
+				env = append(env, "READABLE=1")
+			}
+			if tc.host != "" {
+				env = append(env, "GH_HOST="+tc.host)
+			}
 
 			cmd := exec.Command(script, "open", "x")
-			cmd.Env = []string{"HOME=" + home, "PATH=" + tools, "RELEASE=" + release}
+			cmd.Env = env
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
 			out, err := cmd.Output()
 
 			code := 0
@@ -124,7 +173,23 @@ func TestLauncher_ReleaseChecksum(t *testing.T) {
 			assert.Equal(t, tc.code, code)
 			assert.Equal(t, tc.stdout, strings.TrimSpace(string(out)))
 			_, statErr := os.Stat(filepath.Join(home, ".meetproxy", "bin", "v9.9.9", "meetproxy"))
-			assert.Equal(t, tc.match, statErr == nil, "only a verified binary is kept")
+			assert.Equal(t, tc.match && tc.readable, statErr == nil, "only a verified binary is kept")
+			logged, _ := os.ReadFile(calls)
+			lines := strings.Split(strings.TrimSpace(string(logged)), "\n")
+			if len(logged) == 0 {
+				lines = nil
+			}
+			require.Len(t, lines, len(tc.calls), string(logged))
+			for i, want := range tc.calls {
+				assert.True(t, strings.HasPrefix(lines[i], want), lines[i])
+			}
+			if tc.stderr != "" {
+				assert.Contains(t, stderr.String(), tc.stderr)
+			}
+			if tc.stderr != login {
+				assert.NotContains(t, stderr.String(), login)
+			}
+			assert.NotContains(t, string(out)+stderr.String(), ghToken, "the gh token goes to no output")
 		})
 	}
 }
