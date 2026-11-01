@@ -85,7 +85,7 @@ func TestRun_GitHub(t *testing.T) {
 		{"whoami asks gh", step{"github", []string{"whoami"}, ""}, githubWant{0, `{"user":"me"}`, false}},
 		{"read joins the issue and its comments", step{"github", []string{"read", issue, "--limit", "2"}, ""}, githubWant{0, `{"text":"kai: Broken\nit fails\nkai: @me why"}`, false}},
 		{"usage error for a reaction GitHub does not have", step{"github", []string{"react", issue, "--react", "white_check_mark"}, ""}, githubWant{exitUsage, "", true}},
-		{"usage error for a Slack link", step{"github", []string{"read", "https://w.slack.com/archives/C1/p1893456100000001"}, ""}, githubWant{exitUsage, "", true}},
+		{"usage error for a Slack link", step{"github", []string{"read", "https://acme-alt.slack.com/archives/C1/p1893456100000001"}, ""}, githubWant{exitUsage, "", true}},
 		{"usage error for a post without text", step{"github", []string{"post", mention}, " "}, githubWant{exitUsage, "", true}},
 	}
 	for _, s := range steps {

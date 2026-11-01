@@ -178,7 +178,7 @@ func TestSearchMentions(t *testing.T) {
 	pages := map[string][]map[string]any{
 		"1": {
 			{"ts": "1893456000.000001", "user": "U2", "text": "old"},
-			{"ts": "1893456100.000001", "user": "U2", "text": "a", "permalink": "https://w.slack.com/archives/C1/p1893456100000001", "channel": map[string]any{"id": "C1"}},
+			{"ts": "1893456100.000001", "user": "U2", "text": "a", "permalink": "https://acme-alt.slack.com/archives/C1/p1893456100000001", "channel": map[string]any{"id": "C1"}},
 		},
 		"2": {
 			{"ts": "1893456200.000001", "user": "", "bot_id": "B1", "text": "bot"},
