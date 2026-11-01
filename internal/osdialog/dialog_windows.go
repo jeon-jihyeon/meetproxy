@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package osdialog
 
 import "os/exec"
 
@@ -9,6 +9,6 @@ func newGroup(*exec.Cmd) {}
 
 func ownGroup(*exec.Cmd) {}
 
-func killGroup(shownDialog, string) {}
+func killGroup(Shown, string) {}
 
 func startedAt(int) string { return "" }

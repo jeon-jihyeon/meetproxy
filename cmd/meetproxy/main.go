@@ -6,9 +6,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/jeon-jihyeon/meetproxy/internal/osdialog"
 )
 
 // Set by ldflags in release builds
@@ -28,6 +32,43 @@ const (
 
 // Wrapped by any error that a corrected command line fixes so it exits with exitUsage
 var errUsage = errors.New("usage error")
+
+const osascriptPath = "/usr/bin/osascript"
+
+type dialogProgram interface {
+	Input(string, string) (string, bool, error)
+	Show(string, string) (osdialog.Shown, error)
+	Kill(osdialog.Shown)
+}
+
+type dialogAdapter struct{ dialogProgram }
+
+func (d dialogAdapter) Show(tool, text string) (shownDialog, error) {
+	shown, err := d.dialogProgram.Show(tool, text)
+	return shownDialog{Pid: shown.Pid, Started: shown.Started}, err
+}
+
+func (d dialogAdapter) Kill(shown shownDialog) {
+	d.dialogProgram.Kill(osdialog.Shown{Pid: shown.Pid, Started: shown.Started})
+}
+
+var (
+	noDialogs osDialog = dialogAdapter{osdialog.Unavailable{}}
+)
+
+func systemDialog() osDialog {
+	switch runtime.GOOS {
+	case "darwin":
+		if _, err := os.Stat(osascriptPath); err == nil {
+			return dialogAdapter{osdialog.NewOsa(osascriptPath, 0)}
+		}
+	case "linux":
+		if path, err := exec.LookPath("zenity"); err == nil {
+			return dialogAdapter{osdialog.NewZenity(path, os.Environ(), 0)}
+		}
+	}
+	return noDialogs
+}
 
 func main() {
 	if len(os.Args) < 2 {

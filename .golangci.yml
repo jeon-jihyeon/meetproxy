@@ -79,6 +79,7 @@ linters:
             - "**/internal/slackapi/**"
             - "**/internal/slackmcp/**"
             - "**/internal/signinbrowser/**"
+            - "**/internal/osdialog/**"
             - "!$test"
           allow:
             - $gostd

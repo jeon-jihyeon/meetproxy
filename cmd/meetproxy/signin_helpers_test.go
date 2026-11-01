@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 
+	"strings"
+
 	appsignin "github.com/jeon-jihyeon/meetproxy/app/signin"
 	model "github.com/jeon-jihyeon/meetproxy/internal/signin"
 	"github.com/jeon-jihyeon/meetproxy/internal/signinbrowser"
@@ -55,6 +57,17 @@ func tabsScript(app, window string) string {
 end if
 return %[3]s
 `, appleString(app), appleString(window), appleString(signinGone))
+}
+
+// Control characters become spaces so the literal stays on one line
+func appleString(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r < ' ' || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
 }
 
 func closeScript(app, window string) string {

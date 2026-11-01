@@ -1,4 +1,4 @@
-package main
+package osdialog
 
 import (
 	"bytes"
@@ -6,16 +6,13 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
 	"os/exec"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	osascriptPath = "/usr/bin/osascript"
 	// An input dialog gives up after this
 	inputGivesUp = 60 * time.Second
 	// A passcode dialog gives up after this so a kill that never comes still closes it
@@ -29,7 +26,6 @@ const (
 	gaveUpMark = "gave up"
 )
 
-// How an input dialog ended
 type dialogEnd int
 
 const (
@@ -39,27 +35,10 @@ const (
 	dialogBroken                  // the program failed or answered what no dialog answers
 )
 
-var errDialogFailed = errors.New("the dialog program failed")
-
-// The dialog program of this computer, noDialog when it has none
-// Only main calls it so a test never opens a real dialog
-func systemDialog() osDialog {
-	switch runtime.GOOS {
-	case "darwin":
-		if _, err := os.Stat(osascriptPath); err == nil {
-			return osaDialog{path: osascriptPath}
-		}
-	case "linux":
-		if p, err := exec.LookPath("zenity"); err == nil {
-			return zenityDialog{path: p, env: dialogEnv(os.Environ())}
-		}
-	}
-	return noDialog{}
-}
+var errFailed = errors.New("the dialog program failed")
 
 func dialogTitle(tool string) string { return "meetproxy " + tool }
 
-// What one run of an input dialog program gave
 type dialogRun struct {
 	stdout []byte
 	stderr []byte
@@ -68,8 +47,7 @@ type dialogRun struct {
 	timedOut bool
 }
 
-// Runs a dialog program to its end with the script on stdin
-// 1. Nothing secret goes in args, only the program and fixed flags
+// 1. Args hold only the program and fixed flags so no secret reaches the process list
 // 2. Its own process group is killed at the limit so no child it started outlives it
 func runDialog(path string, args, env []string, stdin string, limit time.Duration) (dialogRun, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
@@ -89,30 +67,30 @@ func runDialog(path string, args, env []string, stdin string, limit time.Duratio
 	case errors.As(err, &exit):
 		r.code = exit.ExitCode()
 	default:
-		return dialogRun{}, errDialogFailed
+		return dialogRun{}, errFailed
 	}
 	return r, nil
 }
 
 // Starts a dialog program that outlives this process
 // The text goes on stdin and the pipe closes at once, so neither argv nor an open pipe holds it
-func startDialog(path string, args, env []string, stdin string) (shownDialog, error) {
+func startDialog(path string, args, env []string, stdin string) (Shown, error) {
 	cmd := exec.Command(path, args...)
 	cmd.Env = env
 	newGroup(cmd)
 	w, err := cmd.StdinPipe()
 	if err != nil {
-		return shownDialog{}, errDialogFailed
+		return Shown{}, errFailed
 	}
 	if err := cmd.Start(); err != nil {
-		return shownDialog{}, errDialogFailed
+		return Shown{}, errFailed
 	}
-	shown := shownDialog{Pid: cmd.Process.Pid, Started: startedAt(cmd.Process.Pid)}
+	shown := Shown{Pid: cmd.Process.Pid, Started: startedAt(cmd.Process.Pid)}
 	_, werr := io.WriteString(w, stdin)
 	if err := errors.Join(werr, w.Close()); err != nil {
 		killGroup(shown, path)
 		_ = cmd.Wait()
-		return shownDialog{}, errDialogFailed
+		return Shown{}, errFailed
 	}
 	// Reaps it when it ends while this process still runs
 	go func() { _ = cmd.Wait() }()
@@ -130,16 +108,19 @@ func dialogEnv(env []string) []string {
 	return out
 }
 
-// osascript with every script on stdin
 // The scripts hold no tell block so they send no Apple event and ask for no Automation consent
-// Each starts with a bare activate that brings osascript itself to the front, so a paste goes into the dialog and not into the window behind it
-type osaDialog struct {
+// A bare activate brings osascript itself to the front so a paste never enters the window behind it
+type Osa struct {
 	path string
 	// Zero kills an input run dialogGrace after it gave up
 	limit time.Duration
 }
 
-func (d osaDialog) Input(tool, prompt string) (string, bool, error) {
+func NewOsa(path string, limit time.Duration) Osa {
+	return Osa{path: path, limit: limit}
+}
+
+func (d Osa) Input(tool, prompt string) (string, bool, error) {
 	script := osaActivate + "set r to display dialog " + appleString(prompt) + " with title " + appleString(dialogTitle(tool)) +
 		` default answer "" with hidden answer giving up after ` + seconds(inputGivesUp) + "\n" +
 		`if gave up of r then return "` + gaveUpMark + `"` + "\n" +
@@ -151,18 +132,18 @@ func (d osaDialog) Input(tool, prompt string) (string, bool, error) {
 	return dialogAnswer(parseOsaInput(r))
 }
 
-func (d osaDialog) Show(tool, text string) (shownDialog, error) {
+func (d Osa) Show(tool, text string) (Shown, error) {
 	script := osaActivate + "display dialog " + appleString(text) + " with title " + appleString(dialogTitle(tool)) +
 		` buttons {"OK"} default button "OK" giving up after ` + seconds(showGivesUp) + "\n"
 	return startDialog(d.path, nil, nil, script)
 }
 
-func (d osaDialog) Kill(shown shownDialog) { killGroup(shown, d.path) }
+func (d Osa) Kill(shown Shown) { killGroup(shown, d.path) }
 
 const osaActivate = "activate\n"
 
-// 1. osascript prints the returned text and one newline, and only that newline is cut so spaces of a secret stay
-// 2. Cancel is error -128 on stderr with exit 1, whatever position the line names
+// 1. Only osascript's final newline is cut so spaces of a secret stay
+// 2. Cancel is error -128 on stderr with exit 1 regardless of the position the line names
 func parseOsaInput(r dialogRun) (string, dialogEnd) {
 	switch {
 	case r.timedOut:
@@ -181,17 +162,21 @@ func parseOsaInput(r dialogRun) (string, dialogEnd) {
 	return "", dialogBroken
 }
 
-// zenity, judged by its exit code and by this process's clock
-// zenity 3 answers its own timeout with the Cancel code, so no --timeout is given and the limit runs on this clock
-type zenityDialog struct {
+// zenity 3 answers its own timeout with the Cancel code
+// No --timeout is given so this process's clock owns the limit
+type Zenity struct {
 	path string
 	env  []string
 	// Zero is inputGivesUp
 	limit time.Duration
 }
 
-// zenity's password dialog takes no prompt, so only the title names what it asks for
-func (d zenityDialog) Input(tool, _ string) (string, bool, error) {
+func NewZenity(path string, env []string, limit time.Duration) Zenity {
+	return Zenity{path: path, env: dialogEnv(env), limit: limit}
+}
+
+// zenity's password dialog takes no prompt so only the title names what it asks for
+func (d Zenity) Input(tool, _ string) (string, bool, error) {
 	r, err := runDialog(d.path, []string{"--password", "--modal", "--title=" + dialogTitle(tool)}, d.env, "", cmp.Or(d.limit, inputGivesUp))
 	if err != nil {
 		return "", false, err
@@ -199,15 +184,15 @@ func (d zenityDialog) Input(tool, _ string) (string, bool, error) {
 	return dialogAnswer(parseZenityInput(r))
 }
 
-// --text-info reads the text from stdin, unlike --info which takes it only in argv
-func (d zenityDialog) Show(tool, text string) (shownDialog, error) {
+// --text-info keeps the text on stdin while --info exposes it in argv
+func (d Zenity) Show(tool, text string) (Shown, error) {
 	args := []string{"--text-info", "--title=" + dialogTitle(tool), "--timeout=" + seconds(showGivesUp)}
 	return startDialog(d.path, args, d.env, text)
 }
 
-func (d zenityDialog) Kill(shown shownDialog) { killGroup(shown, d.path) }
+func (d Zenity) Kill(shown Shown) { killGroup(shown, d.path) }
 
-// stdout counts only on exit 0, since a timed out entry still prints what was typed
+// stdout counts only on exit 0 since a timed out entry still prints what was typed
 func parseZenityInput(r dialogRun) (string, dialogEnd) {
 	switch {
 	case r.timedOut:
@@ -225,12 +210,11 @@ func dialogAnswer(answer string, end dialogEnd) (string, bool, error) {
 	case dialogOK:
 		return answer, true, nil
 	case dialogBroken:
-		return "", false, errDialogFailed
+		return "", false, errFailed
 	}
 	return "", false, nil
 }
 
-// An AppleScript string literal
 // Control characters become spaces so the literal stays on one line
 func appleString(s string) string {
 	s = strings.Map(func(r rune) rune {

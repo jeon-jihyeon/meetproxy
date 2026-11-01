@@ -1,6 +1,6 @@
 //go:build !windows
 
-package main
+package osdialog
 
 import (
 	"os/exec"
@@ -26,13 +26,13 @@ func ownGroup(cmd *exec.Cmd) {
 // 1. pid 0 and 1 would name this process's own group or init, so they are never signalled
 // 2. A pid whose dialog already ended may name another group by now, so the group is killed only while it still leads it running program
 // 3. Other dialogs run the same program, so the start time must match too
-func killGroup(d shownDialog, program string) {
+func killGroup(d Shown, program string) {
 	if d.Pid > 1 && d.Started != "" && leadsDialog(d, program) {
 		_ = syscall.Kill(-d.Pid, syscall.SIGKILL)
 	}
 }
 
-func leadsDialog(d shownDialog, program string) bool {
+func leadsDialog(d Shown, program string) bool {
 	if pgid, err := syscall.Getpgid(d.Pid); err != nil || pgid != d.Pid || startedAt(d.Pid) != d.Started {
 		return false
 	}
