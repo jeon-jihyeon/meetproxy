@@ -20,6 +20,7 @@ ARCHIVES = [f"meetproxy_{system}_{arch}.tar.gz" for system, arch in TARGETS]
 SUBJECTS = [*ARCHIVES, "checksums.txt"]
 MEMBERS = {"meetproxy": 0o755, "LICENSE": 0o644, "NOTICE": 0o644}
 MAX_ARCHIVE = 128 * 1024 * 1024
+PROTOCOL = "16"
 
 
 class VerificationError(Exception):
@@ -59,6 +60,18 @@ def commit_time(commit: str) -> int:
     stamp = run(["git", "show", "-s", "--format=%ct", commit], "commit_time_failed").decode().strip()
     require(stamp.isdigit(), "invalid_commit_time")
     return int(stamp)
+
+
+def check_source(tag: str, commit: str) -> int:
+    check_tag(tag)
+    stamp = commit_time(commit)
+    status = run(["git", "status", "--porcelain=v1", "--untracked-files=all"], "source_status_failed")
+    require(not status.strip(), "source_dirty")
+    kind = run(["git", "cat-file", "-t", "refs/tags/" + tag], "source_tag_failed").decode().strip()
+    require(kind == "tag", "source_tag_type")
+    tagged = run(["git", "rev-parse", "refs/tags/" + tag + "^{commit}"], "source_tag_failed").decode().strip()
+    require(tagged == commit, "source_tag_mismatch")
+    return stamp
 
 
 def is_private_path_free(data: bytes) -> bool:
@@ -133,7 +146,7 @@ def native_target() -> tuple[str, str]:
     return system, arch
 
 
-def check_binary(data: bytes, system: str, arch: str, version: str, commit: str) -> bool:
+def check_binary(data: bytes, system: str, arch: str, version: str, commit: str) -> None:
     with tempfile.TemporaryDirectory(prefix="release-binary-") as directory:
         binary = Path(directory) / "meetproxy"
         binary.write_bytes(data)
@@ -148,19 +161,18 @@ def check_binary(data: bytes, system: str, arch: str, version: str, commit: str)
                 settings[key] = value
         expected = {"GOOS": system, "GOARCH": arch, "CGO_ENABLED": "0", "-trimpath": "true"}
         require(all(settings.get(key) == value for key, value in expected.items()), "binary_build_settings")
-        has_vcs = any(key.startswith("vcs") for key in settings)
-        if has_vcs:
-            require(settings.get("vcs") == "git" and settings.get("vcs.revision") == commit, "binary_source_commit")
-            require(settings.get("vcs.modified") == "false", "binary_source_dirty")
+        require(settings.get("vcs") == "git" and settings.get("vcs.revision") == commit, "binary_source_commit")
+        require(settings.get("vcs.modified") == "false", "binary_source_dirty")
         if (system, arch) == native_target():
             binary.chmod(0o700)
-            actual = run([str(binary), "version"], "native_version_failed", {"PATH": os.defpath, "HOME": directory})
+            actual = run([str(binary), "version"], "native_version_failed", {"PATH": os.defpath})
             require(actual.decode().strip() == version, "native_version_mismatch")
-        return has_vcs
+            protocol = run([str(binary), "protocol"], "native_protocol_failed", {"PATH": os.defpath})
+            require(protocol.decode().strip() == PROTOCOL, "native_protocol_mismatch")
 
 
 def check_artifacts(directory: Path, tag: str, commit: str) -> dict[str, int]:
-    version, stamp = version_of(tag), commit_time(commit)
+    version, stamp = version_of(tag), check_source(tag, commit)
     checksum = directory / "checksums.txt"
     require(checksum.is_file() and not checksum.is_symlink(), "invalid_checksum_file")
     require(checksum.stat().st_size <= 4096, "checksum_too_large")
@@ -177,11 +189,12 @@ def check_artifacts(directory: Path, tag: str, commit: str) -> dict[str, int]:
         require(path.is_file() and not path.is_symlink() and path.stat().st_size <= MAX_ARCHIVE,
                 "invalid_archive_file")
         require(hashlib.sha256(path.read_bytes()).hexdigest() == hashes[name], "checksum_mismatch")
-        vcs_commits += int(check_binary(archive_payload(path, stamp), system, arch, version, commit))
+        check_binary(archive_payload(path, stamp), system, arch, version, commit)
+        vcs_commits += 1
     return {"binaries": len(ARCHIVES), "native_versions": 1, "vcs_commits": vcs_commits}
 
 
-def check_attestations(directory: Path, tag: str, commit: str, repo: str) -> None:
+def check_uploaded(directory: Path, tag: str, commit: str, repo: str) -> dict[str, int]:
     check_tag(tag)
     require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) is not None, "invalid_repository")
     check_artifacts(directory, tag, commit)
@@ -190,24 +203,21 @@ def check_attestations(directory: Path, tag: str, commit: str, repo: str) -> Non
         command = ["gh", "release", "download", tag, "--repo", "github.com/" + repo, "--dir", destination]
         for name in SUBJECTS:
             command.extend(["--pattern", name])
-        run(command, "draft_download_failed")
+        run(command, "release_download_failed")
         for name in SUBJECTS:
             artifact = uploaded / name
             require(artifact.is_file() and not artifact.is_symlink(), "uploaded_subject_missing")
             require(artifact.stat().st_size == (directory / name).stat().st_size, "uploaded_size_mismatch")
             require(hashlib.sha256(artifact.read_bytes()).digest() ==
                     hashlib.sha256((directory / name).read_bytes()).digest(), "uploaded_digest_mismatch")
-            output = run(["gh", "attestation", "verify", str(artifact), "--hostname", "github.com",
-                          "--repo", repo, "--signer-workflow", repo + "/.github/workflows/release.yml",
-                          "--source-digest", commit, "--source-ref", "refs/tags/" + tag,
-                          "--deny-self-hosted-runners", "--format", "json"], "attestation_failed")
-            verified = json.loads(output)
-            require(isinstance(verified, list) and bool(verified), "attestation_empty")
+        require({path.name for path in uploaded.iterdir()} == set(SUBJECTS), "uploaded_subjects")
+        observed = check_artifacts(uploaded, tag, commit)
+        return {**observed, "uploaded_subjects": len(SUBJECTS)}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("tag", "artifacts", "attestations"))
+    parser.add_argument("mode", choices=("tag", "source", "artifacts", "uploaded"))
     parser.add_argument("--tag", required=True)
     parser.add_argument("--source-digest")
     parser.add_argument("--repo")
@@ -217,10 +227,12 @@ def main() -> int:
     try:
         if args.mode == "tag":
             check_tag(args.tag)
+        elif args.mode == "source":
+            check_source(args.tag, args.source_digest or "")
         elif args.mode == "artifacts":
             observed = check_artifacts(args.dist, args.tag, args.source_digest or "")
         else:
-            check_attestations(args.dist, args.tag, args.source_digest or "", args.repo or "")
+            observed = check_uploaded(args.dist, args.tag, args.source_digest or "", args.repo or "")
     except VerificationError as error:
         print(json.dumps({"ok": False, "code": str(error)}))
         return 1

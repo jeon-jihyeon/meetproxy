@@ -55,6 +55,6 @@ changelog:
     - title: Others
       order: 999
 
-# The release workflow publishes the draft after attesting the archives
+# Unpublished until the uploaded bytes match the checked local artifacts
 release:
   draft: true

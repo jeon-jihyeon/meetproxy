@@ -44,4 +44,4 @@ All public text, including commits, comments and docs, is in English.
 
 ## Releases
 
-The maintainer bumps `version` in [plugin/.claude-plugin/plugin.json](../plugin/.claude-plugin/plugin.json), updates the changelog and pushes a tag `v<version>`. The release workflow refuses a tag that does not match the manifest, builds with GoReleaser as a draft, attests the archives and the checksums, and then publishes the release.
+Update the manifest version and changelog, then follow [Verify a release](../README.md#verify-a-release) from the reviewed final clean commit. That procedure builds locally, verifies the archives, uploads a draft, compares authenticated downloads, publishes and verifies the downloads again. The optional manual workflow builds and validates artifacts only. Local releases have no GitHub build provenance or attestations.

@@ -1,14 +1,10 @@
 name: release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
   goreleaser:
@@ -21,29 +17,13 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.10"
-      - name: Check the tag matches the plugin version
-        run: python3 .github/scripts/verify_release.py tag --tag "$GITHUB_REF_NAME"
-      # Publishes a draft so the release is public only once its attestation exists
+      - name: Check clean tagged source
+        run: python3 .github/scripts/verify_release.py source --tag "$GITHUB_REF_NAME" --source-digest "$GITHUB_SHA"
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           version: "v2.19.0"
-          args: release --clean
+          args: release --clean --skip=publish,announce --release-notes CHANGELOG.md
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GOTOOLCHAIN: go1.26.10
       - name: Check release artifacts
         run: python3 .github/scripts/verify_release.py artifacts --tag "$GITHUB_REF_NAME" --source-digest "$GITHUB_SHA"
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: |
-            dist/*.tar.gz
-            dist/checksums.txt
-      - name: Verify uploaded artifacts and provenance
-        run: python3 .github/scripts/verify_release.py attestations --tag "$GITHUB_REF_NAME" --source-digest "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - name: Publish the release
-        run: gh release edit "$GITHUB_REF_NAME" --draft=false
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
