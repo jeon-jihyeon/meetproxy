@@ -29,69 +29,41 @@ linters:
           disabled: true
         - name: exported
           disabled: true
-    # Migrated entry points depend only on the public application layer
-    # Pure models and host values use only the standard library
-    # Stores use fileio and never import a domain model
-    # Unmoved packages keep their existing strict rules
-    # Tests are outside the import rules
     depguard:
       rules:
-        migrated-entry:
+        entry:
           list-mode: strict
-          files:
-            - "**/cmd/meetproxy/slack_account.go"
-            - "**/cmd/meetproxy/signin.go"
-            - "!$test"
+          files: ["**/cmd/**", "!$test"]
           allow:
             - $gostd
             - github.com/jeon-jihyeon/meetproxy/app/
         application:
           list-mode: strict
-          files:
-            - "**/app/**"
-            - "!$test"
+          files: ["**/app/**", "!$test"]
           allow:
             - $gostd
             - github.com/jeon-jihyeon/meetproxy/internal/
-            - github.com/jeon-jihyeon/meetproxy/app/host$
-        pure-values:
+        infrastructure:
           list-mode: strict
-          files:
-            - "**/internal/slackstate/**"
-            - "**/internal/signin/**"
-            - "**/app/host/**"
-            - "!$test"
+          files: ["**/internal/**", "!$test"]
           allow:
             - $gostd
-        storage:
+        model:
           list-mode: strict
           files:
-            - "**/internal/store/**"
+            - "**/internal/control/**"
+            - "**/internal/listen/**"
+            - "**/internal/slackevent/**"
             - "!$test"
           allow:
-            - $gostd
-            - github.com/jeon-jihyeon/meetproxy/internal/fileio$
-        base:
-          list-mode: strict
-          files:
-            - "**/internal/fileio/**"
-            - "**/internal/shell/**"
-            - "**/internal/slackapi/**"
-            - "**/internal/slackmcp/**"
-            - "**/internal/signinbrowser/**"
-            - "**/internal/osdialog/**"
-            - "!$test"
-          allow:
-            - $gostd
-        github:
-          list-mode: strict
-          files:
-            - "**/internal/github/**"
-            - "!$test"
-          allow:
-            - $gostd
-            - github.com/jeon-jihyeon/meetproxy/internal/messageurl$
-    # Only cmd reads the process environment
+            - errors$
+            - fmt$
+            - regexp$
+            - slices$
+            - strings$
+            - time$
+            - unicode$
+            - unicode/utf8$
     forbidigo:
       forbid:
         - pattern: ^os\.(Getenv|LookupEnv|Environ|ExpandEnv)$
@@ -99,11 +71,6 @@ linters:
   exclusions:
     rules:
       - path: _test\.go
-        linters:
-          - dupl
-          - funlen
-          - gocyclo
-          - unparam
+        linters: [dupl, funlen, gocyclo, unparam]
       - path: (_test\.go|^cmd/)
-        linters:
-          - forbidigo
+        linters: [forbidigo]

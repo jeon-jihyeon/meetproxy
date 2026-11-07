@@ -1,376 +1,47 @@
 package main
 
 import (
+	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"runtime"
-	"slices"
-	"strings"
-	"time"
-
-	"github.com/jeon-jihyeon/meetproxy/internal/osdialog"
+	"os/signal"
+	"syscall"
 )
 
-// Set by ldflags in release builds
 var version = "dev"
 
-// The host contract the plugin mod speaks
-// Raised whenever the input, the answer or an effect of a mod command changes, or the tool set does
-const protocol = 16
-
-const (
-	exitFailed   = 1
-	exitUsage    = 2
-	defaultLimit = 10
-	// Width of the command column in the usage text
-	usageColumn = 32
-)
-
-// Wrapped by any error that a corrected command line fixes so it exits with exitUsage
-var errUsage = errors.New("usage error")
-
-const osascriptPath = "/usr/bin/osascript"
-
-type dialogProgram interface {
-	Input(string, string) (string, bool, error)
-	Show(string, string) (osdialog.Shown, error)
-	Kill(osdialog.Shown)
-}
-
-type dialogAdapter struct{ dialogProgram }
-
-func (d dialogAdapter) Show(tool, text string) (shownDialog, error) {
-	shown, err := d.dialogProgram.Show(tool, text)
-	return shownDialog{Pid: shown.Pid, Started: shown.Started}, err
-}
-
-func (d dialogAdapter) Kill(shown shownDialog) {
-	d.dialogProgram.Kill(osdialog.Shown{Pid: shown.Pid, Started: shown.Started})
-}
-
-var (
-	noDialogs osDialog = dialogAdapter{osdialog.Unavailable{}}
-)
-
-func systemDialog() osDialog {
-	switch runtime.GOOS {
-	case "darwin":
-		if _, err := os.Stat(osascriptPath); err == nil {
-			return dialogAdapter{osdialog.NewOsa(osascriptPath, 0)}
-		}
-	case "linux":
-		if path, err := exec.LookPath("zenity"); err == nil {
-			return dialogAdapter{osdialog.NewZenity(path, os.Environ(), 0)}
-		}
-	}
-	return noDialogs
-}
-
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, usage())
-		os.Exit(exitUsage)
-	}
-	cmd, args := os.Args[1], os.Args[2:]
-	c := cli{
-		session: os.Getenv("CLAUDE_CODE_SESSION_ID"), now: time.Now(), in: os.Stdin, out: os.Stdout,
-		browser: osBrowser(), dialog: systemDialog(),
-		slackBase: os.Getenv(slackAPIEnv),
-	}
-	code, err := c.exec(cmd, args)
-	if err != nil {
+	os.Exit(run())
+}
+
+func run() int {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	if err := execute(ctx, os.Args[1:], os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "meetproxy:", err)
+		return 1
 	}
-	os.Exit(code)
+	return 0
 }
 
-// A command line of the CLI
-type command struct {
-	name string
-	// Positional arguments as the usage text shows them
-	args string
-	// Least and most positional arguments
-	// A negative most takes any number
-	least, most int
-	// Flags it reads besides --data and --root
-	flags []string
-	// Fails without a session id
-	session bool
-	// Runs without a data directory
-	noData bool
-	help   string
-	run    func(c cli, args []string, f flags) (int, error)
-}
-
-type family struct {
-	name     string
-	commands []command
-}
-
-// The one table usage, arity, flag and session checks come from
-var families = []family{
-	{"setup", []command{
-		{name: "version", noData: true, help: "print the binary version", run: printVersion},
-		{name: "protocol", noData: true, help: "print the command set the plugin mod expects", run: printProtocol},
-	}},
-	{"slack", []command{
-		{
-			name: "slack conversations", help: "list direct conversations for durable per-channel collection",
-			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackConversations()) },
-		},
-		{
-			name: "slack page", args: "<mentions|channel|parents|replies>", least: 1, most: 1,
-			flags: []string{"after", "before", "cursor", "channel", "thread"},
-			help:  "read one page in a fixed collection window",
-			run:   func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackPage(a[0], f)) },
-		},
-		{
-			name: "slack token", help: "store the user token on stdin once Slack accepts it, print user, team, host and missing scopes",
-			run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackToken()) },
-		},
-		{name: "slack logout", help: "revoke and remove the stored token, print one fixed line", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackLogout()) }},
-		{name: "slack whoami", help: "check the token with Slack", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackWhoami()) }},
-		{
-			name: "slack mentions", flags: []string{"after"}, help: "print messages that mention the user after --after oldest first",
-			run: func(c cli, _ []string, f flags) (int, error) { return exitCode(c.slackMentions(f.after)) },
-		},
-		{
-			name: "slack history", args: "<channel>", least: 1, most: 1, flags: []string{"oldest"}, help: "print the messages of a channel after --oldest",
-			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackHistory(a[0], f.oldest)) },
-		},
-		{
-			name: "slack react", args: "<link>", least: 1, most: 1, flags: []string{"react"}, help: "add the reaction --react to the message of a link",
-			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackReact(a[0], f.react)) },
-		},
-		{
-			name: "slack update", args: "<reply link>", least: 1, most: 1, help: "replace a reply with the text on stdin",
-			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.slackEdit(a[0], true)) },
-		},
-		{
-			name: "slack delete", args: "<reply link>", least: 1, most: 1, help: "delete a reply",
-			run: func(c cli, a []string, _ flags) (int, error) { return exitCode(c.slackEdit(a[0], false)) },
-		},
-		{
-			name: "slack read", args: "<link>", least: 1, most: 1, flags: []string{"limit"}, help: "print the text of the thread a link points at",
-			run: func(c cli, a []string, f flags) (int, error) { return exitCode(c.slackRead(a[0], f.limit)) },
-		},
-		{
-			name: "slack post", args: "<link>", least: 1, most: 1, flags: []string{"session"},
-			help: "post the text on stdin in the thread of a link and print its permalink",
-			run:  func(c cli, a []string, _ flags) (int, error) { return c.slackPost(a[0]) },
-		},
-		{name: "slack manifest", help: "print the app manifest and the link that creates the app", run: func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.slackManifest()) }},
-		{
-			name: "slack setup", flags: []string{"answer"}, help: "record the answer to setting up a token, now, later or keep",
-			run: func(c cli, _ []string, f flags) (int, error) { return exitCode(c.slackSetup(f.answer)) },
-		},
-	}},
-	{"github", githubCommands},
-	{"sign-in", []command{
-		{
-			name: "signin open", flags: []string{"log", "offset", "browser", "session"}, session: true,
-			help: "open the newest loopback link of --log after --offset in a new window of --browser, print opened or not found",
-			run: func(c cli, _ []string, f flags) (int, error) {
-				return exitCode(c.signinOpen(f.log, f.offset, f.browser))
-			},
-		},
-		{
-			name: "signin wait", flags: []string{"session"}, session: true,
-			help: "close the window signin open opened once the sign-in left it, print closed, timed out, not closed or waiting",
-			run:  func(c cli, _ []string, _ flags) (int, error) { return exitCode(c.signinWait()) },
-		},
-	}},
-}
-
-func usage() string {
-	var b strings.Builder
-	b.WriteString("usage: meetproxy <command> [args] [flags]\n")
-	b.WriteString("every command but version and protocol needs --data <dir> or --root <plugin dir>\n")
-	for _, fam := range families {
-		fmt.Fprintf(&b, "\n%s\n", fam.name)
-		for _, c := range fam.commands {
-			line := strings.TrimSpace(c.name + " " + c.args)
-			for _, f := range c.flags {
-				line += " --" + f
-			}
-			if len(line) >= usageColumn {
-				// The help goes under the column past the two space indent
-				line += "\n" + strings.Repeat(" ", usageColumn+2)
-			}
-			fmt.Fprintf(&b, "  %-*s%s\n", usageColumn, line, c.help)
+func execute(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: meetproxy <control|listen|version> [command] [flags]")
+	}
+	switch args[0] {
+	case "control":
+		return runControl(ctx, args[1:], in, out)
+	case "listen":
+		return runListen(ctx, args[1:], out)
+	case "version":
+		if len(args) != 1 {
+			return errors.New("version takes no arguments")
 		}
-	}
-	var f flags
-	f.set().VisitAll(func(fl *flag.Flag) { fmt.Fprintf(&b, "  --%-12s%s\n", fl.Name, fl.Usage) })
-	return strings.TrimSuffix(b.String(), "\n")
-}
-
-// Every flag any command takes
-// A command names the ones it reads so any other fails
-type flags struct {
-	data, root, session string
-
-	after, oldest  string
-	before, cursor string
-
-	answer, react string
-
-	thread, channel string
-
-	log, offset, browser string
-
-	limit int
-}
-
-func (f *flags) set() *flag.FlagSet {
-	fs := flag.NewFlagSet("meetproxy", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	fs.StringVar(&f.data, "data", "", "plugin data directory")
-	fs.StringVar(&f.root, "root", "", "plugin directory that names the data directory when --data is empty")
-	fs.StringVar(&f.session, "session", f.session, "session id, CLAUDE_CODE_SESSION_ID by default")
-
-	fs.IntVar(&f.limit, "limit", defaultLimit, "number of results, every one with 0")
-
-	fs.StringVar(&f.after, "after", "", "unix seconds to read Slack mentions after")
-	fs.StringVar(&f.before, "before", "", "unix seconds of the fixed collection end")
-	fs.StringVar(&f.cursor, "cursor", "", "opaque source page cursor")
-
-	fs.StringVar(&f.oldest, "oldest", "", "Slack ts to read a channel after")
-	fs.StringVar(&f.answer, "answer", "", "now, later or keep")
-
-	fs.StringVar(&f.react, "react", "", "reaction name")
-
-	fs.StringVar(&f.thread, "thread", "", "key of the thread the request sits in")
-
-	fs.StringVar(&f.channel, "channel", "", "channel or repository")
-
-	fs.StringVar(&f.log, "log", "", "the log file an app prints its sign-in link to")
-	fs.StringVar(&f.offset, "offset", "", "the log's size in bytes right before the sign-in was pressed")
-	fs.StringVar(&f.browser, "browser", "", "Google Chrome or Whale")
-
-	return fs
-}
-
-// Runs a command line with what c carries
-// The data directory comes from the flags and the session from --session over the one c carries
-func (c cli) exec(cmd string, args []string) (int, error) {
-	if c.slackBase == "" {
-		c.slackBase = os.Getenv(slackAPIEnv)
-	}
-	f := flags{session: c.session}
-	fs := f.set()
-	if err := fs.Parse(reorder(cmd, args)); err != nil {
-		return exitUsage, err
-	}
-	words := append([]string{cmd}, fs.Args()...)
-	line, ok := lookup(words)
-	if !ok {
-		return exitUsage, fmt.Errorf("unknown command %q\n%s", strings.Join(words, " "), usage())
-	}
-	var given []string
-	fs.Visit(func(fl *flag.Flag) { given = append(given, fl.Name) })
-	rest := words[len(strings.Fields(line.name)):]
-	if !slices.Contains(line.flags, "session") {
-		// A command without --session never sees the environment id so only checked ids reach any command
-		f.session = ""
-	}
-	if err := line.check(rest, given, f.session); err != nil {
-		return exitUsage, err
-	}
-	if !line.noData {
-		var err error
-		if f.data, err = f.dataDir(); err != nil {
-			return exitUsage, err
-		}
-	}
-	c.data, c.session = f.data, f.session
-	return line.run(c, rest, f)
-}
-
-// Usage errors of the positional arguments, the flags given and the session id
-func (c command) check(rest, given []string, session string) error {
-	if len(rest) < c.least || (c.most >= 0 && len(rest) > c.most) {
-		return fmt.Errorf("%w: run it as %s", errUsage, strings.TrimSpace(c.name+" "+c.args))
-	}
-	for _, name := range given {
-		if name != "data" && name != "root" && !slices.Contains(c.flags, name) {
-			return fmt.Errorf("%w: %s does not take --%s", errUsage, c.name, name)
-		}
-	}
-	if c.session && session == "" {
-		return fmt.Errorf("%w: %s needs a session id", errUsage, c.name)
-	}
-	if session != "" && !sessionId.MatchString(session) {
-		return fmt.Errorf("%w: %s takes a session id of 1 to 128 letters, digits, _ or -", errUsage, c.name)
-	}
-	return nil
-}
-
-// --data or the data directory Claude Code gives the plugin at --root
-func (f flags) dataDir() (string, error) {
-	if f.data != "" {
-		return f.data, nil
-	}
-	if f.root == "" {
-		return "", errors.New("--data or --root is required")
-	}
-	config, err := configDir()
-	if err != nil {
-		return "", err
-	}
-	return pluginData(f.root, config)
-}
-
-// The command whose name is the longest run of leading words
-func lookup(words []string) (command, bool) {
-	var best command
-	size := 0
-	for _, fam := range families {
-		for _, c := range fam.commands {
-			name := strings.Fields(c.name)
-			if len(name) > size && len(name) <= len(words) && slices.Equal(name, words[:len(name)]) {
-				best, size = c, len(name)
-			}
-		}
-	}
-	return best, size > 0
-}
-
-func exitCode(err error) (int, error) {
-	switch {
-	case err == nil:
-		return 0, nil
-	case errors.Is(err, errUsage):
-		return exitUsage, err
+		_, err := fmt.Fprintln(out, version)
+		return err
 	default:
-		return exitFailed, err
+		return errors.New("unknown meetproxy command")
 	}
-}
-
-// Flags that take no value
-var boolFlags = []string{"--confirm", "-confirm"}
-
-func reorder(_ string, args []string) []string {
-	var flags, pos []string
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == "--":
-			// Kept so flag parsing stops before words that start with a dash
-			return append(append(flags, a), append(pos, args[i+1:]...)...)
-		case len(a) > 1 && a[0] == '-':
-			flags = append(flags, a)
-			if !strings.Contains(a, "=") && !slices.Contains(boolFlags, a) && i+1 < len(args) {
-				flags = append(flags, args[i+1])
-				i++
-			}
-		default:
-			pos = append(pos, a)
-		}
-	}
-	return append(flags, pos...)
 }

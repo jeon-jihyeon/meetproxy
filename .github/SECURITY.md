@@ -1,25 +1,11 @@
-# Security policy
+# Security
 
-## Supported versions
+Security fixes target the latest published minor release line.
 
-Only the latest minor release line gets security fixes. Today that is 0.1.x, and a fix ships as a new patch release of it.
+Use GitHub's private vulnerability reporting when it is available for this repository. Keep credentials, private app content and operation journals out of public issues. For a public issue, provide a minimal synthetic reproduction.
 
-| Version | Supported |
-|---|---|
-| latest 0.1.x | yes |
-| anything older | no, update with `claude plugin update meetproxy@meetproxy` |
+Your application owns approval, target ownership and permissions. The default desktop adapter requires an explicit process and window for observations and input. It doesn't turn task text into shell commands.
 
-## Reporting a vulnerability
+A completed driver call doesn't establish task completion. Unknown outcomes require inspection before another action. Store operation intents and receipts in a trusted journal and set retention according to your application's data policy.
 
-Please do not open a public issue for a security problem.
-
-Report it privately through GitHub private vulnerability reporting:
-
-https://github.com/jeon-jihyeon/meetproxy/security/advisories/new
-
-Include what you can of the following.
-
-- What an attacker controls, such as the text of a Slack message or a GitHub comment, and what they gain
-
-The conversation stays in the private advisory. Once a fix is released the advisory is published with credit, unless you ask not to be named.
-
+Cua Driver is a separate dependency. Its daemon permissions and updates remain the host's responsibility.

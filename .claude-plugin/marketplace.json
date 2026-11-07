@@ -1,12 +1,15 @@
 {
   "name": "meetproxy",
+  "version": "0.2.0",
+  "description": "Generic app control through a Go library and CLI",
   "owner": {
     "name": "jeon-jihyeon"
   },
   "plugins": [
     {
       "name": "meetproxy",
-      "source": "./plugin"
+      "source": "./plugin",
+      "description": "Discover apps and windows, observe one window and run scoped actions through the meetproxy CLI."
     }
   ]
 }

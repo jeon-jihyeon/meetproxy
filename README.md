@@ -1,119 +1,148 @@
-<div align="center">
-  <h1>meetproxy</h1>
-</div>
+# meetproxy
 
-<div align="center">
-  <h3>meetproxy, not meatproxy.</h3>
-  <p>Stop being a meat proxy.</p>
-</div>
+A Go library and CLI for observing and controlling app windows. Your app chooses the task, target and driver. meetproxy returns the result and an operation receipt.
 
-## Why meetproxy?
+```text
+Your app or CLI → application API → configured driver → result
+Your journal → intent → one dispatch → recorded outcome
+```
 
-A *meat proxy* is someone who just shuttles text between a coworker and an AI: paste the question in, paste the answer back, never read it. The term [took off in 2026](https://gruhn.me/blog/2026-08-03/), and the problem is real. Generating answers got cheap, but [checking them didn't](https://agentpatterns.ai/patterns/anti-patterns/meat-proxy/).
+## Compatibility
 
-## Quick start
+v0.2 replaces the earlier API and CLI. The CLI provides `control call`, `control result`, `listen`, `listen plist` and `version`. Earlier account, playbook and collection commands aren't included. Keep app guides, account setup and business workflows in your application.
+
+Once v0.2.0 is published, Go module retractions advise against older versions and omit them from automatic version selection. Migrate to the generic API. Retractions don't delete old source or prevent explicit old-version installs.
+
+Listen handlers must accept the generic event fields `source`, `id`, `kind` and `payload`. Slack-specific fields live inside `payload`. Update handlers before switching; acknowledge only after durable acceptance. A matching version label alone doesn't establish compatibility.
+
+## Install
+
+Use Go 1.26.10 or newer. These commands target v0.2.0 once that tag is published:
 
 ```sh
-gh auth login --hostname github.com
-gh auth setup-git --hostname github.com
-gh repo clone https://github.com/jeon-jihyeon/meetproxy
+go install -ldflags="-X main.version=0.2.0" github.com/jeon-jihyeon/meetproxy/cmd/meetproxy@v0.2.0
+meetproxy version
 ```
 
-Register that checkout as a local marketplace, using its absolute path:
+Expected version output: `0.2.0`.
 
-```
-/plugin marketplace add /path/to/meetproxy
-/plugin install meetproxy@meetproxy
-```
-
-That's it for GitHub, as long as `gh` is logged in. For Slack, add the official Slack plugin. A personal token is optional, but it lets meetproxy check Slack in the background:
-
-No API key needed. All the work happens in your own Claude Code sessions.
-
-## Requirements
-
-- Claude Code 2.1.287 or later
-- macOS or Linux, amd64 or arm64
-- `tar`, and `shasum` or `sha256sum`
-- `git` and `gh`, with a github.com login that can read this private repository. The launcher downloads the binary through authenticated `gh`
-- For Slack: the [official Slack plugin](https://github.com/anthropics/claude-plugins-official). A personal token is optional
-
-## How it works
-
-### Computer use
-
-For an app meetproxy doesn't connect, like a database client or a chat app, Claude can drive its window. It needs a computer-use server, and meetproxy doesn't ship one. Claude Code's built-in computer use works, or install cua-driver on macOS and register it:
+For the library:
 
 ```sh
-/bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"
-cua-driver permissions grant
-cua-driver mcp-config --client claude --no-skills
+go get github.com/jeon-jihyeon/meetproxy@v0.2.0
 ```
 
-Run what the last command prints, then restart the session. Your host's permission settings decide which actions it asks you about first. 
+From a source checkout, build locally with `go build -trimpath -ldflags="-X main.version=0.2.0" -o bin/meetproxy ./cmd/meetproxy`.
 
-## Safe by default
-
-Anyone who can mention you can write a request, so meetproxy treats request text as untrusted.
-
-- **Your host approves computer use.** When an agent drives an app window, your host, Claude Code or Codex, approves those actions, not meetproxy.
-
-## Privacy
-
-meetproxy runs locally with no telemetry. An opt-in authenticated loopback HTTP interface provides reads and host handoff.
-
-## Uninstall
-
-```
-/plugin uninstall meetproxy@meetproxy
-/plugin marketplace remove meetproxy
-```
-
-To remove all data, close every session first:
+For Claude Code, install the CLI first and keep `meetproxy` on PATH. Once v0.2.0 is published, add its marketplace and install the plugin from your shell:
 
 ```sh
-rm -rf ~/.claude/plugins/data/meetproxy-meetproxy ~/.meetproxy
-rm -f ~/.claude/plugins/store/meetproxy_meetproxy-*.json
+claude plugin marketplace add jeon-jihyeon/meetproxy#v0.2.0
+claude plugin install meetproxy@meetproxy
+claude plugin list
 ```
 
-## Troubleshooting
+The plugin list should include `meetproxy@meetproxy`. Follow the install summary if a reload is needed, then use `/meetproxy:control`. See the [Claude Code plugin installation guide](https://code.claude.com/docs/en/discover-plugins).
 
-- **"meetproxy was updated, run /reload-plugins".** Do exactly that, or restart the session.
-- **The binary didn't download.** The launcher prints the reason. If it says to run `gh auth login`, log in to github.com with an account that can read this repository and start a new session. For a manual download, use the authenticated commands below, verify the checksums, and extract the matching `meetproxy_<os>_<arch>.tar.gz` to `~/.meetproxy/bin/v<version>/`.
+## Configure
 
-## Verify a release
+- Follow the [Cua Driver quickstart](https://cua.ai/docs/cua-driver/quickstart) to install the driver and grant its OS permissions. Use an already running, trusted daemon.
+- The CLI finds `cua-driver` on PATH. Use `--driver` for its executable and `--data` for a private operation directory. Reads don't need an operation ID.
+- Writes need a distinct ID and a durable journal. The local journal supports Unix. Go callers can supply their own Driver and Journal with `control.New`.
+- Your app owns target ownership and approval. A `completed` result means the driver call completed. An `unknown` result may already have had an effect; inspect its receipt before another action.
 
-The launcher checks every download against `checksums.txt`. Private releases are built locally and don't provide GitHub build provenance or attestations. Checksums detect a changed download; they aren't independent proof of who built it.
+## CLI
 
-In an empty directory, download all four archives and their checksum file through your github.com login:
+List apps with one JSON request:
 
 ```sh
-gh release download v0.1.18 --repo github.com/jeon-jihyeon/meetproxy --pattern 'meetproxy_*.tar.gz' --pattern checksums.txt
-shasum -a 256 -c checksums.txt
+meetproxy control call <<'JSON'
+{"session":"acme","tool":"list_apps","arguments":{}}
+JSON
 ```
 
-On Linux, use `sha256sum -c checksums.txt` if `shasum` isn't installed. Extract only the archive for your OS and architecture.
+A successful response has `tool: "list_apps"`, `state: "completed"`, `recorded: false` and the driver's app list in `output`. App contents depend on the environment.
 
-Maintainers use one local release path. Start from a clean checkout of the reviewed final commit, with the plugin manifest version already set. Use GoReleaser 2.19.0, Go 1.26.10 and a public noreply Git identity. Set `tag`, `commit` and `notes` to the reviewed version, full commit id and release-notes file outside the checkout. Keep normal Git hooks and signing enabled.
+Window observation and input require the PID and window ID from discovery. Keep the same driver session and use fresh element references. Retrieve a saved write receipt with `meetproxy control result --data <directory> <operation-id>`.
+
+For an owned test document, replace `123` and `456` with its discovered PID and window ID. Observe it first:
 
 ```sh
-set -eu
-git tag -a "$tag" -m "$tag"
-python3 .github/scripts/verify_release.py source --tag "$tag" --source-digest "$commit"
-goreleaser release --clean --skip=publish,announce --release-notes "$notes"
-python3 .github/scripts/verify_release.py artifacts --tag "$tag" --source-digest "$commit"
-git push origin "$tag"
-gh release create "$tag" --repo github.com/jeon-jihyeon/meetproxy --verify-tag --draft --title "$tag" --notes-file "$notes" dist/meetproxy_*.tar.gz dist/checksums.txt
-python3 .github/scripts/verify_release.py uploaded --tag "$tag" --source-digest "$commit" --repo jeon-jihyeon/meetproxy
-gh release edit "$tag" --repo github.com/jeon-jihyeon/meetproxy --draft=false
-python3 .github/scripts/verify_release.py uploaded --tag "$tag" --source-digest "$commit" --repo jeon-jihyeon/meetproxy
+meetproxy control call <<'JSON'
+{"session":"acme","tool":"get_window_state","arguments":{"pid":123,"window_id":456,"include_screenshot":false,"tree_format":"elements"}}
+JSON
 ```
 
-Stop on any failed command. Publish only after the draft's downloaded bytes match the checked local artifacts. The last command repeats the authenticated download and artifact checks after publication. A failure then needs investigation; don't replace published assets automatically or report success. GitHub Actions isn't required. The optional manual-dispatch workflow only builds and validates artifacts when Actions is enabled; it never uploads or publishes them.
+The response's `output` contains the window state. Use the text field's fresh `element_token` in the next call. Replace `s00000001:1` below with that token and use a fresh operation ID for each intended write:
 
-## Resources
+```sh
+meetproxy control call --data /absolute/private/acme-operations <<'JSON'
+{"id":"acme-edit-1","session":"acme","tool":"type_text","arguments":{"target":{"kind":"window","pid":123,"window_id":456},"element_token":"s00000001:1","text":"acme"}}
+JSON
+```
 
-- [Changelog](CHANGELOG.md)
-- [Contributing](.github/CONTRIBUTING.md) and [security policy](.github/SECURITY.md)
-- [Claude Code plugins](https://code.claude.com/docs/en/plugins) and [mods](https://code.claude.com/docs/en/plugins/mods/api)
-- [MIT License](LICENSE)
+A successful call returns `state: "completed"` and `recorded: true`. Observe the same window again to check the actual text. If the outcome is `unknown`, retrieve the receipt before deciding how to recover.
+
+See Cua's [window arguments](https://cua.ai/docs/cua-driver/reference/mcp-tools/apps-windows-and-screen#get_window_state) and [input arguments](https://cua.ai/docs/cua-driver/reference/mcp-tools/click-and-type#type_text). For the installed driver's exact `input_schema`, run `cua-driver describe get_window_state` or `cua-driver describe type_text`. meetproxy requires explicit window targets for observation and input.
+
+## Slack events
+
+`listen` forwards supported app mentions and DMs to your receipt handler. It acknowledges each Socket Mode event after the handler confirms durable receipt.
+
+1. Install your Slack app with a bot user. Give it the bot scopes [`app_mentions:read`](https://docs.slack.dev/reference/scopes/app_mentions.read) and [`im:history`](https://docs.slack.dev/reference/events/message.im), then subscribe to `app_mention` and `message.im` in Event Subscriptions. Reinstall the app after changing scopes.
+2. Enable [Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/) and create an app-level token with [`connections:write`](https://docs.slack.dev/reference/scopes/connections.write). Store it in a user-owned file with mode `0600` inside a user-owned directory with mode `0700`.
+3. Provide your own receipt handler. It reads the complete [Event](https://pkg.go.dev/github.com/jeon-jihyeon/meetproxy/app/listen#Event) JSON from stdin, commits it to durable storage using the pair of `source` and `id` for idempotency and returns exit code `0` only after receipt is confirmed. Repeated identities must confirm the same stored event. A nonzero exit prevents the ACK. The default handler deadline is 1.5 seconds.
+
+Replace the absolute paths and `U1` with your listener directory, token file, handler executable and bot user ID. The listener directory must also be user-owned with mode `0700`:
+
+```sh
+meetproxy listen \
+  --data /absolute/private/acme-listener \
+  --token-file /absolute/private/acme-token/app-token \
+  --bot-user U1 \
+  --handler /absolute/path/to/acme-receipt-handler
+```
+
+Invite the app to your test channel and mention it, or send it a DM. The handler receives one JSON event per invocation; the listener stays running without stdout output until stopped. Message text is data for your application. Your application owns any response or follow-up action.
+
+Go callers can supply any acknowledged event source through `listen.Subscription`. Call `Next` to receive a `Delivery`, persist its `Event`, then call `Ack` with its opaque `Receipt`. Call `Close` to release the subscription. `Next` doesn't acknowledge delivered events. The common event has `source`, `id`, `kind` and `payload`; Slack fields stay inside its payload. Receipts identify a delivery on one connection, so keep them out of your durable event identity and receipt-handler JSON.
+
+## Verified scope
+
+Historical live app checks covered the CLI on macOS with Cua Driver 0.37.0: reading one owned text document, typing into another, observing the result and recovering its receipt from a separate process. The Go API example has a compile check, and local helper-process tests exercised the Go API with a Unix file journal. Claude Code 2.1.290 installed the plugin from a local marketplace in an isolated configuration, listed it as enabled and discovered its `control` skill. Go API control of a real app, model-directed skill selection and execution, Linux desktop control and a live Slack receipt round trip haven't been verified.
+
+## Go API
+
+Import `github.com/jeon-jihyeon/meetproxy/app/control`. Resolve the executable in your application and configure the default adapter explicitly. It requires an absolute executable path and doesn't inherit the CLI's environment. `Open` still supports receipt lookup without an installed driver; an unresolved executable fails at call time:
+
+```go
+binary, err := exec.LookPath("cua-driver")
+if err != nil {
+    return err
+}
+binary, err = filepath.Abs(binary)
+if err != nil {
+    return err
+}
+client, err := control.Open(control.Config{
+    Binary: binary,
+    Environment: []string{
+        "HOME=" + os.Getenv("HOME"),
+        "PATH=" + os.Getenv("PATH"),
+        "CUA_DRIVER_PERMISSION_MODE=standard",
+        "CUA_DRIVER_RS_TELEMETRY_ENABLED=0",
+    },
+})
+if err != nil {
+    return err
+}
+result, err := client.Execute(ctx, control.Request{
+    Session: "acme", Tool: "list_apps", Arguments: json.RawMessage(`{}`),
+})
+if err != nil {
+    return err
+}
+fmt.Println(result.State)
+```
+
+Use the standard `context`, `encoding/json`, `fmt`, `os`, `os/exec` and `path/filepath` packages for the surrounding application. Expected output on a successful driver call: `completed`. Provide `Config.Data` or `Config.Journal` before writes.

@@ -20,7 +20,7 @@ ARCHIVES = [f"meetproxy_{system}_{arch}.tar.gz" for system, arch in TARGETS]
 SUBJECTS = [*ARCHIVES, "checksums.txt"]
 MEMBERS = {"meetproxy": 0o755, "LICENSE": 0o644, "NOTICE": 0o644}
 MAX_ARCHIVE = 128 * 1024 * 1024
-PROTOCOL = "16"
+GO_LICENSE_SHA256 = "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
 
 
 class VerificationError(Exception):
@@ -49,8 +49,31 @@ def version_of(tag: str) -> str:
 
 def check_tag(tag: str) -> None:
     version = version_of(tag)
+    check_go_notice((ROOT / "NOTICE").read_bytes())
     manifest = json.loads((ROOT / "plugin/.claude-plugin/plugin.json").read_text())
     require(version == manifest["version"], "tag_version_mismatch")
+    marketplace = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text())
+    require(version == marketplace["version"], "marketplace_version_mismatch")
+    readme = (ROOT / "README.md").read_text()
+    modules = re.findall(r"github\.com/jeon-jihyeon/meetproxy(/cmd/meetproxy)?@v([0-9A-Za-z.-]+)", readme)
+    builds = re.findall(r"main\.version=([0-9A-Za-z.-]+)", readme)
+    plugins = re.findall(r"jeon-jihyeon/meetproxy#v([0-9A-Za-z.-]+)", readme)
+    require({path for path, _ in modules} == {"", "/cmd/meetproxy"} and bool(builds) and bool(plugins)
+            and all(observed == version for _, observed in modules)
+            and all(observed == version for observed in [*builds, *plugins]), "readme_version_mismatch")
+
+
+def release_notes(tag: str) -> str:
+    version_of(tag)
+    changelog = (ROOT / "CHANGELOG.md").read_text()
+    headings = list(re.finditer(r"^##[ \t]+([^\n]+?)[ \t]*$", changelog, re.MULTILINE))
+    matches = [index for index, heading in enumerate(headings) if heading[1] == tag]
+    require(len(matches) == 1, "release_notes_section")
+    index = matches[0]
+    end = headings[index + 1].start() if index + 1 < len(headings) else len(changelog)
+    body = changelog[headings[index].end():end].strip()
+    require(bool(body), "release_notes_section")
+    return body + "\n"
 
 
 def commit_time(commit: str) -> int:
@@ -92,6 +115,12 @@ def check_pax(payload: bytes, stamp: int) -> None:
         require(bool(separator) and key == b"mtime", "unexpected_pax_field")
         require(re.fullmatch(rb"\d+(?:\.\d+)?", value) is not None, "invalid_pax_mtime")
         require(decimal.Decimal(value.decode()) == stamp, "pax_mtime_mismatch")
+
+
+def check_go_notice(data: bytes) -> None:
+    sections = data.split(b"\nGo runtime and standard library\n\n")
+    require(len(sections) == 2 and hashlib.sha256(sections[1]).hexdigest() == GO_LICENSE_SHA256,
+            "go_notice_mismatch")
 
 
 def archive_payload(path: Path, stamp: int) -> bytes:
@@ -136,6 +165,7 @@ def archive_payload(path: Path, stamp: int) -> bytes:
     require(has_end and set(payloads) == set(MEMBERS), "missing_tar_member")
     for name in ("LICENSE", "NOTICE"):
         require(payloads[name] == (ROOT / name).read_bytes(), "notice_content_mismatch")
+    check_go_notice(payloads["NOTICE"])
     return payloads["meetproxy"]
 
 
@@ -167,8 +197,6 @@ def check_binary(data: bytes, system: str, arch: str, version: str, commit: str)
             binary.chmod(0o700)
             actual = run([str(binary), "version"], "native_version_failed", {"PATH": os.defpath})
             require(actual.decode().strip() == version, "native_version_mismatch")
-            protocol = run([str(binary), "protocol"], "native_protocol_failed", {"PATH": os.defpath})
-            require(protocol.decode().strip() == PROTOCOL, "native_protocol_mismatch")
 
 
 def check_artifacts(directory: Path, tag: str, commit: str) -> dict[str, int]:
@@ -194,43 +222,87 @@ def check_artifacts(directory: Path, tag: str, commit: str) -> dict[str, int]:
     return {"binaries": len(ARCHIVES), "native_versions": 1, "vcs_commits": vcs_commits}
 
 
+def check_remote_release(tag: str, repo: str) -> None:
+    output = run(["gh", "release", "view", tag, "--repo", "github.com/" + repo,
+                  "--json", "tagName,isDraft,assets"], "release_metadata_failed")
+    try:
+        metadata = json.loads(output)
+    except (ValueError, UnicodeError):
+        raise VerificationError("invalid_release_metadata") from None
+    require(isinstance(metadata, dict) and isinstance(metadata.get("tagName"), str)
+            and isinstance(metadata.get("isDraft"), bool) and isinstance(metadata.get("assets"), list),
+            "invalid_release_metadata")
+    require(metadata["tagName"] == tag, "uploaded_tag_mismatch")
+    require(metadata["isDraft"], "release_not_draft")
+    names = []
+    for asset in metadata["assets"]:
+        require(isinstance(asset, dict) and isinstance(asset.get("name"), str), "invalid_release_metadata")
+        names.append(asset["name"])
+    require(len(names) == len(SUBJECTS) and set(names) == set(SUBJECTS), "uploaded_subjects")
+
+
+def download_and_compare(directory: Path, tag: str, repo: str, uploaded: Path) -> None:
+    version_of(tag)
+    require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) is not None
+            and all(part not in (".", "..") for part in repo.split("/")), "invalid_repository")
+    for name in SUBJECTS:
+        local = directory / name
+        require(local.is_file() and not local.is_symlink() and local.stat().st_size <= MAX_ARCHIVE,
+                "invalid_local_subject")
+    check_remote_release(tag, repo)
+    command = ["gh", "release", "download", tag, "--repo", "github.com/" + repo, "--dir", str(uploaded)]
+    for name in SUBJECTS:
+        command.extend(["--pattern", name])
+    run(command, "release_download_failed")
+    for name in SUBJECTS:
+        artifact = uploaded / name
+        require(artifact.is_file() and not artifact.is_symlink(), "uploaded_subject_missing")
+        require(artifact.stat().st_size == (directory / name).stat().st_size, "uploaded_size_mismatch")
+        require(hashlib.sha256(artifact.read_bytes()).digest() ==
+                hashlib.sha256((directory / name).read_bytes()).digest(), "uploaded_digest_mismatch")
+    require({path.name for path in uploaded.iterdir()} == set(SUBJECTS), "uploaded_subjects")
+    check_remote_release(tag, repo)
+
+
+def check_uploaded_bytes(directory: Path, tag: str, repo: str) -> dict[str, int]:
+    with tempfile.TemporaryDirectory(prefix="release-assets-") as destination:
+        download_and_compare(directory, tag, repo, Path(destination))
+    return {"uploaded_subjects": len(SUBJECTS)}
+
+
 def check_uploaded(directory: Path, tag: str, commit: str, repo: str) -> dict[str, int]:
     check_tag(tag)
-    require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) is not None, "invalid_repository")
     check_artifacts(directory, tag, commit)
     with tempfile.TemporaryDirectory(prefix="release-assets-") as destination:
         uploaded = Path(destination)
-        command = ["gh", "release", "download", tag, "--repo", "github.com/" + repo, "--dir", destination]
-        for name in SUBJECTS:
-            command.extend(["--pattern", name])
-        run(command, "release_download_failed")
-        for name in SUBJECTS:
-            artifact = uploaded / name
-            require(artifact.is_file() and not artifact.is_symlink(), "uploaded_subject_missing")
-            require(artifact.stat().st_size == (directory / name).stat().st_size, "uploaded_size_mismatch")
-            require(hashlib.sha256(artifact.read_bytes()).digest() ==
-                    hashlib.sha256((directory / name).read_bytes()).digest(), "uploaded_digest_mismatch")
-        require({path.name for path in uploaded.iterdir()} == set(SUBJECTS), "uploaded_subjects")
+        download_and_compare(directory, tag, repo, uploaded)
         observed = check_artifacts(uploaded, tag, commit)
         return {**observed, "uploaded_subjects": len(SUBJECTS)}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("tag", "source", "artifacts", "uploaded"))
+    parser.add_argument("mode", choices=("tag", "notes", "source", "artifacts", "uploaded", "uploaded-bytes"))
     parser.add_argument("--tag", required=True)
     parser.add_argument("--source-digest")
     parser.add_argument("--repo")
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--dist", type=Path, default=ROOT / "dist")
     args = parser.parse_args()
     observed: dict[str, int] = {}
     try:
         if args.mode == "tag":
             check_tag(args.tag)
+        elif args.mode == "notes":
+            check_tag(args.tag)
+            require(args.output is not None, "missing_notes_output")
+            args.output.write_text(release_notes(args.tag))
         elif args.mode == "source":
             check_source(args.tag, args.source_digest or "")
         elif args.mode == "artifacts":
             observed = check_artifacts(args.dist, args.tag, args.source_digest or "")
+        elif args.mode == "uploaded-bytes":
+            observed = check_uploaded_bytes(args.dist, args.tag, args.repo or "")
         else:
             observed = check_uploaded(args.dist, args.tag, args.source_digest or "", args.repo or "")
     except VerificationError as error:
