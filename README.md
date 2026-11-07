@@ -1,6 +1,10 @@
 # meetproxy
 
-A Go library and CLI for observing and controlling app windows. Your app chooses the task, target and driver. meetproxy returns the result and an operation receipt.
+meetproxy, not meatproxy. Stop being a meat proxy.
+
+The name plays on the [meat proxy meme](https://gruhn.me/blog/2026-08-03/): forwarding AI output without reading or checking it.
+
+A Go library and CLI for app observation, control and source-neutral event streaming. Your app chooses the task, target and driver, owns approvals and checks outcomes. Control calls return a result and an operation receipt.
 
 ```text
 Your app or CLI → application API → configured driver → result
