@@ -18,19 +18,24 @@ body:
     id: steps
     attributes:
       label: Steps to reproduce
+      placeholder: |
+        1. Select one owned neutral window or synthetic source event
+        2. Call the Go API or a control or listen command
+        3. Compare the result with the expected state
   - type: input
-    id: claude
+    id: environment
     attributes:
-      label: Claude Code version
-      description: Output of `claude --version`
-      placeholder: 2.1.290 (Claude Code)
+      label: Caller and driver versions
+      description: Go version or host name and version, plus the configured driver's version
+      placeholder: Go 1.26.10 and Cua Driver 0.37.0
     validations:
       required: true
   - type: input
     id: plugin
     attributes:
       label: meetproxy version
-      placeholder: 0.1.8
+      description: Output of `meetproxy version`, or the imported module version
+      placeholder: dev
     validations:
       required: true
   - type: dropdown
@@ -46,14 +51,16 @@ body:
     validations:
       required: true
   - type: textarea
-    id: status
+    id: result
     attributes:
-      label: /meetproxy:status output
+      label: Result or receipt
+      description: Optional redacted state, recorded flag and error category. Do not include tokens, real message bodies, window contents or private paths
       render: text
     validations:
-      required: true
+      required: false
   - type: textarea
     id: logs
     attributes:
       label: Anything else
+      description: A redacted error category or neutral reproduction, without private application data
       render: text

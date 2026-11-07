@@ -1,9 +1,8 @@
 {
   "name": "meetproxy",
-  "version": "0.1.18",
-  "author": {
-    "name": "jeon-jihyeon"
-  },
-  "repository": "https://github.com/jeon-jihyeon/meetproxy",
-  "license": "MIT"
+  "version": "0.2.0",
+  "description": "Generic app control with consumer-owned approvals and recovery",
+  "author": { "name": "jeon-jihyeon" },
+  "license": "MIT",
+  "repository": "https://github.com/jeon-jihyeon/meetproxy"
 }

@@ -1,19 +1,23 @@
 name: Feature request
+description: A reusable control or source handoff capability
 labels: [enhancement]
 body:
   - type: textarea
     id: problem
     attributes:
-      label: What you are carrying by hand today
+      label: Missing capability
+      description: The generic observation, control or durable source handoff that is missing
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
       label: What meetproxy should do
+      description: The caller's input, expected result and recovery behavior. Your application owns workflow policy and approval
     validations:
       required: true
   - type: textarea
     id: alternatives
     attributes:
       label: What you tried
+      description: Existing public APIs, adapters or other tools you considered

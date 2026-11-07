@@ -17,7 +17,6 @@ builds:
       - amd64
       - arm64
 
-# The launcher downloads these from the release tagged v<plugin.json version>
 archives:
   - formats: [tar.gz]
     name_template: "meetproxy_{{ .Os }}_{{ .Arch }}"
@@ -40,20 +39,7 @@ checksum:
   name_template: checksums.txt
 
 changelog:
-  use: github
-  sort: asc
-  filters:
-    exclude:
-      - "^Merge"
-  groups:
-    - title: Features
-      regexp: '^.*?feat(\(.+\))??!?:.+$'
-      order: 0
-    - title: Fixes
-      regexp: '^.*?fix(\(.+\))??!?:.+$'
-      order: 1
-    - title: Others
-      order: 999
+  disable: true
 
 # Unpublished until the uploaded bytes match the checked local artifacts
 release:

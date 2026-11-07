@@ -1,14 +1,9 @@
 name: test
 
 on:
+  push:
+    branches: [main]
   pull_request:
-    # Docs alone skip the run, but every skill and reference under plugin is still validated
-    # A positive pattern after a negative one includes the path again
-    paths:
-      - "**"
-      - "!**.md"
-      - "plugin/**"
-      - ".claude-plugin/**"
   workflow_dispatch:
     inputs:
       macos:
@@ -28,7 +23,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS minutes cost ten Linux minutes, so macOS runs only on request
         os: ${{ inputs.macos && fromJSON('["ubuntu-latest","macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
@@ -37,17 +31,22 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.10"
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 22
-      - name: gofmt
+          go-version-file: go.mod
+      - name: Check formatting
         if: runner.os == 'Linux'
-        run: test -z "$(gofmt -l .)"
-      - name: go vet
+        shell: python
+        run: |
+          import subprocess
+          import sys
+          output = subprocess.check_output(["gofmt", "-l", "."], text=True)
+          print(output, end="")
+          sys.exit(bool(output.strip()))
+      - name: Build
+        run: go build ./...
+      - name: Vet
         if: runner.os == 'Linux'
         run: go vet ./...
-      - name: Release artifact verifier tests
+      - name: Test release verifier
         if: runner.os == 'Linux'
         run: python3 -m unittest discover -s .github/scripts -p 'test_verify_release.py'
         env:
@@ -55,18 +54,9 @@ jobs:
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         if: runner.os == 'Linux'
         with:
-          version: v2.14
-      - name: go test
-        run: go test -race -coverprofile=cover.out ./...
-      - name: Coverage summary
-        if: runner.os == 'Linux'
-        run: |
-          {
-            echo '### Coverage'
-            echo '```'
-            go tool cover -func=cover.out | tail -n 25
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          version: v2.11.4
+      - name: Test with race detector
+        run: go test -race -count=1 ./...
 
   plugin:
     runs-on: ubuntu-latest
@@ -77,7 +67,6 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      # validate needs no login
       - name: Install Claude Code
         run: npm install --global @anthropic-ai/claude-code@2.1.290
       - name: Validate the plugin

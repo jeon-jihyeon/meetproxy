@@ -1,47 +1,26 @@
-# Contributing to meetproxy
+# Contributing
 
-Thanks for helping. Bug reports, fixes and new sources are all welcome. For a security problem use the private reporting link in [SECURITY.md](SECURITY.md) instead of an issue.
+Use Go 1.26.10 or newer. Keep application inputs and results public, domain rules private under `internal`, and command handlers limited to parsing and rendering.
 
-## What you need
-
-- Go at the version in [go.mod](../go.mod)
-- Claude Code at the version the README names, for loading the plugin and `claude plugin validate`
-- [golangci-lint](https://golangci-lint.run) v2, the version CI pins in [test.yml](workflows/test.yml)
-
-## Dev loop
-
-Load the plugin straight from the source tree.
+Run these checks from the repository:
 
 ```sh
-claude --plugin-dir ./plugin
-```
-
-Data of a `--plugin-dir` session lives in `~/.claude/plugins/data/meetproxy-inline`, apart from an installed copy.
-
-## Checks
-
-Run these before opening a pull request. CI runs the same on Linux, and on macOS too when a maintainer dispatches it with `macos`.
-
-```sh
-gofmt -l .
+go test -race -count=1 ./...
 go vet ./...
 golangci-lint run ./...
-go test -race ./...
 claude plugin validate plugin
 claude plugin validate .
+python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 ```
 
-- `gofmt -l .` prints nothing when every file is formatted
-- `claude plugin validate` needs no login
+The default desktop adapter needs a trusted Cua daemon for real app tests. Unit fixtures don't establish desktop success. Use an owned test window, never a login window or another person's content.
 
-## Commits and pull requests
+The consuming application owns approval, target selection and completion checks. Preserve unknown operation outcomes and never use a timeout as permission to repeat an effect.
 
-- `type` is one of `feat`, `fix`, `docs`, `test`, `refactor`, `chore` or `ci`
-- Release notes group `feat` under Features and `fix` under Fixes, and leave merge commits out
-- Keep one change per pull request and fill in the template
+Publish only neutral examples and synthetic test data. Keep private notes, credentials, run output and local paths out of the repository.
 
-All public text, including commits, comments and docs, is in English.
+Module tags support versioned Go imports. A tag push starts the draft release workflow. The read-only build job checks the clean annotated source, runs GoReleaser without publishing and verifies the archives and binaries. It extracts only the matching tag's CHANGELOG section for release notes and stops if that section is missing, duplicated or empty.
 
-## Releases
+The build job passes the four checked archives, checksum file, release notes and byte-checking Python script from the same source through an artifact to the upload job. Only that job has repository write permission. It attaches only the four archives and checksum file to a draft Release, then downloads those files with `gh` and compares their bytes and SHA256 hashes against the checked build output. Source and binary checks stay in the read-only build job.
 
-Update the manifest version and changelog, then follow [Verify a release](../README.md#verify-a-release) from the reviewed final clean commit. That procedure builds locally, verifies the archives, uploads a draft, compares authenticated downloads, publishes and verifies the downloads again. The optional manual workflow builds and validates artifacts only. Local releases have no GitHub build provenance or attestations.
+The main push and pull request workflow runs the repository checks. The release workflow doesn't publish a draft automatically. A maintainer reviews the verification results and publishes it manually. A failed build, upload or verification isn't a successful public release. Existing releases aren't overwritten or deleted automatically.
